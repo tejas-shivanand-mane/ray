@@ -247,3 +247,15 @@ tag-mapping.json
 
 # Claude files
 /.claude/
+# Wheels anywhere in repo
+**/*.whl
+# Docker build artifacts
+/docker/*.whl
+/docker/*.so
+# Node modules
+**/node_modules/
+# Prometheus
+prometheus-*.tar.gz
+prometheus-*/
+# Test data
+**/tests/data/**/*.parquet
