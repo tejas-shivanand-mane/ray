@@ -1,0 +1,46 @@
+services:
+  ray-head:
+    image: ray-custom:latest
+    container_name: ray-head
+    network_mode: host
+    shm_size: 8gb
+    volumes:
+      - /home/tejas/work/ray/python/ray:/home/ray/anaconda3/lib/python3.10/site-packages/ray
+      - /home/tejas/work/ray/docker:/startup
+      - /tmp/ray-head:/tmp/ray
+    environment:
+      - RAY_BACKEND_LOG_LEVEL=info
+      - RAY_DEDUP_LOGS=0
+    command: bash /startup/head.sh
+
+  ray-worker-a:
+    image: ray-custom:latest
+    container_name: ray-worker-a
+    network_mode: host
+    shm_size: 8gb
+    depends_on:
+      - ray-head
+    volumes:
+      - /home/tejas/work/ray/python/ray:/home/ray/anaconda3/lib/python3.10/site-packages/ray
+      - /home/tejas/work/ray/docker:/startup
+      - /tmp/ray-worker-a:/tmp/ray
+    environment:
+      - RAY_BACKEND_LOG_LEVEL=info
+      - RAY_DEDUP_LOGS=0
+    command: bash /startup/worker_a.sh
+
+  ray-worker-b:
+    image: ray-custom:latest
+    container_name: ray-worker-b
+    network_mode: host
+    shm_size: 8gb
+    depends_on:
+      - ray-head
+    volumes:
+      - /home/tejas/work/ray/python/ray:/home/ray/anaconda3/lib/python3.10/site-packages/ray
+      - /home/tejas/work/ray/docker:/startup
+      - /tmp/ray-worker-b:/tmp/ray
+    environment:
+      - RAY_BACKEND_LOG_LEVEL=info
+      - RAY_DEDUP_LOGS=0
+    command: bash /startup/worker_b.sh
