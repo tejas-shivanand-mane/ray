@@ -125,6 +125,8 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     in_memory_store_->Put(RayObject(data_buffer, metadata_buffer, inlined_refs),
                           object_id,
                           reference_counter_->HasReference(object_id));
+    // Prune gossip table — object resolved, no longer needs recovery
+    if (gossip_prune_callback_) gossip_prune_callback_(object_id);
   }
 }
 

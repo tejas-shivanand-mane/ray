@@ -595,13 +595,21 @@ std::shared_ptr<CoreWorker> CoreWorkerProcessImpl::CreateCoreWorker(
         }
         return core_worker->TryGossipRecovery(object_id);
       };
+  auto gossip_prune_callback =
+      [this](const ObjectID &object_id) {
+        auto core_worker = GetCoreWorker();
+        if (!core_worker) return;
+        absl::MutexLock lock(&core_worker->gossip_mu_);
+        core_worker->gossip_table_.erase(object_id);
+      };
   auto future_resolver =
       std::make_unique<FutureResolver>(memory_store,
                                        reference_counter,
                                        std::move(report_locality_data_callback),
                                        core_worker_client_pool,
                                        rpc_address,
-                                       std::move(gossip_recovery_callback));
+                                       std::move(gossip_recovery_callback),
+                                       std::move(gossip_prune_callback));
 
   auto actor_manager = std::make_unique<ActorManager>(
       gcs_client, *actor_task_submitter, *reference_counter);

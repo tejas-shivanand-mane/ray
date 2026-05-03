@@ -3458,10 +3458,17 @@ void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
                   << " same_worker=" << (caller_addr.worker_id() == rpc_address_.worker_id());
     if (!caller_addr.worker_id().empty() &&
         caller_addr.worker_id() != rpc_address_.worker_id()) {
+      // Only send THIS task's entries, not the entire table
       absl::flat_hash_map<ObjectID, rpc::TaskSpec> table_copy;
       {
         absl::MutexLock lock(&gossip_mu_);
-        table_copy = gossip_table_;
+        for (uint64_t i = 0; i < task_spec.num_returns(); i++) {
+          const auto obj_id = ObjectID::FromIndex(task_id, i + 1);
+          auto it = gossip_table_.find(obj_id);
+          if (it != gossip_table_.end()) {
+            table_copy[obj_id] = it->second;
+          }
+        }
       }
       RAY_LOG(INFO) << "GOSSIP_CONNECTING: connecting to caller "
                     << caller_addr.ip_address() << ":" << caller_addr.port();

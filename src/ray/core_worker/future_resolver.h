@@ -38,13 +38,15 @@ class FutureResolver {
                  ReportLocalityDataCallback report_locality_data_callback,
                  std::shared_ptr<rpc::CoreWorkerClientPool> core_worker_client_pool,
                  rpc::Address rpc_address,
-                 std::function<bool(const ObjectID &)> gossip_recovery_callback = nullptr)
+                 std::function<bool(const ObjectID &)> gossip_recovery_callback = nullptr,
+                 std::function<void(const ObjectID &)> gossip_prune_callback = nullptr)
       : in_memory_store_(std::move(store)),
         reference_counter_(std::move(ref_counter)),
         report_locality_data_callback_(std::move(report_locality_data_callback)),
         owner_clients_(std::move(core_worker_client_pool)),
         rpc_address_(std::move(rpc_address)),
-        gossip_recovery_callback_(std::move(gossip_recovery_callback)) {}
+        gossip_recovery_callback_(std::move(gossip_recovery_callback)),
+        gossip_prune_callback_(std::move(gossip_prune_callback)) {}
 
   /// Resolve the value for a future. This will periodically contact the given
   /// owner until the owner dies or the owner has finished creating the object.
@@ -88,6 +90,7 @@ class FutureResolver {
   /// Gossip recovery callback — checks gossip table before marking object failed.
   /// Returns true if recovery was triggered, false if no gossip entry found.
   std::function<bool(const ObjectID &)> gossip_recovery_callback_;
+  std::function<void(const ObjectID &)> gossip_prune_callback_;
 };
 
 }  // namespace core
