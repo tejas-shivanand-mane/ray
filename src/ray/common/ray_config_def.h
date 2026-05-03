@@ -162,7 +162,7 @@ RAY_CONFIG(size_t, free_objects_batch_size, 100)
 RAY_CONFIG(bool, lineage_pinning_enabled, true)
 // Enable gossip-based owner failure recovery.
 // Set to false to disable gossip recovery and observe baseline OwnerDiedError.
-RAY_CONFIG(bool, gossip_recovery_enabled, false)
+RAY_CONFIG(bool, gossip_recovery_enabled, true)
 
 /// Maximum amount of lineage to keep in bytes. This includes the specs of all
 /// tasks that have previously already finished but that may be retried again.

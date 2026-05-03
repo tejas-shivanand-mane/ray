@@ -50,6 +50,8 @@
 using json = nlohmann::json;
 using MessageType = ray::protocol::MessageType;
 
+bool SET_gossip_recovery_enabled = true;
+
 namespace ray::core {
 
 namespace {
@@ -347,7 +349,8 @@ CoreWorker::CoreWorker(
       lease_request_rate_limiter_(std::move(lease_request_rate_limiter)),
       normal_task_submitter_(std::move(normal_task_submitter)),
       object_recovery_manager_(std::move(object_recovery_manager)),
-      gossip_recovery_enabled_(RayConfig::instance().gossip_recovery_enabled()),
+      gossip_recovery_enabled_(SET_gossip_recovery_enabled),
+      // gossip_recovery_enabled_(RayConfig::instance().gossip_recovery_enabled()),
       actor_manager_(std::move(actor_manager)),
       actor_id_(ActorID::Nil()),
       task_queue_length_(0),
@@ -498,56 +501,56 @@ CoreWorker::CoreWorker(
       [this] { InternalHeartbeat(); },
       RayConfig::instance().core_worker_internal_heartbeat_ms(),
       "CoreWorker.InternalHeartbeat");
-  periodical_runner_->RunFnPeriodically(
-      [this] {
-        // GOSSIP PROPAGATE: send stored gossip entries to all connected peers
-        if (!gossip_recovery_enabled_) return;
-        absl::flat_hash_map<ObjectID, rpc::TaskSpec> table_copy;
-        {
-          absl::MutexLock lock(&gossip_mu_);
-          table_copy = gossip_table_;
-        }
-        if (table_copy.empty()) return;
-        const auto peers =
-            core_worker_client_pool_->GetAllConnectedAddresses();
-        RAY_LOG(INFO) << "GOSSIP_PROPAGATE: table_size="
-                      << table_copy.size()
-                      << " peers=" << peers.size();
-        for (const auto &peer_addr : peers) {
-          RAY_LOG(INFO) << "GOSSIP_PEER: "
-                        << peer_addr.ip_address()
-                        << ":" << peer_addr.port()
-                        << " worker=" << peer_addr.worker_id().substr(0,8);
-          if (peer_addr.worker_id() == rpc_address_.worker_id()) {
-            continue;
-          }
-          for (const auto &[obj_id, task_spec] : table_copy) {
-            rpc::GossipFutureRequest gossip_req;
-            gossip_req.set_object_id(obj_id.Binary());
-            *gossip_req.mutable_task_spec() = task_spec;
-            gossip_req.set_owner_worker_id(rpc_address_.worker_id());
-            *gossip_req.mutable_owner_address() = rpc_address_;
-            auto conn = core_worker_client_pool_->GetOrConnect(peer_addr);
-            conn->GossipFuture(
-                gossip_req,
-                [obj_id](const Status &status,
-                         const rpc::GossipFutureReply &reply) {
-                  if (status.ok()) {
-                    RAY_LOG(INFO).WithField(obj_id)
-                        << "GOSSIP_SENT: propagated gossip for "
-                        << obj_id.Hex();
-                  } else {
-                    RAY_LOG(INFO).WithField(obj_id)
-                        << "GOSSIP_SEND_FAILED: "
-                        << status.ToString()
-                        << " for " << obj_id.Hex();
-                  }
-                });
-          }
-        }
-      },
-      1000,  // every 1 second
-      "CoreWorker.GossipPropagate");
+  // periodical_runner_->RunFnPeriodically(
+  //     [this] {
+  //       // GOSSIP PROPAGATE: send stored gossip entries to all connected peers
+  //       if (!gossip_recovery_enabled_) return;
+  //       absl::flat_hash_map<ObjectID, rpc::TaskSpec> table_copy;
+  //       {
+  //         absl::MutexLock lock(&gossip_mu_);
+  //         table_copy = gossip_table_;
+  //       }
+  //       if (table_copy.empty()) return;
+  //       const auto peers =
+  //           core_worker_client_pool_->GetAllConnectedAddresses();
+  //       RAY_LOG(INFO) << "GOSSIP_PROPAGATE: table_size="
+  //                     << table_copy.size()
+  //                     << " peers=" << peers.size();
+  //       for (const auto &peer_addr : peers) {
+  //         RAY_LOG(INFO) << "GOSSIP_PEER: "
+  //                       << peer_addr.ip_address()
+  //                       << ":" << peer_addr.port()
+  //                       << " worker=" << peer_addr.worker_id().substr(0,8);
+  //         if (peer_addr.worker_id() == rpc_address_.worker_id()) {
+  //           continue;
+  //         }
+  //         for (const auto &[obj_id, task_spec] : table_copy) {
+  //           rpc::GossipFutureRequest gossip_req;
+  //           gossip_req.set_object_id(obj_id.Binary());
+  //           *gossip_req.mutable_task_spec() = task_spec;
+  //           gossip_req.set_owner_worker_id(rpc_address_.worker_id());
+  //           *gossip_req.mutable_owner_address() = rpc_address_;
+  //           auto conn = core_worker_client_pool_->GetOrConnect(peer_addr);
+  //           conn->GossipFuture(
+  //               gossip_req,
+  //               [obj_id](const Status &status,
+  //                        const rpc::GossipFutureReply &reply) {
+  //                 if (status.ok()) {
+  //                   RAY_LOG(INFO).WithField(obj_id)
+  //                       << "GOSSIP_SENT: propagated gossip for "
+  //                       << obj_id.Hex();
+  //                 } else {
+  //                   RAY_LOG(INFO).WithField(obj_id)
+  //                       << "GOSSIP_SEND_FAILED: "
+  //                       << status.ToString()
+  //                       << " for " << obj_id.Hex();
+  //                 }
+  //               });
+  //         }
+  //       }
+  //     },
+  //     1000,  // every 1 second
+  //     "CoreWorker.GossipPropagate");
 
   periodical_runner_->RunFnPeriodically(
       [this] { RecordMetrics(); },
@@ -2113,45 +2116,12 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   }
   
   // Capture refs for gossip send after task submission
-  auto gossip_refs = returned_refs;
   io_service_.post(
-      [this, task_spec = std::move(task_spec), gossip_refs]() mutable {
-        normal_task_submitter_->SubmitTask(std::move(task_spec));
-        // GOSSIP SEND: after task submitted, worker connections exist
-        if (!gossip_recovery_enabled_) return;
-        for (const auto &ref : gossip_refs) {
-          const auto obj_id = ObjectID::FromBinary(ref.object_id());
-          rpc::GossipFutureRequest gossip_req;
-          {
-            absl::MutexLock lock(&gossip_mu_);
-            auto it = gossip_table_.find(obj_id);
-            if (it == gossip_table_.end()) continue;
-            gossip_req.set_object_id(obj_id.Binary());
-            *gossip_req.mutable_task_spec() = it->second;
-            gossip_req.set_owner_worker_id(rpc_address_.worker_id());
-            *gossip_req.mutable_owner_address() = rpc_address_;
-          }
-          const auto peers =
-              core_worker_client_pool_->GetAllConnectedAddresses();
-          for (const auto &peer_addr : peers) {
-            if (peer_addr.worker_id() == rpc_address_.worker_id()) {
-              continue;
-            }
-            auto conn = core_worker_client_pool_->GetOrConnect(peer_addr);
-            conn->GossipFuture(
-                gossip_req,
-                [obj_id](const Status &status,
-                         const rpc::GossipFutureReply &reply) {
-                  if (status.ok()) {
-                    RAY_LOG(INFO).WithField(obj_id)
-                        << "GOSSIP_SENT: sent gossip to peer for "
-                        << obj_id.Hex();
-                  }
-                });
-          }
-        }
-      },
-      "CoreWorker.SubmitTask");
+    [this, task_spec = std::move(task_spec)]() mutable {
+      normal_task_submitter_->SubmitTask(std::move(task_spec));
+    },
+    "CoreWorker.SubmitTask");
+
   return returned_refs;
 }
 
