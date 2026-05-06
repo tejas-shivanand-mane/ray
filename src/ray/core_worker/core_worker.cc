@@ -3438,65 +3438,68 @@ void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
     const auto &task_spec = request.task_spec();
     const auto task_id = TaskID::FromBinary(task_spec.task_id());
     if (gossip_recovery_enabled_) {
-      absl::MutexLock lock(&gossip_mu_);
-      for (uint64_t i = 0; i < task_spec.num_returns(); i++) {
-        const auto obj_id = ObjectID::FromIndex(task_id, i + 1);
-        gossip_table_[obj_id] = task_spec;
-        RAY_LOG(INFO).WithField(obj_id)
-            << "GOSSIP_STORE_EXEC: stored task spec on executor "
-            << obj_id.Hex()
-            << " table_size=" << gossip_table_.size();
-      }
+      const auto task_spec_copy = task_spec;
+      const auto task_id_copy = task_id;
+      io_service_.post(
+          [this, task_spec_copy, task_id_copy]() {
+            absl::MutexLock lock(&gossip_mu_);
+            for (uint64_t i = 0; i < task_spec_copy.num_returns(); i++) {
+              const auto obj_id = ObjectID::FromIndex(task_id_copy, i + 1);
+              gossip_table_[obj_id] = task_spec_copy;
+              RAY_LOG(INFO).WithField(obj_id)
+                  << "GOSSIP_STORE_EXEC: stored task spec on executor "
+                  << obj_id.Hex()
+                  << " table_size=" << gossip_table_.size();
+            }
+          },
+          "CoreWorker.GossipStoreExec");
     }
-    // Send gossip for ALL stored entries to the caller (driver/owner)
+    // Send gossip to caller asynchronously — off the task execution hot path
     if (gossip_recovery_enabled_) {
-    const auto &caller_addr = task_spec.caller_address();
-    RAY_LOG(INFO) << "GOSSIP_CALLER: "
-                  << caller_addr.ip_address() << ":" << caller_addr.port()
-                  << " worker_id_len=" << caller_addr.worker_id().size()
-                  << " node_id_len=" << caller_addr.node_id().size()
-                  << " same_worker=" << (caller_addr.worker_id() == rpc_address_.worker_id());
-    if (!caller_addr.worker_id().empty() &&
-        caller_addr.worker_id() != rpc_address_.worker_id()) {
-      // Only send THIS task's entries, not the entire table
-      absl::flat_hash_map<ObjectID, rpc::TaskSpec> table_copy;
-      {
-        absl::MutexLock lock(&gossip_mu_);
-        for (uint64_t i = 0; i < task_spec.num_returns(); i++) {
-          const auto obj_id = ObjectID::FromIndex(task_id, i + 1);
-          auto it = gossip_table_.find(obj_id);
-          if (it != gossip_table_.end()) {
-            table_copy[obj_id] = it->second;
+      const auto caller_addr = task_spec.caller_address();
+      const auto num_returns = task_spec.num_returns();
+      if (!caller_addr.worker_id().empty() &&
+          caller_addr.worker_id() != rpc_address_.worker_id()) {
+        // Capture entries for this task only
+        absl::flat_hash_map<ObjectID, rpc::TaskSpec> table_copy;
+        {
+          absl::MutexLock lock(&gossip_mu_);
+          for (uint64_t i = 0; i < num_returns; i++) {
+            const auto obj_id = ObjectID::FromIndex(task_id, i + 1);
+            auto it = gossip_table_.find(obj_id);
+            if (it != gossip_table_.end()) {
+              table_copy[obj_id] = it->second;
+            }
           }
         }
-      }
-      RAY_LOG(INFO) << "GOSSIP_CONNECTING: connecting to caller "
-                    << caller_addr.ip_address() << ":" << caller_addr.port();
-      auto caller_conn = core_worker_client_pool_->GetOrConnect(caller_addr);
-      RAY_LOG(INFO) << "GOSSIP_CONNECTED: connected to caller, sending "
-                    << table_copy.size() << " entries";
-      for (const auto &[obj_id, stored_spec] : table_copy) {
-        rpc::GossipFutureRequest gossip_req;
-        gossip_req.set_object_id(obj_id.Binary());
-        *gossip_req.mutable_task_spec() = stored_spec;
-        gossip_req.set_owner_worker_id(rpc_address_.worker_id());
-        *gossip_req.mutable_owner_address() = rpc_address_;
-        caller_conn->GossipFuture(
-            gossip_req,
-            [obj_id](const Status &gossip_status,
-                     const rpc::GossipFutureReply & /*gossip_reply*/) {
-              if (gossip_status.ok()) {
-                RAY_LOG(INFO).WithField(obj_id)
-                    << "GOSSIP_SENT: sent to caller for "
-                    << obj_id.Hex();
-              } else {
-                RAY_LOG(INFO).WithField(obj_id)
-                    << "GOSSIP_SEND_FAILED: to caller: "
-                    << gossip_status.ToString();
+        io_service_.post(
+            [this, caller_addr, table_copy = std::move(table_copy)]() {
+              auto caller_conn =
+                  core_worker_client_pool_->GetOrConnect(caller_addr);
+              for (const auto &[obj_id, stored_spec] : table_copy) {
+                rpc::GossipFutureRequest gossip_req;
+                gossip_req.set_object_id(obj_id.Binary());
+                *gossip_req.mutable_task_spec() = stored_spec;
+                gossip_req.set_owner_worker_id(rpc_address_.worker_id());
+                *gossip_req.mutable_owner_address() = rpc_address_;
+                caller_conn->GossipFuture(
+                    gossip_req,
+                    [obj_id](const Status &gossip_status,
+                             const rpc::GossipFutureReply &) {
+                      if (gossip_status.ok()) {
+                        RAY_LOG(INFO).WithField(obj_id)
+                            << "GOSSIP_SENT: sent to caller for "
+                            << obj_id.Hex();
+                      } else {
+                        RAY_LOG(INFO).WithField(obj_id)
+                            << "GOSSIP_SEND_FAILED: to caller: "
+                            << gossip_status.ToString();
+                      }
+                    });
               }
-            });
+            },
+            "CoreWorker.GossipSend");
       }
-    }
     }  // end gossip_recovery_enabled_
   }
   // Set actor info in the worker context.
