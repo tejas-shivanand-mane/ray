@@ -1,3 +1,4 @@
+conda init
 conda activate ray-dev
 cd ~/work/ray
 git pull
