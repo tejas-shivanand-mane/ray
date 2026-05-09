@@ -8,7 +8,7 @@ import datetime
 import ray
 import numpy as np
 
-NODES_PER_DRIVER = 5
+NODES_PER_DRIVER = 4
 CHAIN_LENGTH = 10
 TASKS_PER_NODE_PER_BATCH = 2000
 
