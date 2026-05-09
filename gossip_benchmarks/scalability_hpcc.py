@@ -9,8 +9,8 @@ import ray
 import numpy as np
 
 NODES_PER_DRIVER = 4
-CHAIN_LENGTH = 10
-TASKS_PER_NODE_PER_BATCH = 2000
+CHAIN_LENGTH = 2
+TASKS_PER_NODE_PER_BATCH = 200
 
 OWNERSHIP = "ownership"
 SMALL_ARG = "small"
@@ -39,7 +39,7 @@ def get_local_ip_address():
         s.close()
 
 
-def timeit(fn, trials=3, multiplier=1):
+def timeit(fn, trials=1, multiplier=1):
     # Warmup
     start = time.time()
     fn()
