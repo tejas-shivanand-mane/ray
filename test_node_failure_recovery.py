@@ -42,7 +42,7 @@ print(f"Got result_ref: {result_ref}")
 
 # Step 2: signal kill immediately — generate_data still running
 print("Step 2: signaling docker stop worker_a immediately...")
-with open("/tmp/ready_to_kill.txt", "w") as f:
+with open("/rhome/tmane002/ready_to_kill.txt", "w") as f:
     f.write("kill")
 print("Waiting 10s for worker_a container to die...")
 time.sleep(10)
