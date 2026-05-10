@@ -3,7 +3,6 @@ import json
 import numpy as np
 import threading
 from collections import defaultdict
-from ray import profiling
 import os
 import csv
 
