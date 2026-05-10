@@ -9,8 +9,8 @@ import ray
 import numpy as np
 
 NODES_PER_DRIVER = 4
-CHAIN_LENGTH = 2
-TASKS_PER_NODE_PER_BATCH = 2000
+CHAIN_LENGTH = 1
+TASKS_PER_NODE_PER_BATCH = 800
 
 OWNERSHIP = "ownership"
 SMALL_ARG = "small"
