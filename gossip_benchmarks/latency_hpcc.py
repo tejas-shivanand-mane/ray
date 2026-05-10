@@ -1,4 +1,3 @@
-import cv2
 import time
 import json
 import numpy as np
