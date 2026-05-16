@@ -132,7 +132,7 @@ def main(opts):
 
     use_small = args.arg_size == "small"
 
-    @ray.remote(num_cpus=4 if not args.colocated else 0)
+    @ray.remote(num_cpus=2 if not args.colocated else 0)
     class Driver:
         def __init__(self, node_ids):
             self.node_ids = node_ids
