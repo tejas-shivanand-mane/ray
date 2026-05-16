@@ -104,7 +104,14 @@ def do_batch(use_small, node_ids, args=None):
 def main(opts):
     ray.init(address="auto")
 
+    # Reduce batch size for large objects to avoid OOM
+    global TASKS_PER_NODE_PER_BATCH
+    if args.arg_size == "large":
+        TASKS_PER_NODE_PER_BATCH = 200
+        print(f"Large objects: reduced TASKS_PER_NODE_PER_BATCH to {TASKS_PER_NODE_PER_BATCH}")
+
     local_ip = get_local_ip_address()
+
     print(f"Driver local IP: {local_ip}")
 
     node_ids = get_node_ids(local_ip)
