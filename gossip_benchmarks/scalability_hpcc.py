@@ -1,16 +1,14 @@
 import argparse
-import json
 import os
 import csv
 import socket
 import time
-import datetime
 import ray
 import numpy as np
 
 NODES_PER_DRIVER = 4
-CHAIN_LENGTH = 1
-TASKS_PER_NODE_PER_BATCH = 800
+CHAIN_LENGTH = 2
+TASKS_PER_NODE_PER_BATCH = 2000
 
 OWNERSHIP = "ownership"
 SMALL_ARG = "small"
@@ -30,7 +28,6 @@ def get_node_ids(local_ip):
 
 
 def get_local_ip_address():
-    # HPCC-compatible IP detection
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -39,11 +36,16 @@ def get_local_ip_address():
         s.close()
 
 
-def timeit(fn, trials=1, multiplier=1):
-    # Warmup
-    start = time.time()
-    fn()
-    print("Warmup finished in", time.time() - start)
+def timeit(fn, trials=5, multiplier=1):
+    # Two warmup runs to stabilize JIT/caching
+    for w in range(2):
+        start = time.time()
+        fn()
+        elapsed = time.time() - start
+        print(f"Warmup {w+1} finished in {elapsed:.2f}s")
+        if w == 0 and elapsed > 30:
+            print("Warmup took >30s, skipping second warmup")
+            break
 
     stats = []
     for i in range(trials):
@@ -54,24 +56,27 @@ def timeit(fn, trials=1, multiplier=1):
         throughput = multiplier / elapsed
         print(f"Trial {i+1}/{trials}: {elapsed:.2f}s, throughput: {throughput:.1f} tasks/s")
         stats.append(throughput)
+        time.sleep(2)  # let object store settle between trials
 
-    print(f"Avg throughput: {round(np.mean(stats), 2)} +- {round(np.std(stats), 2)} tasks/s")
+    median_tp = float(np.median(stats))
+    std_tp    = float(np.std(stats))
+    print(f"Median throughput: {median_tp:.2f} +- {std_tp:.2f} tasks/s")
 
     if args.output:
         file_exists = os.path.exists(args.output)
         with open(args.output, 'a+') as csvfile:
-            fieldnames = ['system', 'arg_size', 'colocated', 'num_nodes', 'throughput']
+            fieldnames = ['system', 'arg_size', 'colocated', 'num_nodes', 'throughput', 'std']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             if not file_exists:
                 writer.writeheader()
-            for throughput in stats:
-                writer.writerow({
-                    'system': args.system,
-                    'arg_size': args.arg_size,
-                    'colocated': args.colocated,
-                    'num_nodes': args.num_nodes,
-                    'throughput': throughput,
-                })
+            writer.writerow({
+                'system': args.system,
+                'arg_size': args.arg_size,
+                'colocated': args.colocated,
+                'num_nodes': args.num_nodes,
+                'throughput': median_tp,
+                'std': std_tp,
+            })
 
 
 @ray.remote
@@ -87,7 +92,6 @@ def f_large(*args):
 def do_batch(use_small, node_ids, args=None):
     if args is None:
         args = {node_id: None for node_id in node_ids}
-
     f = f_small if use_small else f_large
     results = {}
     for node_id in node_ids:
@@ -106,7 +110,6 @@ def main(opts):
     node_ids = get_node_ids(local_ip)
     target_nodes = args.num_nodes
 
-    # Wait for enough worker nodes
     wait_count = 0
     while len(node_ids) < target_nodes:
         print(f"{len(node_ids)} / {target_nodes} worker nodes joined, waiting 5s...")
@@ -114,8 +117,7 @@ def main(opts):
         node_ids = get_node_ids(local_ip)
         wait_count += 1
         if wait_count > 60:
-            print(f"Timeout waiting for nodes. Have {len(node_ids)}, need {target_nodes}")
-            raise RuntimeError("Not enough nodes joined")
+            raise RuntimeError(f"Timeout: have {len(node_ids)}, need {target_nodes}")
 
     print(f"All {len(node_ids)} worker nodes joined. Starting benchmark...")
     time.sleep(5)
@@ -170,9 +172,7 @@ if __name__ == "__main__":
     parser.add_argument("--system", type=str, default="ownership")
     parser.add_argument("--output", type=str, required=False)
     args = parser.parse_args()
-
     args.colocated = args.colocated.lower() == "true"
-
     print(f"Running: system={args.system}, arg_size={args.arg_size}, "
           f"num_nodes={args.num_nodes}, colocated={args.colocated}")
     main(args)
