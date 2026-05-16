@@ -56,7 +56,7 @@ def timeit(fn, trials=5, multiplier=1):
         throughput = multiplier / elapsed
         print(f"Trial {i+1}/{trials}: {elapsed:.2f}s, throughput: {throughput:.1f} tasks/s")
         stats.append(throughput)
-        time.sleep(2)  # let object store settle between trials
+        time.sleep(5 if args.colocated else 2)  # let object store settle between trials
 
     median_tp = float(np.median(stats))
     std_tp    = float(np.std(stats))
@@ -167,7 +167,7 @@ def main(opts):
 
     timeit(
         lambda: ray.get([d.do_batch.remote() for d in drivers]),
-        multiplier=len(worker_node_ids) * TASKS_PER_NODE_PER_BATCH * CHAIN_LENGTH
+        multiplier=len(worker_node_ids) * TASKS_PER_NODE_PER_BATCH * CHAIN_LENGTH, trials=7 if args.colocated else 5
     )
 
 
