@@ -9,7 +9,7 @@ import csv
 import ray
 import ray.cluster_utils
 
-NUM_ITERATIONS = 1000
+NUM_ITERATIONS = 3000
 
 OWNERSHIP = "ownership"
 BY_VALUE = "by_value"
