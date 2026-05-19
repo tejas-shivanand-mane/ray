@@ -10,7 +10,7 @@ os.environ["RAY_BACKEND_LOG_LEVEL"] = "warning"
 os.environ["RAY_DEDUP_LOGS"] = "0"
 
 SIGNAL_FILE = "/rhome/tmane002/ready_to_kill.txt"
-RESULT_FILE = "/rhome/tmane002/work/ray/gossip_benchmarks/throughput_vs_time.csv"
+RESULT_FILE = "/rhome/tmane002/results/throughput_vs_time.csv"
 
 # ── Ray remote functions ──────────────────────────────────────────────────────
 
