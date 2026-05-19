@@ -105,11 +105,11 @@ def main():
     seed = 0
     kill_signaled = False
 
-    while time.time() - start < 60:  # run for 60s total
+    while time.time() - start < 120:  # run for 60s total
         elapsed = time.time() - start
 
-        # Signal kill at 15s
-        if elapsed >= 15 and not kill_signaled:
+        # Signal kill at 60s
+        if elapsed >= 60 and not kill_signaled:
             print(f"\nPhase 2: signaling kill at t={elapsed:.1f}s...")
             with open(SIGNAL_FILE, "w") as f:
                 f.write("kill")
