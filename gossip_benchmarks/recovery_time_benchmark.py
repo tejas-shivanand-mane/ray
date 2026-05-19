@@ -8,35 +8,117 @@ import argparse
 os.environ["RAY_BACKEND_LOG_LEVEL"] = "info"
 os.environ["RAY_DEDUP_LOGS"] = "0"
 
-SIGNAL_FILE = "/rhome/tmane002/ready_to_kill.txt"
+SIGNAL_FILE    = "/rhome/tmane002/ready_to_kill.txt"
+RESTARTED_FILE = "/rhome/tmane002/recon_restarted.txt"
 
 
-@ray.remote(max_retries=0)
-def generate_data(seed):
-    print(f"[generate_data] EXECUTING seed={seed} pid={os.getpid()}")
-    time.sleep(20)  # Slow — still running when node dies
-    np.random.seed(seed)
-    return np.random.rand(100, 100)
+def make_remote_functions(task_duration):
+    """Create remote functions with the given task duration."""
+
+    @ray.remote(max_retries=0)
+    def generate_data(seed):
+        print(f"[generate_data] EXECUTING seed={seed} "
+              f"pid={os.getpid()} duration={task_duration}s")
+        time.sleep(task_duration)
+        np.random.seed(seed)
+        return np.random.rand(100, 100)
+
+    @ray.remote(resources={"worker_b": 1}, max_retries=0)
+    def compute_sum(data):
+        result = float(np.sum(data))
+        print(f"[compute_sum] sum={result:.2f} pid={os.getpid()}")
+        return result
+
+    @ray.remote(resources={"worker_a": 1},
+                max_restarts=0, max_task_retries=0)
+    class Owner:
+        def dispatch(self, seed):
+            ref = generate_data.remote(seed=seed)
+            result_ref = compute_sum.remote(ref)
+            print(f"[Owner] dispatched pid={os.getpid()}")
+            return result_ref
+
+        def ping(self):
+            return os.getpid()
+
+    return Owner
 
 
-@ray.remote(resources={"worker_b": 1}, max_retries=0)
-def compute_sum(data):
-    result = float(np.sum(data))
-    print(f"[compute_sum] sum={result:.2f} pid={os.getpid()}")
-    return result
+def run_single_trial(task_duration, seed, system):
+    """
+    Runs exactly the original gossip recovery test.
+    Returns (total_time, recovery_time, success).
+    """
+    for f in [SIGNAL_FILE, RESTARTED_FILE]:
+        if os.path.exists(f):
+            os.remove(f)
+
+    Owner = make_remote_functions(task_duration)
+
+    # Step 1: dispatch
+    print(f"  Step 1: dispatching (generate_data sleeps {task_duration}s)...")
+    owner = Owner.remote()
+    ray.get(owner.ping.remote())
+    dispatch_start = time.time()
+    result_ref = ray.get(owner.dispatch.remote(seed=seed))
+    print(f"  Got result_ref — generate_data running on worker_a")
+
+    # Step 2: kill immediately — generate_data still running
+    kill_time = time.time()
+    print(f"  Step 2: signaling kill at t={kill_time-dispatch_start:.1f}s...")
+    with open(SIGNAL_FILE, "w") as f:
+        f.write("kill")
+    print(f"  Waiting 10s for worker_a to die...")
+    time.sleep(10)
+
+    # Step 3: access result
+    print(f"  Step 3: waiting for result (gossip must resubmit)...")
+    try:
+        val      = ray.get(result_ref, timeout=120)
+        end_time = time.time()
+        total_time    = end_time - dispatch_start
+        recovery_time = end_time - kill_time
+        print(f"  PASS result={val:.2f} "
+              f"total={total_time:.1f}s recovery={recovery_time:.1f}s")
+        return total_time, recovery_time, True
+
+    except ray.exceptions.OwnerDiedError:
+        end_time      = time.time()
+        total_time    = end_time - dispatch_start
+        recovery_time = end_time - kill_time
+        print(f"  FAIL OwnerDiedError — no gossip recovery")
+        return total_time, recovery_time, False
+
+    except Exception as e:
+        end_time      = time.time()
+        total_time    = end_time - dispatch_start
+        recovery_time = end_time - kill_time
+        print(f"  FAIL {type(e).__name__}: {e}")
+        return total_time, recovery_time, False
+
+    finally:
+        try:
+            ray.kill(owner)
+        except Exception:
+            pass
 
 
-@ray.remote(resources={"worker_a": 1},
-            max_restarts=0, max_task_retries=0)
-class Owner:
-    def dispatch(self, seed):
-        ref = generate_data.remote(seed=seed)
-        result_ref = compute_sum.remote(ref)
-        print(f"[Owner] dispatched pid={os.getpid()}")
-        return result_ref
-
-    def ping(self):
-        return os.getpid()
+def wait_for_worker_a(timeout=90):
+    """Wait until worker_a resource is available in the cluster."""
+    print(f"  Waiting for worker_a to be available...")
+    waited = 0
+    while waited < timeout:
+        nodes = ray.nodes()
+        alive = [n for n in nodes
+                 if n["Alive"] and
+                 "worker_a" in n.get("Resources", {})]
+        if alive:
+            print(f"  worker_a is available")
+            return True
+        time.sleep(3)
+        waited += 3
+    print(f"  Timeout waiting for worker_a")
+    return False
 
 
 def main():
@@ -44,100 +126,67 @@ def main():
     parser.add_argument("--system", required=True,
                         choices=["gossip", "no_gossip"])
     parser.add_argument("--output", required=True)
+    parser.add_argument("--trials", type=int, default=3,
+                        help="Number of trials per task duration")
+    parser.add_argument("--task-durations", type=int, nargs="+",
+                        default=[5, 10, 20, 30],
+                        help="Task sleep durations in seconds")
     args = parser.parse_args()
 
     ray.init(address="auto", log_to_driver=True)
 
-    # Wait for head + worker_a + worker_b
     nodes = ray.nodes()
     while len([n for n in nodes if n["Alive"]]) < 3:
         time.sleep(1)
         nodes = ray.nodes()
-    print("All nodes joined")
+    print("All nodes joined\n")
 
-    # ── Step 1: actor dispatches — generate_data takes 20s ───────────────────
-    print("\n" + "="*60)
-    print("Step 1: actor dispatching tasks on worker_a...")
-    print("="*60)
-    owner = Owner.remote()
-    ray.get(owner.ping.remote())
-    dispatch_start = time.time()
-    result_ref = ray.get(owner.dispatch.remote(seed=42))
-    print(f"Got result_ref: {result_ref}")
-    print(f"generate_data is now running on worker_a (sleeping 20s)...")
-
-    # ── Step 2: signal kill immediately — generate_data still running ─────────
-    print("\n" + "="*60)
-    print("Step 2: signaling kill of worker_a immediately...")
-    print("="*60)
-    kill_time = time.time()
-    with open(SIGNAL_FILE, "w") as f:
-        f.write("kill")
-    print(f"Kill signal written at t={kill_time - dispatch_start:.1f}s")
-    print("generate_data is mid-execution on worker_a — it will die")
-    print("Waiting 10s for worker_a to die...")
-    time.sleep(10)
-
-    # ── Step 3: access result ─────────────────────────────────────────────────
-    print("\n" + "="*60)
-    print("Step 3: accessing result after worker_a killed...")
-    print("="*60)
-    print("Without gossip: OwnerDiedError — result permanently lost")
-    print("With gossip:    generate_data resubmitted on a NEW node")
-    print("Watch for [generate_data] EXECUTING AGAIN on a different pid")
-    print("Waiting for result (timeout=90s)...")
-
-    success       = False
-    recovery_time = None
-    total_time    = None
-
-    try:
-        val      = ray.get(result_ref, timeout=90)
-        end_time = time.time()
-        total_time    = end_time - dispatch_start
-        recovery_time = end_time - kill_time
-
-        print(f"\nResult: {val:.2f}")
-        print("\n" + "="*60)
-        print("PASS — node failure recovery worked!")
-        print(f"  System:        {args.system}")
-        print(f"  Total time:    {total_time:.2f}s")
-        print(f"  Recovery time: {recovery_time:.2f}s "
-              f"(from kill signal to result)")
-        print("="*60)
-        success = True
-
-    except ray.exceptions.OwnerDiedError:
-        end_time      = time.time()
-        total_time    = end_time - dispatch_start
-        recovery_time = end_time - kill_time
-        print("\n" + "="*60)
-        print("FAIL — OwnerDiedError")
-        print(f"  System: {args.system}")
-        print(f"  No gossip recovery — result permanently lost")
-        print("="*60)
-
-    except Exception as e:
-        end_time      = time.time()
-        total_time    = end_time - dispatch_start
-        recovery_time = end_time - kill_time
-        print("\n" + "="*60)
-        print(f"FAIL — {type(e).__name__}: {e}")
-        print("="*60)
-
-    # ── Save result ───────────────────────────────────────────────────────────
     file_exists = os.path.exists(args.output)
-    with open(args.output, 'a') as f:
-        writer = csv.writer(f)
+    with open(args.output, 'a') as csvfile:
+        writer = csv.writer(csvfile)
         if not file_exists:
-            writer.writerow(['system', 'total_time',
-                             'recovery_time', 'success'])
-        writer.writerow([args.system,
-                         round(total_time, 3),
-                         round(recovery_time, 3),
-                         success])
+            writer.writerow(['system', 'task_duration', 'trial',
+                             'total_time', 'recovery_time', 'success'])
 
-    print(f"\nResult saved to {args.output}")
+        for task_duration in args.task_durations:
+            print(f"\n{'='*60}")
+            print(f"task_duration={task_duration}s  "
+                  f"trials={args.trials}  system={args.system}")
+            print(f"{'='*60}")
+
+            for trial in range(1, args.trials + 1):
+                print(f"\n--- Trial {trial}/{args.trials} ---")
+
+                wait_for_worker_a()
+
+                total, recovery, success = run_single_trial(
+                    task_duration=task_duration,
+                    seed=trial * 100 + task_duration,
+                    system=args.system)
+
+                writer.writerow([args.system, task_duration, trial,
+                                 round(total, 3), round(recovery, 3),
+                                 success])
+                csvfile.flush()
+
+                if trial < args.trials:
+                    print(f"  Waiting for worker_a restart...")
+                    waited = 0
+                    while not os.path.exists(RESTARTED_FILE) and waited < 90:
+                        time.sleep(2)
+                        waited += 2
+                    if os.path.exists(RESTARTED_FILE):
+                        os.remove(RESTARTED_FILE)
+                        print(f"  worker_a restarted OK")
+                    else:
+                        print(f"  Restart timeout — continuing")
+                    time.sleep(5)
+
+        print(f"\n{'='*60}")
+        print(f"All trials complete. System={args.system}")
+        print(f"{'='*60}")
+
+    print(f"\nResults saved to {args.output}")
     ray.shutdown()
 
 
