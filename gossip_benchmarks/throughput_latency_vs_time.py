@@ -10,7 +10,7 @@ os.environ["RAY_BACKEND_LOG_LEVEL"] = "warning"
 os.environ["RAY_DEDUP_LOGS"] = "0"
 
 SIGNAL_FILE   = "/rhome/tmane002/ready_to_kill.txt"
-RESULT_FILE   = "/rhome/tmane002/work/ray/gossip_benchmarks/throughput_latency_vs_time.csv"
+RESULT_FILE   = "/rhome/tmane002/results/throughput_latency_vs_time.csv"
 INTERVAL      = 1.0   # sampling interval in seconds
 TOTAL_TIME    = 120   # total experiment duration
 KILL_AT       = 60    # kill owner at this elapsed time
@@ -121,6 +121,15 @@ def main():
                 owner.dispatch.remote(seed=seed), timeout=2)
             futures[result_ref] = submit_time
             seed += 1
+        except ray.exceptions.OwnerDiedError:
+            print(f"  OwnerDiedError at t={elapsed:.1f}s — owner dead, no gossip recovery")
+            # Keep running to record zeros for the rest of the experiment
+            time.sleep(0.2)
+            continue
+        except ray.exceptions.RayActorError:
+            print(f"  RayActorError at t={elapsed:.1f}s — actor dead")
+            time.sleep(0.2)
+            continue
         except Exception as e:
             time.sleep(0.2)
             continue
@@ -135,6 +144,9 @@ def main():
                 done_refs.append(ref)
             except ray.exceptions.GetTimeoutError:
                 pass
+            except ray.exceptions.OwnerDiedError:
+                print(f"  future OwnerDiedError — dropping ref")
+                done_refs.append(ref)
             except Exception:
                 done_refs.append(ref)  # remove failed refs
 
