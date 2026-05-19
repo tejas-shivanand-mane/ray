@@ -136,6 +136,8 @@ def main():
             kill_signaled = True
 
         # ── Collect completed futures (non-blocking) ──────────────────────────
+        # With gossip:    futures resolve transparently after owner dies
+        # Without gossip: futures raise OwnerDiedError after owner dies
         done_refs = []
         for ref, submit_t in list(futures.items()):
             try:
@@ -143,14 +145,12 @@ def main():
                 tracker.record(time.time() - submit_t)
                 done_refs.append(ref)
             except ray.exceptions.GetTimeoutError:
-                pass  # still pending
+                pass  # still pending — keep waiting (gossip may recover)
             except ray.exceptions.OwnerDiedError:
-                # No gossip recovery — ref permanently lost
-                done_refs.append(ref)
-            except ray.exceptions.RayActorError:
-                owner_dead = True
+                # No gossip — ref permanently unrecoverable
                 done_refs.append(ref)
             except Exception:
+                # Other errors — drop ref
                 done_refs.append(ref)
 
         for ref in done_refs:
@@ -159,7 +159,8 @@ def main():
         tracker.set_in_flight(len(futures))
 
         # ── Dispatch new tasks to maintain N_PARALLEL in flight ───────────────
-        # Only dispatch while owner is alive
+        # Stop dispatching when owner is dead — but keep polling existing futures
+        # (they may still resolve via gossip recovery)
         while len(futures) < N_PARALLEL and not owner_dead:
             try:
                 submit_t   = time.time()
@@ -169,7 +170,8 @@ def main():
                 seed += 1
             except ray.exceptions.RayActorError:
                 print(f"  Owner died at t={elapsed:.1f}s — "
-                      f"{len(futures)} tasks still in flight")
+                      f"{len(futures)} tasks still in flight, "
+                      f"waiting for gossip recovery...")
                 owner_dead = True
                 break
             except ray.exceptions.OwnerDiedError:
