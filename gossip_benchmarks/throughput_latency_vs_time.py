@@ -10,7 +10,7 @@ os.environ["RAY_BACKEND_LOG_LEVEL"] = "warning"
 os.environ["RAY_DEDUP_LOGS"] = "0"
 
 SIGNAL_FILE   = "/rhome/tmane002/ready_to_kill.txt"
-RESULT_FILE   = "/rhome/tmane002/results/throughput_latency_vs_time.csv"
+RESULT_FILE   = "/rhome/tmane002/results/thput_lat_with_gossip.csv"
 INTERVAL      = 1.0   # sampling interval in seconds
 TOTAL_TIME    = 120   # total experiment duration
 KILL_AT       = 60    # kill owner at this elapsed time
