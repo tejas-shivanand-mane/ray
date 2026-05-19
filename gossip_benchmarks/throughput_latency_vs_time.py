@@ -14,8 +14,8 @@ RESULT_FILE  = "/rhome/tmane002/results/thput_lat_with_gossip.csv"
 INTERVAL     = 1.0    # sampling interval in seconds
 TOTAL_TIME   = 120    # total experiment duration in seconds
 KILL_AT      = 60     # kill owner at this elapsed time
-TASK_SLEEP   = 0.2    # simulate work per task (seconds)
-BATCH_SIZE   = 500    # tasks pre-dispatched before kill
+TASK_SLEEP   = 1.0    # simulate work per task (seconds)
+BATCH_SIZE   = 480    # tasks pre-dispatched before kill
 
 
 # ── Ray remote functions ──────────────────────────────────────────────────────
@@ -45,6 +45,21 @@ class Owner:
             result_ref = compute_sum.remote(ref)
             result_refs.append(result_ref)
         return result_refs
+
+    def dispatch_batch_timed(self, seeds, delay_between=0.1):
+        """
+        Dispatch tasks with a small delay between each so they are
+        spread over time — each task gets its own submit timestamp.
+        Returns list of (ref, submit_time).
+        """
+        import time as _time
+        result = []
+        for seed in seeds:
+            ref = generate_data.remote(seed=seed)
+            result_ref = compute_sum.remote(ref)
+            result.append((result_ref, _time.time()))
+            _time.sleep(delay_between)
+        return result
 
     def ping(self):
         return os.getpid()
@@ -123,16 +138,20 @@ def main():
     #   2. Owner (worker_a) killed mid-experiment
     #   3. Without gossip: refs → OwnerDiedError → throughput=0
     #   4. With gossip: gossip resubmits pending tasks → throughput recovers
-    print(f"\nPre-dispatching {BATCH_SIZE} tasks via owner on worker_a...")
+    # Dispatch tasks spread over first 30s so latency is meaningful
+    DISPATCH_INTERVAL = 30.0 / BATCH_SIZE  # spread dispatch over 30s
+    print(f"\\nPre-dispatching {BATCH_SIZE} tasks via owner on worker_a...")
+    print(f"Dispatching over 30s ({DISPATCH_INTERVAL:.2f}s between tasks)...")
     dispatch_start = time.time()
-    all_result_refs = ray.get(
-        owner.dispatch_batch.remote(list(range(BATCH_SIZE))))
-    print(f"Dispatched {len(all_result_refs)} tasks "
+    timed_refs = ray.get(
+        owner.dispatch_batch_timed.remote(
+            list(range(BATCH_SIZE)),
+            delay_between=DISPATCH_INTERVAL))
+    print(f"Dispatched {len(timed_refs)} tasks "
           f"in {time.time() - dispatch_start:.1f}s")
 
-    # Record submit time for latency measurement
-    submit_time = time.time()
-    futures = {ref: submit_time for ref in all_result_refs}
+    # Each ref has its own submit time for accurate latency
+    futures = {ref: t for ref, t in timed_refs}
 
     # ── Start tracker ─────────────────────────────────────────────────────────
     tracker = Tracker()
