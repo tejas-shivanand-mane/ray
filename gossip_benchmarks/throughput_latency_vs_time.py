@@ -9,12 +9,16 @@ import collections
 os.environ["RAY_BACKEND_LOG_LEVEL"] = "warning"
 os.environ["RAY_DEDUP_LOGS"] = "0"
 
-SIGNAL_FILE   = "/rhome/tmane002/ready_to_kill.txt"
-RESULT_FILE   = "/rhome/tmane002/results/thput_lat_with_gossip.csv"
-INTERVAL      = 1.0   # sampling interval in seconds
-TOTAL_TIME    = 120   # total experiment duration
-KILL_AT       = 60    # kill owner at this elapsed time
-TASK_SLEEP    = 0.2   # simulate work per task
+SIGNAL_FILE  = "/rhome/tmane002/ready_to_kill.txt"
+RESULT_FILE  = "/rhome/tmane002/thput_lat_with_gossip.csv"
+INTERVAL     = 1.0    # sampling interval in seconds
+TOTAL_TIME   = 120    # total experiment duration in seconds
+KILL_AT      = 60     # kill owner at this elapsed time
+TASK_SLEEP   = 0.2    # simulate work per task (seconds)
+BATCH_SIZE   = 500    # tasks pre-dispatched before kill
+
+
+# ── Ray remote functions ──────────────────────────────────────────────────────
 
 @ray.remote(max_retries=0)
 def generate_data(seed):
@@ -29,45 +33,61 @@ def compute_sum(data):
 @ray.remote(resources={"worker_a": 1},
             max_restarts=0, max_task_retries=0)
 class Owner:
-    def dispatch(self, seed):
-        ref = generate_data.remote(seed=seed)
-        result_ref = compute_sum.remote(ref)
-        return result_ref
+    def dispatch_batch(self, seeds):
+        """
+        Pre-dispatch a batch of tasks and return all result refs.
+        This matches the gossip recovery scenario: owner dispatches,
+        then dies — gossip must recover the pending refs.
+        """
+        result_refs = []
+        for seed in seeds:
+            ref = generate_data.remote(seed=seed)
+            result_ref = compute_sum.remote(ref)
+            result_refs.append(result_ref)
+        return result_refs
 
     def ping(self):
         return os.getpid()
 
 
+# ── Throughput + latency tracker ──────────────────────────────────────────────
+
 class Tracker:
-    """Records per-interval throughput and latency."""
+    """Records per-interval throughput and average latency."""
+
     def __init__(self):
-        self.lock = threading.Lock()
-        self.completions = []  # list of (finish_time, latency_s)
-        self.start_time = time.time()
-        self.records = []      # (elapsed_s, throughput, avg_latency_ms)
-        self.running = True
+        self.lock        = threading.Lock()
+        self.completions = []   # list of (finish_time, latency_s)
+        self.start_time  = time.time()
+        self.records     = []   # (elapsed_s, throughput, avg_latency_ms)
+        self.running     = True
 
     def record(self, latency_s):
         with self.lock:
             self.completions.append((time.time(), latency_s))
 
     def monitor(self):
+        """Background thread: compute throughput/latency every INTERVAL seconds."""
         while self.running:
             time.sleep(INTERVAL)
-            now = time.time()
+            now          = time.time()
             window_start = now - INTERVAL
-            elapsed = round(now - self.start_time, 2)
+            elapsed      = round(now - self.start_time, 2)
+
             with self.lock:
                 window = [(t, l) for t, l in self.completions
                           if t >= window_start]
+
             if window:
-                throughput   = len(window) / INTERVAL
-                avg_latency  = np.mean([l for _, l in window]) * 1000  # ms
+                throughput  = len(window) / INTERVAL
+                avg_latency = np.mean([l for _, l in window]) * 1000  # ms
             else:
                 throughput  = 0.0
                 avg_latency = float('nan')
-            self.records.append((elapsed, round(throughput, 2),
-                                 round(avg_latency, 2)))
+
+            self.records.append((elapsed,
+                                  round(throughput, 2),
+                                  round(avg_latency, 2)))
             print(f"  t={elapsed:6.1f}s  "
                   f"throughput={throughput:6.1f} tasks/s  "
                   f"latency={avg_latency:7.1f} ms")
@@ -76,33 +96,54 @@ class Tracker:
         self.running = False
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
     ray.init(address="auto", log_to_driver=False)
 
+    # Clean up signal file from any previous run
     if os.path.exists(SIGNAL_FILE):
         os.remove(SIGNAL_FILE)
 
-    # Wait for head + 2 workers
+    # Wait for head + worker_a + worker_b
     nodes = ray.nodes()
     while len([n for n in nodes if n["Alive"]]) < 3:
         time.sleep(1)
         nodes = ray.nodes()
     print("All nodes joined")
 
+    # Create owner on worker_a
     owner = Owner.remote()
     ray.get(owner.ping.remote())
     print("Owner ready on worker_a")
 
+    # ── Pre-dispatch ALL tasks before kill ────────────────────────────────────
+    # Matches gossip recovery scenario exactly:
+    #   1. Owner dispatches tasks → result_refs created and owned by worker_a
+    #   2. Owner (worker_a) killed mid-experiment
+    #   3. Without gossip: refs → OwnerDiedError → throughput=0
+    #   4. With gossip: gossip resubmits pending tasks → throughput recovers
+    print(f"\nPre-dispatching {BATCH_SIZE} tasks via owner on worker_a...")
+    dispatch_start = time.time()
+    all_result_refs = ray.get(
+        owner.dispatch_batch.remote(list(range(BATCH_SIZE))))
+    print(f"Dispatched {len(all_result_refs)} tasks "
+          f"in {time.time() - dispatch_start:.1f}s")
+
+    # Record submit time for latency measurement
+    submit_time = time.time()
+    futures = {ref: submit_time for ref in all_result_refs}
+
+    # ── Start tracker ─────────────────────────────────────────────────────────
     tracker = Tracker()
     monitor_thread = threading.Thread(target=tracker.monitor, daemon=True)
     monitor_thread.start()
 
-    start      = time.time()
-    seed       = 0
+    start         = time.time()
     kill_signaled = False
-    futures    = {}   # ref -> submit_time
 
-    print(f"\nRunning for {TOTAL_TIME}s, kill at {KILL_AT}s...\n")
+    print(f"\nCollecting results for {TOTAL_TIME}s, "
+          f"killing owner at t={KILL_AT}s...\n")
 
     while time.time() - start < TOTAL_TIME:
         elapsed = time.time() - start
@@ -114,51 +155,51 @@ def main():
                 f.write("kill")
             kill_signaled = True
 
-        # Submit new task
-        try:
-            submit_time = time.time()
-            result_ref = ray.get(
-                owner.dispatch.remote(seed=seed), timeout=2)
-            futures[result_ref] = submit_time
-            seed += 1
-        except ray.exceptions.OwnerDiedError:
-            print(f"  OwnerDiedError at t={elapsed:.1f}s — owner dead, no gossip recovery")
-            # Keep running to record zeros for the rest of the experiment
-            time.sleep(0.2)
-            continue
-        except ray.exceptions.RayActorError:
-            print(f"  RayActorError at t={elapsed:.1f}s — actor dead")
-            time.sleep(0.2)
-            continue
-        except Exception as e:
-            time.sleep(0.2)
-            continue
-
-        # Collect completed futures (non-blocking)
+        # Collect completed futures (non-blocking polling)
         done_refs = []
-        for ref, submit_time in list(futures.items()):
+        for ref, ref_submit_time in list(futures.items()):
             try:
                 ray.get(ref, timeout=0.01)
-                latency = time.time() - submit_time
+                latency = time.time() - ref_submit_time
                 tracker.record(latency)
                 done_refs.append(ref)
+
             except ray.exceptions.GetTimeoutError:
+                # Still pending — check again next loop
                 pass
+
             except ray.exceptions.OwnerDiedError:
-                print(f"  future OwnerDiedError — dropping ref")
+                # Owner died and no gossip recovery — ref permanently lost
+                print(f"  OwnerDiedError — ref lost (no gossip recovery)")
                 done_refs.append(ref)
-            except Exception:
-                done_refs.append(ref)  # remove failed refs
+
+            except ray.exceptions.RayActorError:
+                # Actor (owner) crashed
+                done_refs.append(ref)
+
+            except Exception as e:
+                print(f"  Unexpected error: {type(e).__name__}: {e}")
+                done_refs.append(ref)
 
         for ref in done_refs:
             futures.pop(ref, None)
+
+        # Stop early if all futures resolved
+        if not futures:
+            print(f"All {BATCH_SIZE} futures resolved at t={elapsed:.1f}s")
+            break
 
         time.sleep(0.05)
 
     tracker.stop()
     monitor_thread.join(timeout=2)
 
-    # Save CSV
+    remaining = len(futures)
+    if remaining > 0:
+        print(f"{remaining} futures unresolved at end of experiment "
+              f"(expected for no-gossip run)")
+
+    # ── Save CSV ──────────────────────────────────────────────────────────────
     with open(RESULT_FILE, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['elapsed_s', 'throughput', 'latency_ms', 'kill_time'])
