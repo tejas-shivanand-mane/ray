@@ -50,7 +50,7 @@
 using json = nlohmann::json;
 using MessageType = ray::protocol::MessageType;
 
-bool SET_gossip_recovery_enabled = false;
+bool SET_gossip_recovery_enabled = true;
 
 namespace ray::core {
 
