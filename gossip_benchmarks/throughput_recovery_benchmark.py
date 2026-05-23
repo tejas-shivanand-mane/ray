@@ -11,9 +11,9 @@ os.environ["RAY_DEDUP_LOGS"] = "0"
 os.environ["RAY_max_pending_lease_requests_per_scheduling_category"] = "200"
 
 SIGNAL_FILE = "/rhome/tmane002/ready_to_kill.txt"
-TASK_SLEEP  = 2   # seconds per task — short for high throughput
-KILL_AT     = 1    # kill owner at t=10s
-TOTAL_TASKS = 120   # enough tasks to last ~60s at 4 CPUs / 2s = 2 tasks/s
+TASK_SLEEP  = 1   # seconds per task — short for high throughput
+KILL_AT     = 8    # kill owner at t=10s
+TOTAL_TASKS = 300   # enough tasks to last ~60s at 4 CPUs / 2s = 2 tasks/s
 
 
 @ray.remote(max_retries=0)
