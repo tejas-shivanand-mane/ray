@@ -10,8 +10,8 @@ os.environ["RAY_BACKEND_LOG_LEVEL"] = "info"
 os.environ["RAY_DEDUP_LOGS"] = "0"
 
 SIGNAL_FILE = "/rhome/tmane002/ready_to_kill.txt"
-TASK_SLEEP  = 2.0   # seconds per task — short for high throughput
-KILL_AT     = 10    # kill owner at t=10s
+TASK_SLEEP  = 20   # seconds per task — short for high throughput
+KILL_AT     = 2    # kill owner at t=10s
 TOTAL_TASKS = 120   # enough tasks to last ~60s at 4 CPUs / 2s = 2 tasks/s
 
 
