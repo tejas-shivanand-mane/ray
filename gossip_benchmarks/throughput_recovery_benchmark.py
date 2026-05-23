@@ -6,7 +6,7 @@ import csv
 import argparse
 import threading
 
-os.environ["RAY_BACKEND_LOG_LEVEL"] = "warning"
+os.environ["RAY_BACKEND_LOG_LEVEL"] = "info"
 os.environ["RAY_DEDUP_LOGS"] = "0"
 
 SIGNAL_FILE = "/rhome/tmane002/ready_to_kill.txt"
