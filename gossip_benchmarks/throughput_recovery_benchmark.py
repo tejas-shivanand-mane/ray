@@ -8,6 +8,7 @@ import threading
 
 os.environ["RAY_BACKEND_LOG_LEVEL"] = "info"
 os.environ["RAY_DEDUP_LOGS"] = "0"
+os.environ["RAY_max_pending_lease_requests_per_scheduling_category"] = "200"
 
 SIGNAL_FILE = "/rhome/tmane002/ready_to_kill.txt"
 TASK_SLEEP  = 2   # seconds per task — short for high throughput
