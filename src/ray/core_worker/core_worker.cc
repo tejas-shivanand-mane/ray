@@ -403,6 +403,44 @@ CoreWorker::CoreWorker(
   RegisterToGcs(options_.worker_launch_time_ms, options_.worker_launched_time_ms);
 
   if (options_.worker_type == WorkerType::DRIVER) {
+    if (gossip_recovery_enabled_) {
+      // Wire gossip callbacks into FutureResolver
+      future_resolver_->SetGossipCallbacks(
+          [this](const ObjectID &object_id) {
+            return TryGossipRecovery(object_id);
+          },
+          [this](const ObjectID &object_id) {
+            absl::MutexLock lock(&gossip_mu_);
+            gossip_table_.erase(object_id);
+            gossip_recovering_.erase(object_id);
+          });
+
+      // Build batch recovery fn — captured by value into SubscribeToNodeChanges
+      gossip_batch_recovery_fn_ = [this]() {
+        std::vector<ObjectID> leaves;
+        {
+          absl::MutexLock lock(&gossip_mu_);
+          absl::flat_hash_set<ObjectID> has_dependent;
+          for (const auto &[oid, spec] : gossip_table_) {
+            for (int i = 0; i < spec.args_size(); i++) {
+              if (!spec.args(i).has_object_ref()) continue;
+              has_dependent.insert(ObjectID::FromBinary(
+                  spec.args(i).object_ref().object_id()));
+            }
+          }
+          for (const auto &[oid, spec] : gossip_table_) {
+            if (!has_dependent.count(oid) && spec.ByteSizeLong() > 0
+                && !gossip_recovering_.count(oid)) {
+              leaves.push_back(oid);
+              gossip_recovering_.insert(oid);
+            }
+          }
+        }
+        for (const auto &leaf_oid : leaves) {
+          DoGossipRecovery(leaf_oid);
+        }
+      };
+    }
     SubscribeToNodeChanges();
   }
 
@@ -801,7 +839,8 @@ void CoreWorker::SubscribeToNodeChanges() {
     auto on_node_change = [reference_counter = reference_counter_,
                            rate_limiter = lease_request_rate_limiter_,
                            raylet_client_pool = raylet_client_pool_,
-                           core_worker_client_pool = core_worker_client_pool_](
+                           core_worker_client_pool = core_worker_client_pool_,
+                           gossip_batch_fn = gossip_batch_recovery_fn_](
                               const NodeID &node_id,
                               const rpc::GcsNodeAddressAndLiveness &data) {
       if (data.state() == rpc::GcsNodeInfo::DEAD) {
@@ -811,6 +850,11 @@ void CoreWorker::SubscribeToNodeChanges() {
         reference_counter->ResetObjectsOnRemovedNode(node_id);
         raylet_client_pool->Disconnect(node_id);
         core_worker_client_pool->Disconnect(node_id);
+        // Batch gossip recovery — safety net for slow failures / network partitions
+        // Fast path (TCP RST) is handled by TryGossipRecovery on gRPC failure
+        if (gossip_batch_fn) {
+          gossip_batch_fn();
+        }
       }
       auto cluster_size_based_rate_limiter =
           dynamic_cast<ClusterSizeBasedLeaseRequestRateLimiter *>(rate_limiter.get());

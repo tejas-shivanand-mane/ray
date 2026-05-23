@@ -1328,160 +1328,207 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   /// Check gossip table and trigger recovery if entry found.
   /// Returns true if recovery was triggered, false otherwise.
-  bool TryGossipRecovery(const ObjectID &object_id) {
-    if (!gossip_recovery_enabled_) {
-      return false;
-    }
-    absl::MutexLock lock(&gossip_mu_);
-    auto it = gossip_table_.find(object_id);
-    if (it == gossip_table_.end()) {
-      RAY_LOG(INFO).WithField(object_id)
-          << "GOSSIP_MISS: no gossip entry found";
-      return false;
-    }
-    RAY_LOG(INFO).WithField(object_id)
-        << "GOSSIP_RECOVER: found gossip entry, triggering recovery";
+  // Internal: recover a single gossip entry. Called without gossip_mu_ held.
+  void DoGossipRecovery(const ObjectID &object_id) {
     auto err = object_recovery_manager_->RecoverObject(object_id);
-    if (!err.has_value()) {
-      return true;
-    }
-    if (err.value() == rpc::ErrorType::OBJECT_UNRECONSTRUCTABLE_BORROWED) {
-      const auto &task_spec_proto = it->second;
-      if (task_spec_proto.ByteSizeLong() == 0) {
+    if (!err.has_value()) return;
+    if (err.value() != rpc::ErrorType::OBJECT_UNRECONSTRUCTABLE_BORROWED) return;
+
+    rpc::TaskSpec task_spec_proto;
+    {
+      absl::MutexLock lock(&gossip_mu_);
+      auto it = gossip_table_.find(object_id);
+      if (it == gossip_table_.end() || it->second.ByteSizeLong() == 0) {
         RAY_LOG(INFO).WithField(object_id)
             << "GOSSIP_RECOVER: empty task spec, cannot recover";
-        return false;
+        return;
       }
-      RAY_LOG(INFO).WithField(object_id)
-          << "GOSSIP_RECOVER: resubmitting task with new ID, bridging result";
-      // Create new task with new ID — driver becomes owner of new result
-      rpc::TaskSpec new_spec_proto = task_spec_proto;
-      auto new_task_id = TaskID::FromRandom(
-          JobID::FromBinary(new_spec_proto.job_id()));
-      new_spec_proto.set_task_id(new_task_id.Binary());
-      new_spec_proto.mutable_caller_address()->CopyFrom(rpc_address_);
-      TaskSpecification new_task_spec(new_spec_proto);
-      auto new_refs = task_manager_->AddPendingTask(
-          rpc_address_, new_task_spec, "gossip_recovery", 0);
-      if (new_refs.empty()) {
-        return false;
-      }
-      auto new_obj_id = ObjectID::FromBinary(new_refs[0].object_id());
-      RAY_LOG(INFO).WithField(object_id)
-          << "GOSSIP_RECOVER: new result obj=" << new_obj_id.Hex()
-          << " bridging to original=" << object_id.Hex();
-      // Bridge: when new task completes, put result under original object_id
-      memory_store_->GetAsync(
-          new_obj_id,
-          [this, object_id, new_obj_id](
-              const std::shared_ptr<RayObject> &obj) {
-            RAY_LOG(INFO).WithField(object_id)
-                << "GOSSIP_RECOVER: bridging result "
-                << new_obj_id.Hex() << " -> " << object_id.Hex();
-            if (obj->IsInPlasmaError()) {
-              // Large object in Plasma — fetch and re-put under original id
-              absl::flat_hash_map<ObjectID, std::shared_ptr<RayObject>>
-                  result_map;
-              std::vector<rpc::Address> addrs =
-                  reference_counter_->GetOwnerAddresses({new_obj_id});
-              auto status = plasma_store_provider_->Get(
-                  {new_obj_id}, addrs, 10000, &result_map);
-              if (status.ok() && result_map.count(new_obj_id)) {
-                bool exists = false;
-                rpc::Address owner_addr;
-                reference_counter_->GetOwner(object_id, &owner_addr);
-                RAY_UNUSED(plasma_store_provider_->Put(
-                    *result_map[new_obj_id], object_id,
-                    owner_addr, &exists));
-                memory_store_->Put(
-                    RayObject(rpc::ErrorType::OBJECT_IN_PLASMA),
-                    object_id,
-                    reference_counter_->HasReference(object_id));
-              }
-            } else {
-              // Small inline object
-              memory_store_->Put(
-                  *obj, object_id,
-                  reference_counter_->HasReference(object_id));
-            }
-            RAY_LOG(INFO).WithField(object_id)
-                << "GOSSIP_RECOVER: bridge complete for " << object_id.Hex();
-          });
-      // Also resubmit dependencies recursively
-      for (int i = 0; i < task_spec_proto.args_size(); i++) {
-        if (!task_spec_proto.args(i).has_object_ref()) continue;
-        auto dep_id = ObjectID::FromBinary(
-            task_spec_proto.args(i).object_ref().object_id());
+      task_spec_proto = it->second;
+    }
+
+    RAY_LOG(INFO).WithField(object_id)
+        << "GOSSIP_RECOVER: resubmitting task with new ID, bridging result";
+    rpc::TaskSpec new_spec_proto = task_spec_proto;
+    auto new_task_id = TaskID::FromRandom(
+        JobID::FromBinary(new_spec_proto.job_id()));
+    new_spec_proto.set_task_id(new_task_id.Binary());
+    new_spec_proto.mutable_caller_address()->CopyFrom(rpc_address_);
+    TaskSpecification new_task_spec(new_spec_proto);
+    auto new_refs = task_manager_->AddPendingTask(
+        rpc_address_, new_task_spec, "gossip_recovery", 0);
+    if (new_refs.empty()) return;
+    auto new_obj_id = ObjectID::FromBinary(new_refs[0].object_id());
+    RAY_LOG(INFO).WithField(object_id)
+        << "GOSSIP_RECOVER: new result obj=" << new_obj_id.Hex()
+        << " bridging to original=" << object_id.Hex();
+
+    memory_store_->GetAsync(
+        new_obj_id,
+        [this, object_id, new_obj_id](const std::shared_ptr<RayObject> &obj) {
+          RAY_LOG(INFO).WithField(object_id)
+              << "GOSSIP_RECOVER: bridging result "
+              << new_obj_id.Hex() << " -> " << object_id.Hex();
+          if (obj->IsInPlasmaError()) {
+            task_execution_service_.post(
+                [this, object_id, new_obj_id]() {
+                  absl::flat_hash_map<ObjectID, std::shared_ptr<RayObject>> result_map;
+                  std::vector<rpc::Address> addrs =
+                      reference_counter_->GetOwnerAddresses({new_obj_id});
+                  auto status = plasma_store_provider_->Get(
+                      {new_obj_id}, addrs, 10000, &result_map);
+                  if (status.ok() && result_map.count(new_obj_id)) {
+                    bool exists = false;
+                    rpc::Address owner_addr;
+                    reference_counter_->GetOwner(object_id, &owner_addr);
+                    RAY_UNUSED(plasma_store_provider_->Put(
+                        *result_map[new_obj_id], object_id, owner_addr, &exists));
+                    memory_store_->Put(
+                        RayObject(rpc::ErrorType::OBJECT_IN_PLASMA),
+                        object_id,
+                        reference_counter_->HasReference(object_id));
+                  }
+                },
+                "CoreWorker.GossipBridgePlasma");
+          } else {
+            memory_store_->Put(
+                *obj, object_id, reference_counter_->HasReference(object_id));
+          }
+          RAY_LOG(INFO).WithField(object_id)
+              << "GOSSIP_RECOVER: bridge complete for " << object_id.Hex();
+        });
+
+    // Resubmit dependencies
+    for (int i = 0; i < task_spec_proto.args_size(); i++) {
+      if (!task_spec_proto.args(i).has_object_ref()) continue;
+      auto dep_id = ObjectID::FromBinary(
+          task_spec_proto.args(i).object_ref().object_id());
+      rpc::TaskSpec dep_proto;
+      {
+        absl::MutexLock lock(&gossip_mu_);
         auto dep_it = gossip_table_.find(dep_id);
         if (dep_it == gossip_table_.end()) continue;
         if (dep_it->second.ByteSizeLong() == 0) continue;
-        // Check if dep is already available
-        auto dep_obj = memory_store_->GetIfExists(dep_id);
-        if (dep_obj != nullptr) continue;  // Already available
-        RAY_LOG(INFO).WithField(dep_id)
-            << "GOSSIP_RECOVER: resubmitting dep " << dep_id.Hex();
-        rpc::TaskSpec dep_proto = dep_it->second;
-        auto new_dep_task_id = TaskID::FromRandom(
-            JobID::FromBinary(dep_proto.job_id()));
-        dep_proto.set_task_id(new_dep_task_id.Binary());
-        dep_proto.mutable_caller_address()->CopyFrom(rpc_address_);
-        TaskSpecification dep_spec(dep_proto);
-        auto dep_refs = task_manager_->AddPendingTask(
-            rpc_address_, dep_spec, "gossip_recovery_dep", 0);
-        if (!dep_refs.empty()) {
-          auto new_dep_obj_id =
-              ObjectID::FromBinary(dep_refs[0].object_id());
-          memory_store_->GetAsync(
-              new_dep_obj_id,
-              [this, dep_id, new_dep_obj_id](
-                  const std::shared_ptr<RayObject> &obj) {
-                RAY_LOG(INFO).WithField(dep_id)
-                    << "GOSSIP_RECOVER: dep ready, bridging "
-                    << new_dep_obj_id.Hex() << " -> " << dep_id.Hex();
-                if (obj->IsInPlasmaError()) {
-                  absl::flat_hash_map<ObjectID, std::shared_ptr<RayObject>>
-                      result_map;
-                  std::vector<rpc::Address> addrs =
-                      reference_counter_->GetOwnerAddresses({new_dep_obj_id});
-                  auto status = plasma_store_provider_->Get(
-                      {new_dep_obj_id}, addrs, 10000, &result_map);
-                  if (status.ok() && result_map.count(new_dep_obj_id)) {
-                    bool exists = false;
-                    rpc::Address owner_addr;
-                    reference_counter_->GetOwner(dep_id, &owner_addr);
-                    RAY_UNUSED(plasma_store_provider_->Put(
-                        *result_map[new_dep_obj_id],
-                        dep_id, owner_addr, &exists));
-                    memory_store_->Put(
-                        RayObject(rpc::ErrorType::OBJECT_IN_PLASMA),
-                        dep_id,
-                        reference_counter_->HasReference(dep_id));
-                  }
-                } else {
-                  memory_store_->Put(
-                      *obj, dep_id,
-                      reference_counter_->HasReference(dep_id));
-                }
-                RAY_LOG(INFO).WithField(dep_id)
-                    << "GOSSIP_RECOVER: dep bridge complete " << dep_id.Hex();
-              });
-          auto dep_spec_copy = dep_spec;
-          io_service_.post(
-              [this, dep_spec_copy]() mutable {
-                normal_task_submitter_->SubmitTask(std::move(dep_spec_copy));
-              },
-              "CoreWorker.GossipResubmitDep");
+        if (memory_store_->GetIfExists(dep_id) != nullptr) continue;
+        if (gossip_recovering_.count(dep_id)) continue;
+        gossip_recovering_.insert(dep_id);
+        dep_proto = dep_it->second;
+      }
+      RAY_LOG(INFO).WithField(dep_id)
+          << "GOSSIP_RECOVER: resubmitting dep " << dep_id.Hex();
+      auto new_dep_task_id = TaskID::FromRandom(
+          JobID::FromBinary(dep_proto.job_id()));
+      dep_proto.set_task_id(new_dep_task_id.Binary());
+      dep_proto.mutable_caller_address()->CopyFrom(rpc_address_);
+      TaskSpecification dep_spec(dep_proto);
+      auto dep_refs = task_manager_->AddPendingTask(
+          rpc_address_, dep_spec, "gossip_recovery_dep", 0);
+      if (!dep_refs.empty()) {
+        auto new_dep_obj_id = ObjectID::FromBinary(dep_refs[0].object_id());
+        memory_store_->GetAsync(
+            new_dep_obj_id,
+            [this, dep_id, new_dep_obj_id](const std::shared_ptr<RayObject> &obj) {
+              RAY_LOG(INFO).WithField(dep_id)
+                  << "GOSSIP_RECOVER: dep ready, bridging "
+                  << new_dep_obj_id.Hex() << " -> " << dep_id.Hex();
+              if (obj->IsInPlasmaError()) {
+                task_execution_service_.post(
+                    [this, dep_id, new_dep_obj_id]() {
+                      absl::flat_hash_map<ObjectID, std::shared_ptr<RayObject>> result_map;
+                      std::vector<rpc::Address> addrs =
+                          reference_counter_->GetOwnerAddresses({new_dep_obj_id});
+                      auto status = plasma_store_provider_->Get(
+                          {new_dep_obj_id}, addrs, 10000, &result_map);
+                      if (status.ok() && result_map.count(new_dep_obj_id)) {
+                        bool exists = false;
+                        rpc::Address owner_addr;
+                        reference_counter_->GetOwner(dep_id, &owner_addr);
+                        RAY_UNUSED(plasma_store_provider_->Put(
+                            *result_map[new_dep_obj_id], dep_id, owner_addr, &exists));
+                        memory_store_->Put(
+                            RayObject(rpc::ErrorType::OBJECT_IN_PLASMA),
+                            dep_id,
+                            reference_counter_->HasReference(dep_id));
+                      }
+                    },
+                    "CoreWorker.GossipDepBridgePlasma");
+              } else {
+                memory_store_->Put(
+                    *obj, dep_id, reference_counter_->HasReference(dep_id));
+              }
+              RAY_LOG(INFO).WithField(dep_id)
+                  << "GOSSIP_RECOVER: dep bridge complete " << dep_id.Hex();
+            });
+        auto dep_spec_copy = dep_spec;
+        io_service_.post(
+            [this, dep_spec_copy]() mutable {
+              normal_task_submitter_->SubmitTask(std::move(dep_spec_copy));
+            },
+            "CoreWorker.GossipResubmitDep");
+      }
+    }
+
+    io_service_.post(
+        [this, new_task_spec]() mutable {
+          normal_task_submitter_->SubmitTask(std::move(new_task_spec));
+        },
+        "CoreWorker.GossipResubmit");
+  }
+
+  bool TryGossipRecovery(const ObjectID &object_id) {
+    if (!gossip_recovery_enabled_) return false;
+
+    std::vector<ObjectID> batch_leaves;
+
+    {
+      absl::MutexLock lock(&gossip_mu_);
+
+      // Already recovering — suppress OWNER_DIED in FutureResolver
+      if (gossip_recovering_.count(object_id)) {
+        RAY_LOG(INFO).WithField(object_id) << "GOSSIP_SKIP: already recovering";
+        return true;
+      }
+
+      auto it = gossip_table_.find(object_id);
+      if (it == gossip_table_.end()) {
+        RAY_LOG(INFO).WithField(object_id) << "GOSSIP_MISS: no gossip entry found";
+        return false;
+      }
+
+      RAY_LOG(INFO).WithField(object_id)
+          << "GOSSIP_RECOVER: found gossip entry, triggering recovery";
+      gossip_recovering_.insert(object_id);
+
+      // First recovery call — batch collect all other leaves too
+      if (gossip_recovering_.size() == 1) {
+        absl::flat_hash_set<ObjectID> has_dependent;
+        for (const auto &[oid, spec] : gossip_table_) {
+          for (int i = 0; i < spec.args_size(); i++) {
+            if (!spec.args(i).has_object_ref()) continue;
+            has_dependent.insert(ObjectID::FromBinary(
+                spec.args(i).object_ref().object_id()));
+          }
+        }
+        for (const auto &[oid, spec] : gossip_table_) {
+          if (oid == object_id) continue;
+          if (!has_dependent.count(oid) && spec.ByteSizeLong() > 0
+              && !gossip_recovering_.count(oid)) {
+            batch_leaves.push_back(oid);
+            gossip_recovering_.insert(oid);
+          }
         }
       }
-      // Submit the main task
+    }  // lock released
+
+    // Post batch recovery for other leaves off current call stack
+    for (const auto &leaf_oid : batch_leaves) {
       io_service_.post(
-          [this, new_task_spec]() mutable {
-            normal_task_submitter_->SubmitTask(std::move(new_task_spec));
-          },
-          "CoreWorker.GossipResubmit");
-      return true;
+          [this, leaf_oid]() { DoGossipRecovery(leaf_oid); },
+          "CoreWorker.GossipBatchRecover");
     }
-    return false;
+
+    // Recover the triggering object on current call stack
+    DoGossipRecovery(object_id);
+    return true;
   }
   /// Mark this worker is exiting.
   void SetIsExiting();
@@ -1982,8 +2029,9 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   bool gossip_recovery_enabled_;
   absl::flat_hash_map<ObjectID, rpc::TaskSpec> gossip_table_
       ABSL_GUARDED_BY(gossip_mu_);
-
-
+  absl::flat_hash_set<ObjectID> gossip_recovering_
+        ABSL_GUARDED_BY(gossip_mu_);
+  std::function<void()> gossip_batch_recovery_fn_;
   ///
   /// Fields related to actor handles.
   ///

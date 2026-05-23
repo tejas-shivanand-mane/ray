@@ -58,6 +58,14 @@ class FutureResolver {
   /// future.
   void ResolveFutureAsync(const ObjectID &object_id, const rpc::Address &owner_address);
 
+
+  void SetGossipCallbacks(
+      std::function<bool(const ObjectID &)> recovery_cb,
+      std::function<void(const ObjectID &)> prune_cb) {
+    gossip_recovery_callback_ = std::move(recovery_cb);
+    gossip_prune_callback_ = std::move(prune_cb);
+  }
+
   /// Process a resolved future. This can be used if we already have the objec
   /// status and don't need to ask the owner for it right away.
   ///
