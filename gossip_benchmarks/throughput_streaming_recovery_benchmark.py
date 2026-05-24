@@ -14,28 +14,22 @@ SIGNAL_FILE = "/rhome/tmane002/ready_to_kill.txt"
 # -------------------------
 # Benchmark parameters
 # -------------------------
-TASK_RATE = 4                 # target completed tasks/sec
-WORKLOAD_DURATION = 80        # seconds of scheduled producer completions
-WORKLOAD_START = 5            # first producer object becomes ready at t=5
-KILL_AT = 25                  # kill owner after some steady pre-failure throughput
-TOTAL_END = 110               # allow enough time for recovery
+TASK_RATE = 2                  # smoother, less bursty than 4
+WORKLOAD_DURATION = 90         # seconds
+WORKLOAD_START = 5
+KILL_AT = 30
+TOTAL_END = 130
 
 TOTAL_TASKS = TASK_RATE * WORKLOAD_DURATION
 
-DATA_SHAPE = (100, 100)
+DATA_SHAPE = (400, 400)
+CONSUMER_SLEEP = 0.4           # paces dependent-task completions
 
 
 @ray.remote(num_cpus=0, resources={"producer_b": 0.001}, max_retries=0)
 def scheduled_producer(seed, target_time_abs):
-    """
-    Produces an object at a specific absolute time.
-
-    This creates a smooth workload because producer outputs become available
-    at a controlled rate instead of all at once.
-    """
     now = time.time()
-    sleep_time = max(0.0, target_time_abs - now)
-    time.sleep(sleep_time)
+    time.sleep(max(0.0, target_time_abs - now))
 
     np.random.seed(seed % 10000)
     return np.random.rand(*DATA_SHAPE)
@@ -43,30 +37,29 @@ def scheduled_producer(seed, target_time_abs):
 
 @ray.remote(num_cpus=1, resources={"consumer_b": 1}, max_retries=0)
 def compute_sum(data):
-    return float(np.sum(data))
+    # Make the dependent task non-trivial so Ray cannot drain everything instantly.
+    total = float(np.sum(data))
+    time.sleep(CONSUMER_SLEEP)
+    return total
 
 
 @ray.remote(resources={"worker_a": 1}, max_restarts=0, max_task_retries=0)
 class Owner:
     def dispatch_stream(self, num_tasks, task_rate, workload_start_abs):
         refs = []
-
         interval = 1.0 / task_rate
 
         for i in range(num_tasks):
             target_time_abs = workload_start_abs + i * interval
-
             producer_ref = scheduled_producer.remote(i, target_time_abs)
             result_ref = compute_sum.remote(producer_ref)
-
             refs.append(result_ref)
 
         print(
-            f"[Owner] dispatched {num_tasks} streaming tasks "
-            f"at rate={task_rate} tasks/s, pid={os.getpid()}",
+            f"[Owner] dispatched {num_tasks} tasks at {task_rate} tasks/s, "
+            f"pid={os.getpid()}",
             flush=True,
         )
-
         return refs
 
     def ping(self):
@@ -128,7 +121,6 @@ def main():
 
     all_futures = {ref: i for i, ref in enumerate(result_refs)}
     completion_records = []
-
     kill_signaled = False
 
     while all_futures:
@@ -141,7 +133,7 @@ def main():
 
         ready, _ = ray.wait(
             list(all_futures.keys()),
-            num_returns=min(len(all_futures), 64),
+            num_returns=min(len(all_futures), 32),
             timeout=0.05,
         )
 
@@ -155,7 +147,6 @@ def main():
                 all_futures.pop(ref, None)
 
             except ray.exceptions.OwnerDiedError:
-                # Keep the ref. With gossip recovery, it may become resolvable later.
                 pass
 
             except ray.exceptions.GetTimeoutError:
@@ -168,8 +159,6 @@ def main():
                     f"for task {task_index}: {type(e).__name__}: {e}",
                     flush=True,
                 )
-                # Keep the ref for debugging/recovery.
-                pass
 
         if elapsed > TOTAL_END:
             print(
@@ -195,9 +184,6 @@ def main():
     print(f"Post-failure completed: {post_failure_completed}", flush=True)
     print(f"Unresolved refs: {unresolved}", flush=True)
 
-    # -------------------------
-    # Save CSV
-    # -------------------------
     max_t = max(int(total_elapsed) + 1, TOTAL_END)
 
     with open(args.output, "w", newline="") as f:
@@ -245,7 +231,6 @@ def main():
             )
 
     print(f"Saved to {args.output}", flush=True)
-
     ray.shutdown()
 
 
