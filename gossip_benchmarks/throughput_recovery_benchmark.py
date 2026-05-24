@@ -11,12 +11,12 @@ os.environ["RAY_max_pending_lease_requests_per_scheduling_category"] = "200"
 
 SIGNAL_FILE  = "/rhome/tmane002/ready_to_kill.txt"
 WAVE1_SLEEP  = 1.0    # fast tasks — show pre-kill baseline
-WAVE2_SLEEP  = 10.0   # slow tasks — in-flight at kill, recovered by gossip
+WAVE2_SLEEP  = 1.0   # slow tasks — in-flight at kill, recovered by gossip
 WAVE1_TASKS  = 80     # dispatched at t=0, complete t=1-10
 WAVE2_TASKS  = 80     # dispatched at t=10, in-flight when killed at t=13
-WAVE2_START  = 5     # dispatch wave 2 at t=10
+WAVE2_START  = 8     # dispatch wave 2 at t=10
 KILL_AT      = 13     # kill at t=13 — wave 2 is 3s into 20s sleep
-TOTAL_END    = 80     # run long enough for gossip recovery
+TOTAL_END    = 50     # run long enough for gossip recovery
 
 
 @ray.remote(max_retries=0)
@@ -103,7 +103,6 @@ def main():
 
     while all_futures or not wave2_dispatched:
         elapsed = time.time() - experiment_start
-
         # Dispatch wave 2 at WAVE2_START
         if elapsed >= WAVE2_START and not wave2_dispatched:
             wave2_dispatched = True
@@ -113,13 +112,8 @@ def main():
             for ref in wave2_refs:
                 all_futures[ref] = "wave2"
             print(f"Wave 2 dispatched — {len(wave2_refs)} slow tasks in flight")
-
-        # Signal kill at KILL_AT
-        if elapsed >= KILL_AT and not kill_signaled:
-            wave2_pending = sum(1 for v in all_futures.values()
-                                if v == "wave2")
-            print(f">>> Kill at t={elapsed:.1f}s "
-                  f"({wave2_pending} slow tasks pending) <<<")
+            # Kill immediately after dispatch — tasks just started sleeping
+            print(f">>> Killing immediately at t={time.time()-experiment_start:.1f}s <<<")
             with open(SIGNAL_FILE, "w") as f:
                 f.write("kill")
             kill_signaled = True
