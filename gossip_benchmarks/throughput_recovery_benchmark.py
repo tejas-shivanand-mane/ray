@@ -11,10 +11,10 @@ os.environ["RAY_max_pending_lease_requests_per_scheduling_category"] = "200"
 
 SIGNAL_FILE  = "/rhome/tmane002/ready_to_kill.txt"
 WAVE1_SLEEP  = 1.0    # fast tasks — show pre-kill baseline
-WAVE2_SLEEP  = 20.0   # slow tasks — in-flight at kill, recovered by gossip
+WAVE2_SLEEP  = 10.0   # slow tasks — in-flight at kill, recovered by gossip
 WAVE1_TASKS  = 80     # dispatched at t=0, complete t=1-10
 WAVE2_TASKS  = 80     # dispatched at t=10, in-flight when killed at t=13
-WAVE2_START  = 10     # dispatch wave 2 at t=10
+WAVE2_START  = 5     # dispatch wave 2 at t=10
 KILL_AT      = 13     # kill at t=13 — wave 2 is 3s into 20s sleep
 TOTAL_END    = 80     # run long enough for gossip recovery
 
