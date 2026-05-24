@@ -101,6 +101,7 @@ def main():
     print(f"Collecting results. Wave 2 at t={WAVE2_START}s, "
           f"kill at t={KILL_AT}s...")
 
+
     while all_futures or not wave2_dispatched:
         elapsed = time.time() - experiment_start
         # Dispatch wave 2 at WAVE2_START
