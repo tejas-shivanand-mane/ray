@@ -25,25 +25,31 @@ KILL_AT = 13          # kill owner at t=13, while wave 2 is still sleeping
 TOTAL_END = 90        # allow enough time for gossip recovery
 
 
-@ray.remote(max_retries=0)
+# IMPORTANT:
+# All producer tasks are pinned to worker_b.
+# This prevents ray stop on worker_a from killing the actual producer tasks.
+@ray.remote(resources={"producer_b": 1}, max_retries=0)
 def fast_task(seed):
     time.sleep(WAVE1_SLEEP)
     np.random.seed(seed % 10000)
     return np.random.rand(100, 100)
 
 
-@ray.remote(max_retries=0)
+@ray.remote(resources={"producer_b": 1}, max_retries=0)
 def slow_task(seed):
     time.sleep(WAVE2_SLEEP)
     np.random.seed(seed % 10000)
     return np.random.rand(100, 100)
 
 
-@ray.remote(resources={"worker_b": 1}, max_retries=0)
+# Consumer task is also pinned to worker_b.
+@ray.remote(resources={"consumer_b": 1}, max_retries=0)
 def compute_sum(data):
     return float(np.sum(data))
 
 
+# Owner actor is pinned to worker_a.
+# This is the only component we want to kill.
 @ray.remote(resources={"worker_a": 1}, max_restarts=0, max_task_retries=0)
 class Owner:
     def dispatch_fast(self, seeds):
@@ -149,14 +155,14 @@ def main():
 
             print(
                 f"Wave 2 dispatched at t={time.time() - experiment_start:.2f}s. "
-                f"{len(wave2_refs)} slow tasks should be in flight when owner is killed.",
+                f"{len(wave2_refs)} slow tasks are pinned to worker_b.",
                 flush=True,
             )
 
         # Kill owner at KILL_AT, separately from wave-2 dispatch.
         if elapsed >= KILL_AT and not kill_signaled:
             kill_signaled = True
-            print(f"\n>>> Killing owner at t={elapsed:.2f}s <<<", flush=True)
+            print(f"\n>>> Killing owner node at t={elapsed:.2f}s <<<", flush=True)
             write_kill_signal()
 
         # Collect ready final result refs.
@@ -177,22 +183,21 @@ def main():
                     all_futures.pop(ref, None)
 
                 except ray.exceptions.OwnerDiedError:
-                    # Important:
-                    # Do NOT remove the ref here.
-                    # With gossip recovery, the object may become resolvable later.
+                    # Do NOT remove the ref.
+                    # With gossip recovery, it may become resolvable later.
                     pass
 
                 except ray.exceptions.GetTimeoutError:
                     pass
 
                 except Exception as e:
-                    # For debugging, print the first few unexpected errors, but keep going.
                     print(
                         f"[WARN] Unexpected exception for {wave} ref at "
-                        f"t={time.time() - experiment_start:.2f}s: {type(e).__name__}: {e}",
+                        f"t={time.time() - experiment_start:.2f}s: "
+                        f"{type(e).__name__}: {e}",
                         flush=True,
                     )
-                    # Keep the ref for now, unless you are sure this error is final.
+                    # Keep the ref for now.
                     pass
 
         if elapsed > TOTAL_END:
@@ -246,7 +251,8 @@ def main():
 
         for t in range(0, max_t + 1):
             completions_this_sec = [
-                wave for completion_time, wave in completion_records
+                wave
+                for completion_time, wave in completion_records
                 if t <= completion_time < t + 1
             ]
 
