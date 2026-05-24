@@ -4,24 +4,19 @@ import time
 import os
 import csv
 import argparse
-import threading
 
 os.environ["RAY_BACKEND_LOG_LEVEL"] = "info"
 os.environ["RAY_DEDUP_LOGS"] = "0"
 os.environ["RAY_max_pending_lease_requests_per_scheduling_category"] = "200"
 
-SIGNAL_FILE    = "/rhome/tmane002/ready_to_kill.txt"
-
-# Wave 1: fast tasks dispatched at t=0, complete t=1-10, show pre-kill baseline
-WAVE1_TASKS    = 80
-WAVE1_SLEEP    = 1.0   # 1s sleep, 8 CPUs -> ~8 tasks/s
-
-# Wave 2: slow tasks dispatched at t=0, all in-flight when owner dies
-WAVE2_TASKS    = 80
-WAVE2_SLEEP    = 20.0  # 20s sleep, killed at t=8, clearly in-flight
-
-KILL_AT        = 8     # kill owner well into wave2 sleep
-TOTAL_END      = 75    # run long enough to see gossip recovery complete
+SIGNAL_FILE  = "/rhome/tmane002/ready_to_kill.txt"
+WAVE1_SLEEP  = 1.0    # fast tasks — show pre-kill baseline
+WAVE2_SLEEP  = 20.0   # slow tasks — in-flight at kill, recovered by gossip
+WAVE1_TASKS  = 80     # dispatched at t=0, complete t=1-10
+WAVE2_TASKS  = 80     # dispatched at t=10, in-flight when killed at t=13
+WAVE2_START  = 10     # dispatch wave 2 at t=10
+KILL_AT      = 13     # kill at t=13 — wave 2 is 3s into 20s sleep
+TOTAL_END    = 80     # run long enough for gossip recovery
 
 
 @ray.remote(max_retries=0)
@@ -46,21 +41,22 @@ def compute_sum(data):
 @ray.remote(resources={"worker_a": 1},
             max_restarts=0, max_task_retries=0)
 class Owner:
-    def dispatch_waves(self, wave1_seeds, wave2_seeds):
-        """Dispatch both waves and return all result refs."""
+    def dispatch_fast(self, seeds):
         refs = []
-        # Wave 1: fast tasks
-        for seed in wave1_seeds:
-            ref        = fast_task.remote(seed)
+        for seed in seeds:
+            ref = fast_task.remote(seed)
             result_ref = compute_sum.remote(ref)
-            refs.append(("wave1", result_ref))
-        # Wave 2: slow tasks — all in-flight at kill time
-        for seed in wave2_seeds:
-            ref        = slow_task.remote(seed)
+            refs.append(result_ref)
+        print(f"[Owner] dispatched {len(seeds)} fast tasks pid={os.getpid()}")
+        return refs
+
+    def dispatch_slow(self, seeds):
+        refs = []
+        for seed in seeds:
+            ref = slow_task.remote(seed)
             result_ref = compute_sum.remote(ref)
-            refs.append(("wave2", result_ref))
-        print(f"[Owner] dispatched {len(wave1_seeds)} fast + "
-              f"{len(wave2_seeds)} slow tasks pid={os.getpid()}")
+            refs.append(result_ref)
+        print(f"[Owner] dispatched {len(seeds)} slow tasks pid={os.getpid()}")
         return refs
 
     def ping(self):
@@ -78,7 +74,6 @@ def main():
         os.remove(SIGNAL_FILE)
 
     ray.init(address="auto", log_to_driver=False)
-
     nodes = ray.nodes()
     while len([n for n in nodes if n["Alive"]]) < 3:
         time.sleep(1)
@@ -88,28 +83,38 @@ def main():
     owner = Owner.remote()
     ray.get(owner.ping.remote())
 
-    print(f"\nDispatching {WAVE1_TASKS} fast + {WAVE2_TASKS} slow tasks...")
     experiment_start = time.time()
-
-    wave_and_refs = ray.get(owner.dispatch_waves.remote(
-        list(range(WAVE1_TASKS)),
-        list(range(WAVE1_TASKS, WAVE1_TASKS + WAVE2_TASKS))))
-
-    dispatch_time = time.time() - experiment_start
-    print(f"All tasks dispatched in {dispatch_time:.2f}s")
-
-    # Build futures dict: ref -> wave label
-    all_futures = {ref: wave for wave, ref in wave_and_refs}
-
     completion_times = []
+    all_futures      = {}
     kill_signaled    = False
-    lock             = threading.Lock()
+    wave2_dispatched = False
 
-    print(f"Collecting results, killing owner at t={KILL_AT}s...")
+    # ── Dispatch wave 1 (fast tasks) at t=0 ──────────────────────────────────
+    print(f"\nDispatching {WAVE1_TASKS} fast tasks at t=0...")
+    wave1_refs = ray.get(owner.dispatch_fast.remote(
+        list(range(WAVE1_TASKS))))
+    for ref in wave1_refs:
+        all_futures[ref] = "wave1"
+    print(f"Wave 1 dispatched at t={time.time()-experiment_start:.1f}s")
 
-    while all_futures:
+    # ── Main loop: collect + dispatch wave 2 at WAVE2_START ──────────────────
+    print(f"Collecting results. Wave 2 at t={WAVE2_START}s, "
+          f"kill at t={KILL_AT}s...")
+
+    while all_futures or not wave2_dispatched:
         elapsed = time.time() - experiment_start
 
+        # Dispatch wave 2 at WAVE2_START
+        if elapsed >= WAVE2_START and not wave2_dispatched:
+            wave2_dispatched = True
+            print(f"\nDispatching {WAVE2_TASKS} slow tasks at t={elapsed:.1f}s...")
+            wave2_refs = ray.get(owner.dispatch_slow.remote(
+                list(range(WAVE1_TASKS, WAVE1_TASKS + WAVE2_TASKS))))
+            for ref in wave2_refs:
+                all_futures[ref] = "wave2"
+            print(f"Wave 2 dispatched — {len(wave2_refs)} slow tasks in flight")
+
+        # Signal kill at KILL_AT
         if elapsed >= KILL_AT and not kill_signaled:
             wave2_pending = sum(1 for v in all_futures.values()
                                 if v == "wave2")
@@ -120,24 +125,23 @@ def main():
             kill_signaled = True
 
         # Collect completions
-        ready, _ = ray.wait(
-            list(all_futures.keys()),
-            num_returns=min(len(all_futures), 32),
-            timeout=0.05)
-
-        done = []
-        for ref in ready:
-            try:
-                ray.get(ref, timeout=0)
-                completion_times.append(time.time() - experiment_start)
-            except ray.exceptions.OwnerDiedError:
-                pass
-            except Exception:
-                pass
-            done.append(ref)
-
-        for ref in done:
-            all_futures.pop(ref, None)
+        if all_futures:
+            ready, _ = ray.wait(
+                list(all_futures.keys()),
+                num_returns=min(len(all_futures), 32),
+                timeout=0.05)
+            done = []
+            for ref in ready:
+                try:
+                    ray.get(ref, timeout=0)
+                    completion_times.append(time.time() - experiment_start)
+                except ray.exceptions.OwnerDiedError:
+                    pass
+                except Exception:
+                    pass
+                done.append(ref)
+            for ref in done:
+                all_futures.pop(ref, None)
 
         if elapsed > TOTAL_END:
             print(f"Timeout at t={elapsed:.1f}s — "
@@ -147,11 +151,11 @@ def main():
         time.sleep(0.01)
 
     total_elapsed = time.time() - experiment_start
-    total_tasks   = WAVE1_TASKS + WAVE2_TASKS
+    total = WAVE1_TASKS + WAVE2_TASKS
     print(f"\nExperiment done in {total_elapsed:.1f}s")
-    print(f"Tasks completed: {len(completion_times)} / {total_tasks}")
+    print(f"Tasks completed: {len(completion_times)} / {total}")
 
-    # Save CSV
+    # ── Save CSV ──────────────────────────────────────────────────────────────
     max_t = max(int(total_elapsed) + 1, TOTAL_END)
     with open(args.output, 'w', newline='') as f:
         writer = csv.writer(f)
