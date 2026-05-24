@@ -3682,6 +3682,38 @@ void CoreWorker::HandleGetObjectStatus(rpc::GetObjectStatusRequest request,
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
+
+
+  // Forward gossip entry to requester proactively if object still pending
+  if (gossip_recovery_enabled_ && request.has_requester_address()) {
+    absl::MutexLock lock(&gossip_mu_);
+    auto it = gossip_table_.find(object_id);
+    if (it != gossip_table_.end() && it->second.ByteSizeLong() > 0) {
+      const auto requester_addr = request.requester_address();
+      if (requester_addr.worker_id() != rpc_address_.worker_id()) {
+        rpc::GossipFutureRequest gossip_req;
+        gossip_req.set_object_id(object_id.Binary());
+        *gossip_req.mutable_task_spec() = it->second;
+        gossip_req.set_owner_worker_id(rpc_address_.worker_id());
+        *gossip_req.mutable_owner_address() = rpc_address_;
+        auto conn = core_worker_client_pool_->GetOrConnect(requester_addr);
+        conn->GossipFuture(
+            gossip_req,
+            [object_id](const Status &status,
+                        const rpc::GossipFutureReply &) {
+              if (!status.ok()) {
+                RAY_LOG(INFO).WithField(object_id)
+                    << "GOSSIP_FORWARD_FAILED: " << status.ToString();
+              } else {
+                RAY_LOG(INFO).WithField(object_id)
+                    << "GOSSIP_FORWARD: forwarded to requester";
+              }
+            });
+      }
+    }
+  }
+
+
   // Send the reply once the value has become available. The value is
   // guaranteed to become available eventually because we own the object and
   // its ref count is > 0.

@@ -190,6 +190,9 @@ message GetObjectStatusRequest {
   bytes owner_worker_id = 1;
   // Wait for this object's status.
   bytes object_id = 2;
+  // Address of the requester, used to forward gossip entries proactively.
+  // Only populated when gossip recovery is enabled.
+  Address requester_address = 3;
 }
 
 message RayObject {

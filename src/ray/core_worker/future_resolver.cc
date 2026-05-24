@@ -34,6 +34,9 @@ void FutureResolver::ResolveFutureAsync(const ObjectID &object_id,
   rpc::GetObjectStatusRequest request;
   request.set_object_id(object_id.Binary());
   request.set_owner_worker_id(owner_address.worker_id());
+  if (gossip_recovery_callback_) {
+    *request.mutable_requester_address() = rpc_address_;
+  }
   conn->GetObjectStatus(
       std::move(request),
       [this, object_id, owner_address](const Status &status,
