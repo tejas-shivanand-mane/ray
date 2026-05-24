@@ -3684,31 +3684,48 @@ void CoreWorker::HandleGetObjectStatus(rpc::GetObjectStatusRequest request,
   }
 
 
-  // Forward gossip entry to requester proactively if object still pending
+  // Forward gossip entry + full dep subgraph to requester proactively
   if (gossip_recovery_enabled_ && request.has_requester_address()) {
     absl::MutexLock lock(&gossip_mu_);
-    auto it = gossip_table_.find(object_id);
-    if (it != gossip_table_.end() && it->second.ByteSizeLong() > 0) {
-      const auto requester_addr = request.requester_address();
-      if (requester_addr.worker_id() != rpc_address_.worker_id()) {
+    const auto requester_addr = request.requester_address();
+    if (requester_addr.worker_id() != rpc_address_.worker_id()) {
+      // BFS over dependency graph — forward entire subgraph to requester
+      std::queue<ObjectID> to_forward;
+      absl::flat_hash_set<ObjectID> forwarded;
+      to_forward.push(object_id);
+      while (!to_forward.empty()) {
+        auto oid = to_forward.front();
+        to_forward.pop();
+        if (forwarded.count(oid)) continue;
+        auto git = gossip_table_.find(oid);
+        if (git == gossip_table_.end() || git->second.ByteSizeLong() == 0) continue;
+        forwarded.insert(oid);
         rpc::GossipFutureRequest gossip_req;
-        gossip_req.set_object_id(object_id.Binary());
-        *gossip_req.mutable_task_spec() = it->second;
+        gossip_req.set_object_id(oid.Binary());
+        *gossip_req.mutable_task_spec() = git->second;
         gossip_req.set_owner_worker_id(rpc_address_.worker_id());
         *gossip_req.mutable_owner_address() = rpc_address_;
         auto conn = core_worker_client_pool_->GetOrConnect(requester_addr);
         conn->GossipFuture(
             gossip_req,
-            [object_id](const Status &status,
-                        const rpc::GossipFutureReply &) {
+            [oid](const Status &status, const rpc::GossipFutureReply &) {
               if (!status.ok()) {
-                RAY_LOG(INFO).WithField(object_id)
+                RAY_LOG(INFO).WithField(oid)
                     << "GOSSIP_FORWARD_FAILED: " << status.ToString();
               } else {
-                RAY_LOG(INFO).WithField(object_id)
+                RAY_LOG(INFO).WithField(oid)
                     << "GOSSIP_FORWARD: forwarded to requester";
               }
             });
+        // Enqueue deps for recursive forwarding
+        for (int i = 0; i < git->second.args_size(); i++) {
+          if (!git->second.args(i).has_object_ref()) continue;
+          auto dep_id = ObjectID::FromBinary(
+              git->second.args(i).object_ref().object_id());
+          if (!forwarded.count(dep_id)) {
+            to_forward.push(dep_id);
+          }
+        }
       }
     }
   }
