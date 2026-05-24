@@ -1510,6 +1510,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
         }
         for (const auto &[oid, spec] : gossip_table_) {
           if (oid == object_id) continue;
+          // Only recover objects the driver is directly waiting on
+          if (!gossip_pending_resolve_.count(oid)) continue;
           if (!has_dependent.count(oid) && spec.ByteSizeLong() > 0
               && !gossip_recovering_.count(oid)) {
             batch_leaves.push_back(oid);
@@ -2032,6 +2034,9 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   absl::flat_hash_set<ObjectID> gossip_recovering_
         ABSL_GUARDED_BY(gossip_mu_);
   std::function<void()> gossip_batch_recovery_fn_;
+
+  absl::flat_hash_set<ObjectID> gossip_pending_resolve_
+    ABSL_GUARDED_BY(gossip_mu_);
   ///
   /// Fields related to actor handles.
   ///

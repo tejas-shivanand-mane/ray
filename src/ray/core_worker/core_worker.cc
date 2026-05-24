@@ -411,41 +411,13 @@ CoreWorker::CoreWorker(
           },
           [this](const ObjectID &object_id) {
             absl::MutexLock lock(&gossip_mu_);
-            // Erase the resolved object
-            auto it = gossip_table_.find(object_id);
-            if (it != gossip_table_.end()) {
-                // Also erase deps that are no longer needed by any other entry
-                const auto &task_spec = it->second;
-                for (int i = 0; i < task_spec.args_size(); i++) {
-                    if (!task_spec.args(i).has_object_ref()) continue;
-                    auto dep_id = ObjectID::FromBinary(
-                        task_spec.args(i).object_ref().object_id());
-                    // Check if any other entry still depends on this dep
-                    bool still_needed = false;
-                    for (const auto &[oid, spec] : gossip_table_) {
-                        if (oid == object_id) continue;
-                        for (int j = 0; j < spec.args_size(); j++) {
-                            if (!spec.args(j).has_object_ref()) continue;
-                            if (ObjectID::FromBinary(
-                                    spec.args(j).object_ref().object_id()) == dep_id) {
-                                still_needed = true;
-                                break;
-                            }
-                        }
-                        if (still_needed) break;
-                    }
-                    if (!still_needed) {
-                        gossip_table_.erase(dep_id);
-                        gossip_recovering_.erase(dep_id);
-                    }
-                }
-                gossip_table_.erase(object_id);
-                gossip_recovering_.erase(object_id);
-            }
+            gossip_table_.erase(object_id);
+            gossip_recovering_.erase(object_id);
+            gossip_pending_resolve_.erase(object_id);
             RAY_LOG(INFO).WithField(object_id)
                 << "GOSSIP_PRUNE: pruned object_id=" << object_id.Hex()
                 << " table_size=" << gossip_table_.size();
-        });
+          });
 
       // Build batch recovery fn — captured by value into SubscribeToNodeChanges
       gossip_batch_recovery_fn_ = [this]() {
@@ -461,6 +433,7 @@ CoreWorker::CoreWorker(
             }
           }
           for (const auto &[oid, spec] : gossip_table_) {
+            if (!gossip_pending_resolve_.count(oid)) continue;  // ADD THIS
             if (!has_dependent.count(oid) && spec.ByteSizeLong() > 0
                 && !gossip_recovering_.count(oid)) {
               leaves.push_back(oid);
@@ -1094,6 +1067,10 @@ void CoreWorker::RegisterOwnershipInfoAndResolveFuture(
   } else {
     // We will ask the owner about the object until the object is
     // created or we can no longer reach the owner.
+    if (gossip_recovery_enabled_) {
+      absl::MutexLock lock(&gossip_mu_);
+      gossip_pending_resolve_.insert(object_id);
+    }
     future_resolver_->ResolveFutureAsync(object_id, owner_address);
   }
 }
