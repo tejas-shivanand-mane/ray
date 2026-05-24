@@ -28,14 +28,14 @@ TOTAL_END = 90        # allow enough time for gossip recovery
 # IMPORTANT:
 # All producer tasks are pinned to worker_b.
 # This prevents ray stop on worker_a from killing the actual producer tasks.
-@ray.remote(resources={"producer_b": 1}, max_retries=0)
+@ray.remote(num_cpus=0, resources={"producer_b": 0.001}, max_retries=0)
 def fast_task(seed):
     time.sleep(WAVE1_SLEEP)
     np.random.seed(seed % 10000)
     return np.random.rand(100, 100)
 
 
-@ray.remote(resources={"producer_b": 1}, max_retries=0)
+@ray.remote(num_cpus=0, resources={"producer_b": 0.001}, max_retries=0)
 def slow_task(seed):
     time.sleep(WAVE2_SLEEP)
     np.random.seed(seed % 10000)
@@ -43,7 +43,7 @@ def slow_task(seed):
 
 
 # Consumer task is also pinned to worker_b.
-@ray.remote(resources={"consumer_b": 1}, max_retries=0)
+@ray.remote(num_cpus=1, resources={"consumer_b": 1}, max_retries=0)
 def compute_sum(data):
     return float(np.sum(data))
 
