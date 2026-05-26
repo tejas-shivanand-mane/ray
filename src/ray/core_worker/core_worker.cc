@@ -403,50 +403,52 @@ CoreWorker::CoreWorker(
 
   RegisterToGcs(options_.worker_launch_time_ms, options_.worker_launched_time_ms);
 
-  if (options_.worker_type == WorkerType::DRIVER) {
-    if (gossip_recovery_enabled_) {
-      // Wire gossip callbacks into FutureResolver
-      future_resolver_->SetGossipCallbacks(
-          [this](const ObjectID &object_id) {
-            return TryGossipRecovery(object_id);
-          },
-          [this](const ObjectID &object_id) {
-            absl::MutexLock lock(&gossip_mu_);
-            gossip_table_.erase(object_id);
-            gossip_recovering_.erase(object_id);
-            gossip_pending_resolve_.erase(object_id);
-            RAY_LOG(INFO).WithField(object_id)
-                << "GOSSIP_PRUNE: pruned object_id=" << object_id.Hex()
-                << " table_size=" << gossip_table_.size();
-          });
-
-      // Build batch recovery fn — captured by value into SubscribeToNodeChanges
-      gossip_batch_recovery_fn_ = [this]() {
-        std::vector<ObjectID> leaves;
-        {
+  // Wire gossip recovery for ALL workers — decentralized recovery
+  // Each worker can independently recover its own borrowed refs
+  if (gossip_recovery_enabled_) {
+    // Wire gossip callbacks into FutureResolver
+    future_resolver_->SetGossipCallbacks(
+        [this](const ObjectID &object_id) {
+          return TryGossipRecovery(object_id);
+        },
+        [this](const ObjectID &object_id) {
           absl::MutexLock lock(&gossip_mu_);
-          absl::flat_hash_set<ObjectID> has_dependent;
-          for (const auto &[oid, spec] : gossip_table_) {
-            for (int i = 0; i < spec.args_size(); i++) {
-              if (!spec.args(i).has_object_ref()) continue;
-              has_dependent.insert(ObjectID::FromBinary(
-                  spec.args(i).object_ref().object_id()));
-            }
-          }
-          for (const auto &[oid, spec] : gossip_table_) {
-            if (!gossip_pending_resolve_.count(oid)) continue;  // ADD THIS
-            if (!has_dependent.count(oid) && spec.ByteSizeLong() > 0
-                && !gossip_recovering_.count(oid)) {
-              leaves.push_back(oid);
-              gossip_recovering_.insert(oid);
-            }
+          gossip_table_.erase(object_id);
+          gossip_recovering_.erase(object_id);
+          gossip_pending_resolve_.erase(object_id);
+          RAY_LOG(INFO).WithField(object_id)
+              << "GOSSIP_PRUNE: pruned object_id=" << object_id.Hex()
+              << " table_size=" << gossip_table_.size();
+        });
+
+    // Build batch recovery fn — node DEAD fallback for all workers
+    gossip_batch_recovery_fn_ = [this]() {
+      std::vector<ObjectID> leaves;
+      {
+        absl::MutexLock lock(&gossip_mu_);
+        absl::flat_hash_set<ObjectID> has_dependent;
+        for (const auto &[oid, spec] : gossip_table_) {
+          for (int i = 0; i < spec.args_size(); i++) {
+            if (!spec.args(i).has_object_ref()) continue;
+            has_dependent.insert(ObjectID::FromBinary(
+                spec.args(i).object_ref().object_id()));
           }
         }
-        for (const auto &leaf_oid : leaves) {
-          DoGossipRecovery(leaf_oid);
+        for (const auto &[oid, spec] : gossip_table_) {
+          if (!gossip_pending_resolve_.count(oid)) continue;
+          if (!has_dependent.count(oid) && spec.ByteSizeLong() > 0
+              && !gossip_recovering_.count(oid)) {
+            leaves.push_back(oid);
+            gossip_recovering_.insert(oid);
+          }
         }
-      };
-    }
+      }
+      for (const auto &leaf_oid : leaves) {
+        DoGossipRecovery(leaf_oid);
+      }
+    };
+  }
+  if (options_.worker_type == WorkerType::DRIVER) {
     SubscribeToNodeChanges();
   }
 
