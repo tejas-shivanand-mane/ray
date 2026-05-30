@@ -207,6 +207,10 @@ class ReferenceCounter : public ReferenceCounterInterface,
   std::vector<ObjectID> FlushObjectsToRecover() override;
 
   bool HasReference(const ObjectID &object_id) const override ABSL_LOCKS_EXCLUDED(mutex_);
+  /// Returns true if this worker borrowed the object directly from the owner
+  /// (i.e. not via another borrower). Used for single recoverer election in
+  /// gossip recovery — only direct borrowers should recover lost objects.
+  bool IsDirectBorrower(const ObjectID &object_id) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   void AddObjectRefStats(
       const absl::flat_hash_map<ObjectID, std::pair<int64_t, std::string>>

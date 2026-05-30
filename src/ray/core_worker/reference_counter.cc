@@ -978,6 +978,18 @@ bool ReferenceCounter::HasReference(const ObjectID &object_id) const {
   return object_id_refs_.find(object_id) != object_id_refs_.end();
 }
 
+bool ReferenceCounter::IsDirectBorrower(const ObjectID &object_id) const {
+  absl::MutexLock lock(&mutex_);
+  auto it = object_id_refs_.find(object_id);
+  if (it == object_id_refs_.end()) {
+    // Object not tracked — assume direct borrower to be safe
+    return true;
+  }
+  // Direct borrower if contained_in_borrowed_ids is empty
+  // Non-empty means ref was passed via another borrower (nested)
+  return it->second.nested().contained_in_borrowed_ids.empty();
+}
+
 size_t ReferenceCounter::NumObjectIDsInScope() const {
   absl::MutexLock lock(&mutex_);
   return object_id_refs_.size();

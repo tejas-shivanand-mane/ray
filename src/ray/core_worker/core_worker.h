@@ -1477,6 +1477,18 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   bool TryGossipRecovery(const ObjectID &object_id) {
     if (!gossip_recovery_enabled_) return false;
 
+    // Single recoverer election — only direct borrowers recover
+    // Nested borrowers (outer_object_id != nil) suppress OWNER_DIED and wait
+    // for their lender to recover the object instead
+    if (!reference_counter_->IsDirectBorrower(object_id)) {
+      absl::MutexLock lock(&gossip_mu_);
+      gossip_recovering_.insert(object_id);
+      RAY_LOG(INFO).WithField(object_id)
+          << "GOSSIP_RECOVER: nested borrower — suppressing OWNER_DIED, "
+          << "waiting for lender to recover";
+      return true;  // suppress OWNER_DIED
+    }
+
     std::vector<ObjectID> batch_leaves;
 
     {
