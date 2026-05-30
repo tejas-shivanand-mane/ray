@@ -988,10 +988,11 @@ bool ReferenceCounter::IsDirectBorrower(const ObjectID &object_id) const {
   // Direct borrower if contained_in_borrowed_ids is empty
   // Non-empty means ref was passed via another borrower (nested)
   bool is_direct = it->second.nested().contained_in_borrowed_ids.empty();
-  RAY_LOG(INFO).WithField(object_id)
-      << "IsDirectBorrower: " << (is_direct ? "true" : "false")
-      << " contained_in_borrowed_ids.size()="
-      << it->second.nested().contained_in_borrowed_ids.size();
+  // RAY_LOG(INFO).WithField(object_id)
+  //     << "IsDirectBorrower: " << (is_direct ? "true" : "false")
+  //     << " contained_in_borrowed_ids.size()="
+  //     << it->second.nested().contained_in_borrowed_ids.size();
+      
   return is_direct;
 }
 
