@@ -285,6 +285,10 @@ class ReferenceCounterInterface {
   /// \param[in] object_id The ID of the object.
   /// \return if the object has an owner.
   virtual bool HasOwner(const ObjectID &object_id) const = 0;
+  /// Returns true if this worker borrowed the object directly from the owner
+  /// (not via another borrower). Used for single recoverer election in gossip
+  /// recovery — only direct borrowers should recover lost objects.
+  virtual bool IsDirectBorrower(const ObjectID &object_id) const = 0;
 
   //// Checks to see if objects have an owner.
   ///
