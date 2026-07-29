@@ -56,6 +56,9 @@
 #include "ray/util/shared_lru.h"
 #include "src/ray/protobuf/pubsub.pb.h"
 
+#include <functional>
+#include <optional>
+
 namespace ray::core {
 
 JobID GetProcessJobID(const CoreWorkerOptions &options);
@@ -1592,7 +1595,22 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   void PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) const;
 
 
+  using RecoveryWitnessPublishCallback =
+      std::function<void(
+          bool,
+          std::optional<rpc::RecoveryManifest>)>;
 
+  void PublishRecoveryManifestToWitnesses(
+      const rpc::RecoveryManifest &manifest,
+      RecoveryWitnessPublishCallback callback);
+
+  using RecoveryWitnessLookupCallback =
+      std::function<void(
+          std::optional<rpc::RecoveryManifest>)>;
+
+  void LookupRecoveryManifestFromWitnesses(
+      const rpc::RecoveryManifest &cached_manifest,
+      RecoveryWitnessLookupCallback callback);
 
 
 

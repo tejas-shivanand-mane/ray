@@ -50,7 +50,6 @@
 #include "ray/util/process_utils.h"
 #include "ray/util/subreaper.h"
 #include <cstdint>
-#include <limits>
 
 
 
@@ -170,7 +169,41 @@ uint64_t StableWitnessScore(const TaskID &task_id, const NodeID &node_id) {
   return hash;
 }
 
+int CompareRecoveryManifestVersions(
+    const rpc::RecoveryManifest &left,
+    const rpc::RecoveryManifest &right) {
+  if (left.version().generation() <
+      right.version().generation()) {
+    return -1;
+  }
 
+  if (left.version().generation() >
+      right.version().generation()) {
+    return 1;
+  }
+
+  if (left.version().coordinator_rank() >
+      right.version().coordinator_rank()) {
+    return -1;
+  }
+
+  if (left.version().coordinator_rank() <
+      right.version().coordinator_rank()) {
+    return 1;
+  }
+
+  if (left.version().manifest_digest() <
+      right.version().manifest_digest()) {
+    return -1;
+  }
+
+  if (left.version().manifest_digest() >
+      right.version().manifest_digest()) {
+    return 1;
+  }
+
+  return 0;
+}
 
 
 
@@ -4082,6 +4115,11 @@ void CoreWorker::HandleReportRecoveryCandidate(
 
   const TaskID task_id = TaskID::FromBinary(admission_plan.proposed_manifest.task_id());
 
+
+  rpc::RecoveryManifest proposed_manifest;
+  proposed_manifest.CopyFrom(
+      admission_plan.proposed_manifest);
+
   auto candidate_client =
       core_worker_client_pool_->GetOrConnect(admission_plan.candidate_address);
 
@@ -4092,6 +4130,7 @@ void CoreWorker::HandleReportRecoveryCandidate(
        reservation_id,
        task_id,
        latest_manifest,
+       proposed_manifest = std::move(proposed_manifest),
        reply,
        send_reply_callback = std::move(send_reply_callback)](
           const Status &status, rpc::InstallRecoveryHolderReply &&install_reply) mutable {
@@ -4109,12 +4148,107 @@ void CoreWorker::HandleReportRecoveryCandidate(
           return;
         }
 
-        rpc::RecoveryManifest committed_manifest;
+        PublishRecoveryManifestToWitnesses(
+            proposed_manifest,
+            [this,
+            manager,
+            reservation_id,
+            task_id,
+            reply,
+            send_reply_callback =
+                std::move(send_reply_callback)](
+                bool witness_stored,
+                std::optional<rpc::RecoveryManifest>
+                    newer_manifest) mutable {
+              if (!witness_stored) {
+                manager->AbortHolderAdmission(
+                    reservation_id);
 
-        if (!manager->CommitHolderAdmission(reservation_id, &committed_manifest)) {
-          reply->set_result(rpc::ReportRecoveryCandidateReply::STALE_MANIFEST);
+                reply->set_result(
+                    rpc::ReportRecoveryCandidateReply::
+                        STALE_MANIFEST);
 
-          send_reply_callback(Status::OK(), nullptr, nullptr);
+                if (newer_manifest.has_value()) {
+                  reply->mutable_latest_manifest()->CopyFrom(
+                      newer_manifest.value());
+
+                  manager->ApplyCommittedManifest(
+                      newer_manifest.value());
+                }
+
+                send_reply_callback(
+                    Status::OK(), nullptr, nullptr);
+                return;
+              }
+
+              rpc::RecoveryManifest committed_manifest;
+
+              if (!manager->CommitHolderAdmission(
+                      reservation_id,
+                      &committed_manifest)) {
+                reply->set_result(
+                    rpc::ReportRecoveryCandidateReply::
+                        STALE_MANIFEST);
+
+                send_reply_callback(
+                    Status::OK(), nullptr, nullptr);
+                return;
+              }
+
+              reply->set_result(
+                  rpc::ReportRecoveryCandidateReply::ACCEPTED);
+
+              reply->mutable_latest_manifest()->CopyFrom(
+                  committed_manifest);
+
+              RAY_LOG(INFO).WithField(task_id)
+                  << "Committed recovery succession manifest "
+                  << "after witness publication with "
+                  << committed_manifest.succession_size()
+                  << " total members";
+
+              for (const rpc::RecoveryHolder &holder :
+                  committed_manifest.succession()) {
+                if (holder.address().worker_id() ==
+                    rpc_address_.worker_id()) {
+                  continue;
+                }
+
+                rpc::CommitRecoveryManifestRequest
+                    commit_request;
+
+                commit_request.mutable_manifest()->CopyFrom(
+                    committed_manifest);
+
+                const uint32_t holder_rank =
+                    holder.rank();
+
+                auto holder_client =
+                    core_worker_client_pool_->GetOrConnect(
+                        holder.address());
+
+                holder_client->CommitRecoveryManifest(
+                    std::move(commit_request),
+                    [task_id, holder_rank](
+                        const Status &commit_status,
+                        rpc::CommitRecoveryManifestReply
+                            &&commit_reply) {
+                      static_cast<void>(commit_reply);
+
+                      if (!commit_status.ok()) {
+                        RAY_LOG(WARNING)
+                            .WithField(task_id)
+                            << "Failed to commit recovery "
+                            << "manifest to rank "
+                            << holder_rank << ": "
+                            << commit_status;
+                      }
+                    });
+              }
+
+              send_reply_callback(
+                  Status::OK(), nullptr, nullptr);
+            });
           return;
         }
 
@@ -5373,5 +5507,169 @@ void CoreWorker::PopulateRecoveryWitnesses(
   manifest->set_witness_count(
       static_cast<uint32_t>(witnesses.size()));
 }
+
+
+void CoreWorker::PublishRecoveryManifestToWitnesses(
+    const rpc::RecoveryManifest &manifest,
+    RecoveryWitnessPublishCallback callback) {
+  if (!recovery_succession_enabled_ ||
+      manifest.task_id().empty() ||
+      manifest.witness_raylets_size() == 0) {
+    callback(false, std::nullopt);
+    return;
+  }
+
+  struct PublishState {
+    absl::Mutex mutex;
+    size_t completed ABSL_GUARDED_BY(mutex) = 0;
+    bool callback_sent ABSL_GUARDED_BY(mutex) = false;
+
+    std::optional<rpc::RecoveryManifest> newest_manifest
+        ABSL_GUARDED_BY(mutex);
+  };
+
+  auto state = std::make_shared<PublishState>();
+
+  const size_t witness_count =
+      static_cast<size_t>(
+          manifest.witness_raylets_size());
+
+  for (const rpc::Address &witness :
+       manifest.witness_raylets()) {
+    rpc::UpdateRecoveryWitnessRequest request;
+    request.mutable_manifest()->CopyFrom(manifest);
+
+    auto witness_client =
+        raylet_client_pool_->GetOrConnect(witness);
+
+    witness_client->UpdateRecoveryWitness(
+        std::move(request),
+        [state, witness_count, callback](
+            const Status &status,
+            rpc::UpdateRecoveryWitnessReply &&reply) mutable {
+          bool report_success = false;
+          bool report_failure = false;
+
+          std::optional<rpc::RecoveryManifest>
+              newest_manifest;
+
+          {
+            absl::MutexLock lock(&state->mutex);
+
+            ++state->completed;
+
+            if (reply.has_latest_manifest()) {
+              if (!state->newest_manifest.has_value() ||
+                  CompareRecoveryManifestVersions(
+                      reply.latest_manifest(),
+                      state->newest_manifest.value()) > 0) {
+                state->newest_manifest =
+                    reply.latest_manifest();
+              }
+            }
+
+            // One witness acknowledgement is enough for the
+            // lightweight advertised-confirmation rule.
+            if (!state->callback_sent &&
+                status.ok() &&
+                reply.stored()) {
+              state->callback_sent = true;
+              report_success = true;
+            } else if (!state->callback_sent &&
+                       state->completed == witness_count) {
+              state->callback_sent = true;
+              newest_manifest =
+                  state->newest_manifest;
+              report_failure = true;
+            }
+          }
+
+          if (report_success) {
+            callback(true, std::nullopt);
+          } else if (report_failure) {
+            callback(false,
+                     std::move(newest_manifest));
+          }
+        });
+  }
+}
+
+
+
+void CoreWorker::LookupRecoveryManifestFromWitnesses(
+    const rpc::RecoveryManifest &cached_manifest,
+    RecoveryWitnessLookupCallback callback) {
+  if (!recovery_succession_enabled_ ||
+      cached_manifest.task_id().empty() ||
+      cached_manifest.witness_raylets_size() == 0) {
+    callback(std::nullopt);
+    return;
+  }
+
+  struct LookupState {
+    absl::Mutex mutex;
+
+    size_t completed ABSL_GUARDED_BY(mutex) = 0;
+
+    std::optional<rpc::RecoveryManifest> newest
+        ABSL_GUARDED_BY(mutex);
+  };
+
+  auto state = std::make_shared<LookupState>();
+
+  const size_t witness_count =
+      static_cast<size_t>(
+          cached_manifest.witness_raylets_size());
+
+  for (const rpc::Address &witness :
+       cached_manifest.witness_raylets()) {
+    rpc::GetRecoveryWitnessRequest request;
+    request.set_task_id(
+        cached_manifest.task_id());
+
+    auto witness_client =
+        raylet_client_pool_->GetOrConnect(witness);
+
+    witness_client->GetRecoveryWitness(
+        std::move(request),
+        [state, witness_count, callback](
+            const Status &status,
+            rpc::GetRecoveryWitnessReply &&reply) mutable {
+          bool finished = false;
+
+          std::optional<rpc::RecoveryManifest>
+              newest;
+
+          {
+            absl::MutexLock lock(&state->mutex);
+
+            ++state->completed;
+
+            if (status.ok() &&
+                reply.found() &&
+                reply.has_manifest()) {
+              if (!state->newest.has_value() ||
+                  CompareRecoveryManifestVersions(
+                      reply.manifest(),
+                      state->newest.value()) > 0) {
+                state->newest =
+                    reply.manifest();
+              }
+            }
+
+            if (state->completed == witness_count) {
+              newest = state->newest;
+              finished = true;
+            }
+          }
+
+          if (finished) {
+            callback(std::move(newest));
+          }
+        });
+  }
+}
+
+
 
 }  // namespace ray::core

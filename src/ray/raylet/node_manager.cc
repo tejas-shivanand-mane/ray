@@ -227,12 +227,7 @@ const std::vector<std::string> node_manager_message_enum =
 
 
 
-bool SameRecoveryManifest(
-    const rpc::RecoveryManifest &left,
-    const rpc::RecoveryManifest &right) {
-  return left.SerializeAsString() ==
-         right.SerializeAsString();
-}
+
 
 bool ValidRecoveryManifest(
     const rpc::RecoveryManifest &manifest) {
@@ -397,8 +392,8 @@ void NodeManager::HandleUpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
   if (!RayConfig::instance().enable_recovery_succession() ||
-      !request.has_manifest() ||
-      request.manifest().task_id().empty()) {
+    !request.has_manifest() ||
+    !ValidRecoveryManifest(request.manifest())) {
     reply->set_stored(false);
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
@@ -443,7 +438,7 @@ void NodeManager::HandleGetRecoveryWitness(
     rpc::GetRecoveryWitnessReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
   if (!RayConfig::instance().enable_recovery_succession() ||
-      request.task_id().empty()) {
+      request.task_id().size() != TaskID::Size()) {
     reply->set_found(false);
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;

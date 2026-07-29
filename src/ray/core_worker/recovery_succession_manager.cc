@@ -50,19 +50,34 @@ bool ContainsWorker(const rpc::RecoveryManifest &manifest, const rpc::Address &a
 
 int CompareManifestVersions(const rpc::RecoveryManifest &left,
                             const rpc::RecoveryManifest &right) {
-  if (left.version().generation() < right.version().generation()) {
+  if (left.version().generation() <
+      right.version().generation()) {
     return -1;
   }
 
-  if (left.version().generation() > right.version().generation()) {
+  if (left.version().generation() >
+      right.version().generation()) {
     return 1;
   }
 
-  if (left.version().coordinator_rank() < right.version().coordinator_rank()) {
+  // Lower coordinator rank wins at the same generation.
+  if (left.version().coordinator_rank() >
+      right.version().coordinator_rank()) {
     return -1;
   }
 
-  if (left.version().coordinator_rank() > right.version().coordinator_rank()) {
+  if (left.version().coordinator_rank() <
+      right.version().coordinator_rank()) {
+    return 1;
+  }
+
+  if (left.version().manifest_digest() <
+      right.version().manifest_digest()) {
+    return -1;
+  }
+
+  if (left.version().manifest_digest() >
+      right.version().manifest_digest()) {
     return 1;
   }
 
@@ -86,7 +101,7 @@ rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
   manifest.set_task_id(task_id.Binary());
   manifest.set_job_id(job_id.Binary());
   manifest.set_target_holder_count(kDefaultTargetHolderCount);
-  manifest.set_witness_quorum(0);
+  manifest.set_witness_count(0);
 
   rpc::RecoveryManifestVersion *version = manifest.mutable_version();
   version->set_generation(1);
