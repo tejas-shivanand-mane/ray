@@ -49,6 +49,10 @@
 #include "ray/util/event.h"
 #include "ray/util/process_utils.h"
 #include "ray/util/subreaper.h"
+#include <cstdint>
+#include <limits>
+
+
 
 using json = nlohmann::json;
 using MessageType = ray::protocol::MessageType;
@@ -148,7 +152,32 @@ ShutdownReason ConvertExitTypeToShutdownReason(rpc::WorkerExitType exit_type,
   }
 }
 
+
+uint64_t StableWitnessScore(const TaskID &task_id, const NodeID &node_id) {
+  // FNV-1a over TaskID || NodeID.
+  constexpr uint64_t kOffsetBasis = 1469598103934665603ULL;
+  constexpr uint64_t kPrime = 1099511628211ULL;
+
+  uint64_t hash = kOffsetBasis;
+
+  const std::string input = task_id.Binary() + node_id.Binary();
+
+  for (const unsigned char byte : input) {
+    hash ^= static_cast<uint64_t>(byte);
+    hash *= kPrime;
+  }
+
+  return hash;
+}
+
+
+
+
+
 }  // namespace
+
+
+
 
 JobID GetProcessJobID(const CoreWorkerOptions &options) {
   if (options.worker_type == WorkerType::DRIVER) {
@@ -2119,10 +2148,19 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             scheduling_strategy,
                             root_detached_actor_id);
 
-  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr &&
-      RecoverySuccessionManager::IsEligibleTask(builder.GetMessage())) {
-    builder.SetRecoveryManifest(recovery_succession_manager_->BuildInitialManifest(
-        task_id, worker_context_->GetCurrentJobID(), max_retries));
+  if (recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
+      RecoverySuccessionManager::IsEligibleTask(
+          builder.GetMessage())) {
+    rpc::RecoveryManifest manifest =
+        recovery_succession_manager_->BuildInitialManifest(
+            task_id,
+            worker_context_->GetCurrentJobID(),
+            max_retries);
+
+    PopulateRecoveryWitnesses(&manifest);
+
+    builder.SetRecoveryManifest(manifest);
   }
 
   TaskSpecification task_spec = std::move(builder).ConsumeAndBuild();
@@ -5237,6 +5275,103 @@ void CoreWorker::FreeObjectOnNodesAsync(const ObjectID &object_id,
     }
     client->FreeLocalObjects(request);
   }
+}
+
+
+std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
+    const TaskID &task_id) const {
+  const uint32_t requested_count =
+      RayConfig::instance().recovery_succession_witness_count();
+
+  if (!recovery_succession_enabled_ || requested_count == 0 ||
+      gcs_client_ == nullptr) {
+    return {};
+  }
+
+  auto nodes_result = gcs_client_->Nodes().GetAllNoCache(
+      /*timeout_ms=*/5000,
+      rpc::GcsNodeInfo::ALIVE);
+
+  if (!nodes_result.ok()) {
+    RAY_LOG(WARNING).WithField(task_id)
+        << "Could not obtain alive nodes for recovery witnesses: "
+        << nodes_result.status();
+    return {};
+  }
+
+  struct WitnessCandidate {
+    uint64_t score;
+    rpc::Address address;
+  };
+
+  std::vector<WitnessCandidate> candidates;
+
+  for (const rpc::GcsNodeInfo &node : nodes_result.value()) {
+    if (node.node_id().empty() ||
+        node.node_manager_address().empty() ||
+        node.node_manager_port() <= 0) {
+      continue;
+    }
+
+    // Do not use the owner's own node as one of the independent witness nodes.
+    if (node.node_id() == rpc_address_.node_id()) {
+      continue;
+    }
+
+    rpc::Address address;
+    address.set_node_id(node.node_id());
+    address.set_ip_address(node.node_manager_address());
+    address.set_port(node.node_manager_port());
+
+    candidates.push_back(
+        WitnessCandidate{
+            StableWitnessScore(task_id, NodeID::FromBinary(node.node_id())),
+            std::move(address)});
+  }
+
+  std::sort(
+      candidates.begin(),
+      candidates.end(),
+      [](const WitnessCandidate &left, const WitnessCandidate &right) {
+        if (left.score != right.score) {
+          return left.score > right.score;
+        }
+
+        return left.address.node_id() < right.address.node_id();
+      });
+
+  const size_t selected_count =
+      std::min<size_t>(requested_count, candidates.size());
+
+  std::vector<rpc::Address> witnesses;
+  witnesses.reserve(selected_count);
+
+  for (size_t index = 0; index < selected_count; ++index) {
+    witnesses.push_back(std::move(candidates[index].address));
+  }
+
+  return witnesses;
+}
+
+void CoreWorker::PopulateRecoveryWitnesses(
+    rpc::RecoveryManifest *manifest) const {
+  if (manifest == nullptr || manifest->task_id().empty()) {
+    return;
+  }
+
+  manifest->clear_witness_raylets();
+
+  const TaskID task_id = TaskID::FromBinary(manifest->task_id());
+
+  std::vector<rpc::Address> witnesses =
+      SelectRecoveryWitnesses(task_id);
+
+  for (const rpc::Address &witness : witnesses) {
+    manifest->add_witness_raylets()->CopyFrom(witness);
+  }
+
+  manifest->set_witness_count(
+      static_cast<uint32_t>(witnesses.size()));
 }
 
 }  // namespace ray::core

@@ -576,5 +576,31 @@ void RayletClient::FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request)
       /*method_timeout_ms*/ -1);
 }
 
+
+void RayletClient::UpdateRecoveryWitness(
+    rpc::UpdateRecoveryWitnessRequest &&request,
+    const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) {
+  INVOKE_RPC_CALL(NodeManagerService,
+                  UpdateRecoveryWitness,
+                  request,
+                  callback,
+                  grpc_client_,
+                  /*method_timeout_ms=*/-1);
+}
+
+void RayletClient::GetRecoveryWitness(
+    rpc::GetRecoveryWitnessRequest &&request,
+    const rpc::ClientCallback<rpc::GetRecoveryWitnessReply> &callback) {
+  INVOKE_RPC_CALL(NodeManagerService,
+                  GetRecoveryWitness,
+                  request,
+                  callback,
+                  grpc_client_,
+                  /*method_timeout_ms=*/-1);
+}
+
+
+
+
 }  // namespace rpc
 }  // namespace ray

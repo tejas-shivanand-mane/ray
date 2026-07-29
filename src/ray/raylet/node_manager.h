@@ -60,6 +60,9 @@
 #include "ray/rpc/rpc_callback_types.h"
 #include "ray/util/clock.h"
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/synchronization/mutex.h"
+
 namespace ray::raylet {
 
 using rpc::ErrorType;
@@ -349,7 +352,35 @@ class NodeManager : public rpc::NodeManagerServiceHandler,
                                rpc::IsLocalWorkerDeadReply *reply,
                                rpc::SendReplyCallback send_reply_callback) override;
 
+  /// Stores a newer compact recovery manifest on this witness raylet.
+  void HandleUpdateRecoveryWitness(
+      rpc::UpdateRecoveryWitnessRequest request,
+      rpc::UpdateRecoveryWitnessReply *reply,
+      rpc::SendReplyCallback send_reply_callback) override;
+
+  /// Returns the latest compact recovery manifest stored for a task.
+  void HandleGetRecoveryWitness(
+      rpc::GetRecoveryWitnessRequest request,
+      rpc::GetRecoveryWitnessReply *reply,
+      rpc::SendReplyCallback send_reply_callback) override;
+
  private:
+
+
+
+  /// Compact recovery manifests retained while this raylet is alive.
+  ///
+  /// This map stores no TaskSpec, object data, ownership state, admission
+  /// reservation, or recovery lock.
+  mutable absl::Mutex recovery_witness_mutex_;
+
+  absl::flat_hash_map<TaskID, rpc::RecoveryManifest> recovery_witness_manifests_
+      ABSL_GUARDED_BY(recovery_witness_mutex_);
+
+
+
+
+
   /// Release pinned bookkeeping and delete plasma copies for `object_ids`.
   void FreeLocalObjects(const std::vector<ObjectID> &object_ids);
 

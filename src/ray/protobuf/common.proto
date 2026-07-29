@@ -1188,8 +1188,12 @@ message RecoveryManifest {
   // Number of non-owner holders desired.
   uint32 target_holder_count = 4;
 
+  // Raylets storing the latest compact manifest for this task.
   repeated Address witness_raylets = 5;
-  uint32 witness_quorum = 6;
+
+  // Number of configured witness copies requested when this manifest was built.
+  // This is replication metadata, not a voting or consensus quorum.
+  uint32 witness_count = 6;
 
   RecoveryManifestVersion version = 7;
 

@@ -1581,6 +1581,21 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                               const absl::flat_hash_set<NodeID> &locations);
 
  private:
+
+
+
+
+  /// Selects node-distinct witness raylets for a newly owned task.
+  std::vector<rpc::Address> SelectRecoveryWitnesses(const TaskID &task_id) const;
+
+  /// Adds selected witnesses to a newly created owner manifest.
+  void PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) const;
+
+
+
+
+
+
   /// Resolve a raylet RPC client by node id. Should be used to only get a temporary RPC
   /// client, since the retryable GRPC client relies on clients going out of scope to
   /// determine when to fail any pending RPCs
@@ -1592,6 +1607,9 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   static nlohmann::json OverrideRuntimeEnv(const nlohmann::json &child,
                                            const std::shared_ptr<nlohmann::json> &parent);
+
+
+                                           
 
   /// The following tests will use `OverrideRuntimeEnv` function.
   FRIEND_TEST(TestOverrideRuntimeEnv, TestOverrideEnvVars);

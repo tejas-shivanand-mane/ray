@@ -460,6 +460,34 @@ message FreeLocalObjectsRequest {
 
 message FreeLocalObjectsReply {}
 
+
+// Stores the latest compact recovery manifest on a witness raylet.
+//
+// This operation is idempotent. The raylet retains whichever manifest has the
+// newest version. It does not participate in holder admission.
+message UpdateRecoveryWitnessRequest {
+  RecoveryManifest manifest = 1;
+}
+
+message UpdateRecoveryWitnessReply {
+  // True when this request's manifest is now stored, or the same manifest was
+  // already stored.
+  bool stored = 1;
+
+  // Returned when the witness already has a newer manifest.
+  optional RecoveryManifest latest_manifest = 2;
+}
+
+// Reads the latest compact manifest known by this witness.
+message GetRecoveryWitnessRequest {
+  bytes task_id = 1;
+}
+
+message GetRecoveryWitnessReply {
+  bool found = 1;
+  optional RecoveryManifest manifest = 2;
+}
+
 // Service for inter-node-manager communication.
 service NodeManagerService {
   // Handle the case when GCS restarted.
@@ -602,4 +630,15 @@ service NodeManagerService {
   // Request the raylet to free plasma objects corresponding to the object ID
   // Failure: Retries, it's idempotent.
   rpc FreeLocalObjects(FreeLocalObjectsRequest) returns (FreeLocalObjectsReply);
+
+  // Stores compact recovery-succession metadata on this raylet.
+  // Idempotent. No voting, locking, or admission decision is performed.
+  rpc UpdateRecoveryWitness(UpdateRecoveryWitnessRequest)
+      returns (UpdateRecoveryWitnessReply);
+
+  // Returns the latest compact manifest stored for a task.
+  rpc GetRecoveryWitness(GetRecoveryWitnessRequest)
+      returns (GetRecoveryWitnessReply);
+
+
 }

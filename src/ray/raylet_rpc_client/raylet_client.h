@@ -178,6 +178,15 @@ class RayletClient : public RayletClientInterface {
 
   void FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request) override;
 
+
+  void UpdateRecoveryWitness(
+      rpc::UpdateRecoveryWitnessRequest &&request,
+      const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) override;
+
+  void GetRecoveryWitness(
+      rpc::GetRecoveryWitnessRequest &&request,
+      const rpc::ClientCallback<rpc::GetRecoveryWitnessReply> &callback) override;
+
  protected:
   /// gRPC client to the NodeManagerService.
   std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client_;

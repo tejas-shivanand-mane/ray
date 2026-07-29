@@ -200,6 +200,13 @@ RAY_CONFIG(int64_t, max_lineage_bytes, 1024 * 1024 * 1024)
 /// When false, Ray uses the official owner-based recovery behavior unchanged.
 RAY_CONFIG(bool, enable_recovery_succession, false)
 
+/// Number of node-distinct raylets that retain the latest compact recovery
+/// manifest for each recovery-succession task.
+///
+/// Witnesses store only RecoveryManifest. They do not store TaskSpec, object
+/// data, reference-counting state, reservations, votes, or locks.
+RAY_CONFIG(uint32_t, recovery_succession_witness_count, 2)
+
 
 /// Whether to re-populate plasma memory. This avoids memory allocation failures
 /// at runtime (SIGBUS errors creating new objects), however it will use more memory

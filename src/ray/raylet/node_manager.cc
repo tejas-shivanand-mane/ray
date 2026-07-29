@@ -69,6 +69,37 @@ namespace ray::raylet {
 
 namespace {
 
+int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
+                                    const rpc::RecoveryManifest &right) {
+  if (left.version().generation() < right.version().generation()) {
+    return -1;
+  }
+  if (left.version().generation() > right.version().generation()) {
+    return 1;
+  }
+
+  // For the same generation, lower coordinator rank wins.
+  if (left.version().coordinator_rank() > right.version().coordinator_rank()) {
+    return -1;
+  }
+  if (left.version().coordinator_rank() < right.version().coordinator_rank()) {
+    return 1;
+  }
+
+  if (left.version().manifest_digest() < right.version().manifest_digest()) {
+    return -1;
+  }
+  if (left.version().manifest_digest() > right.version().manifest_digest()) {
+    return 1;
+  }
+
+  return 0;
+}
+
+
+
+
+
 rpc::ObjectReference FlatbufferToSingleObjectReference(
     const flatbuffers::String &object_id, const protocol::Address &address) {
   rpc::ObjectReference ref;
@@ -193,6 +224,23 @@ const std::vector<std::string> node_manager_message_enum =
     GenerateEnumNames(ray::protocol::EnumNamesMessageType(),
                       static_cast<int>(ray::protocol::MessageType::MIN),
                       static_cast<int>(ray::protocol::MessageType::MAX));
+
+
+
+bool SameRecoveryManifest(
+    const rpc::RecoveryManifest &left,
+    const rpc::RecoveryManifest &right) {
+  return left.SerializeAsString() ==
+         right.SerializeAsString();
+}
+
+bool ValidRecoveryManifest(
+    const rpc::RecoveryManifest &manifest) {
+  return manifest.task_id().size() ==
+             TaskID::Size() &&
+         manifest.has_version() &&
+         manifest.version().generation() > 0;
+}         
 
 }  // namespace
 
@@ -341,6 +389,82 @@ NodeManager::NodeManager(
   periodical_runner_->RunFnPeriodically([this]() { GCWorkerFailureReason(); },
                                         RayConfig::instance().task_failure_entry_ttl_ms(),
                                         "NodeManager.GCTaskFailureReason");
+}
+
+
+void NodeManager::HandleUpdateRecoveryWitness(
+    rpc::UpdateRecoveryWitnessRequest request,
+    rpc::UpdateRecoveryWitnessReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  if (!RayConfig::instance().enable_recovery_succession() ||
+      !request.has_manifest() ||
+      request.manifest().task_id().empty()) {
+    reply->set_stored(false);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  const rpc::RecoveryManifest &incoming = request.manifest();
+  const TaskID task_id = TaskID::FromBinary(incoming.task_id());
+
+  {
+    absl::MutexLock lock(&recovery_witness_mutex_);
+
+    auto existing_it = recovery_witness_manifests_.find(task_id);
+
+    if (existing_it == recovery_witness_manifests_.end()) {
+      recovery_witness_manifests_[task_id].CopyFrom(incoming);
+      reply->set_stored(true);
+    } else {
+      rpc::RecoveryManifest &existing = existing_it->second;
+      const int comparison =
+          CompareRecoveryManifestVersions(incoming, existing);
+
+      if (comparison > 0) {
+        existing.CopyFrom(incoming);
+        reply->set_stored(true);
+      } else if (comparison == 0 &&
+                 incoming.SerializeAsString() ==
+                     existing.SerializeAsString()) {
+        // Idempotent retry.
+        reply->set_stored(true);
+      } else {
+        reply->set_stored(false);
+        reply->mutable_latest_manifest()->CopyFrom(existing);
+      }
+    }
+  }
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
+void NodeManager::HandleGetRecoveryWitness(
+    rpc::GetRecoveryWitnessRequest request,
+    rpc::GetRecoveryWitnessReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  if (!RayConfig::instance().enable_recovery_succession() ||
+      request.task_id().empty()) {
+    reply->set_found(false);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(request.task_id());
+
+  {
+    absl::MutexLock lock(&recovery_witness_mutex_);
+
+    const auto manifest_it = recovery_witness_manifests_.find(task_id);
+
+    if (manifest_it == recovery_witness_manifests_.end()) {
+      reply->set_found(false);
+    } else {
+      reply->set_found(true);
+      reply->mutable_manifest()->CopyFrom(manifest_it->second);
+    }
+  }
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
 }
 
 void NodeManager::Start(rpc::GcsNodeInfo &&self_node_info) {
@@ -2241,6 +2365,9 @@ void NodeManager::HandleIsLocalWorkerDead(rpc::IsLocalWorkerDeadRequest request,
   reply->set_is_dead(!registered);
   send_reply_callback(Status::OK(), /*success=*/nullptr, /*failure=*/nullptr);
 }
+
+
+
 
 void NodeManager::HandleDrainRaylet(rpc::DrainRayletRequest request,
                                     rpc::DrainRayletReply *reply,

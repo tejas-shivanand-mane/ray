@@ -228,6 +228,15 @@ class RayletClientInterface {
   virtual void FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request) = 0;
 
   virtual ~RayletClientInterface() = default;
+
+  virtual void UpdateRecoveryWitness(
+      rpc::UpdateRecoveryWitnessRequest &&request,
+      const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) = 0;
+
+  virtual void GetRecoveryWitness(
+      rpc::GetRecoveryWitnessRequest &&request,
+      const rpc::ClientCallback<rpc::GetRecoveryWitnessReply> &callback) = 0;
+  
 };
 
 }  // namespace ray
