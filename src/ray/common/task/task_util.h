@@ -221,6 +221,15 @@ class TaskSpecBuilder {
     return *this;
   }
 
+
+  /// Attach recovery succession information to a normal task.
+  TaskSpecBuilder &SetRecoveryManifest(
+      const rpc::RecoveryManifest &manifest) {
+    message_->mutable_recovery_manifest()->CopyFrom(
+        manifest);
+    return *this;
+  }
+
   /// Set the driver attributes of the task spec.
   /// See `common.proto` for meaning of the arguments.
   ///

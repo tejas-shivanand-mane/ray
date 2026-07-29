@@ -254,3 +254,6 @@ CLAUDE.local.md
 # Worktrees
 .worktrees/
 .claude/worktrees/
+
+ray-build.log
+phase1-build.log

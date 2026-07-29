@@ -27,6 +27,7 @@ ray_cc_library(
         ":object_recovery_manager",
         ":plasma_store_provider",
         ":profile_event",
+        ":recovery_succession_manager",
         ":reference_counter",
         ":shutdown_coordinator",
         ":task_event_buffer",
@@ -63,6 +64,24 @@ ray_cc_library(
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_prod",
+    ],
+)
+
+ray_cc_library(
+    name = "recovery_succession_manager",
+    srcs = [
+        "recovery_succession_manager.cc",
+    ],
+    hdrs = [
+        "recovery_succession_manager.h",
+    ],
+    visibility = [":__subpackages__"],
+    deps = [
+        "//src/ray/common:id",
+        "//src/ray/common:task_common",
+        "//src/ray/protobuf:common_cc_proto",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
