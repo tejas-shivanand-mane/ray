@@ -24,17 +24,13 @@ def find_log_lines(
                 continue
 
             try:
-                content = path.read_text(
-                    errors="replace",
-                )
+                content = path.read_text(errors="replace")
             except OSError:
                 continue
 
             for line in content.splitlines():
                 if text in line:
-                    matches.append(
-                        f"{path.name}: {line}",
-                    )
+                    matches.append(f"{path.name}: {line}")
 
     return matches
 
@@ -75,8 +71,11 @@ def produce():
     return 42
 
 
+# max_retries=0 prevents these tasks from retaining produced_ref
+# inside their reconstructable lineage.
 @ray.remote(
     resources={"holder_a_node": 0.01},
+    max_retries=0,
 )
 def holder_a(wrapped_ref):
     return ray.get(wrapped_ref[0])
@@ -84,6 +83,7 @@ def holder_a(wrapped_ref):
 
 @ray.remote(
     resources={"holder_b_node": 0.01},
+    max_retries=0,
 )
 def holder_b(wrapped_ref):
     return ray.get(wrapped_ref[0])
@@ -96,17 +96,25 @@ try:
 
     assert ray.get(produced_ref) == 42
 
-    assert ray.get(
-        holder_a.remote([produced_ref]),
-    ) == 42
+    holder_a_result = holder_a.remote([produced_ref])
+    holder_b_result = holder_b.remote([produced_ref])
 
-    assert ray.get(
-        holder_b.remote([produced_ref]),
-    ) == 42
+    assert ray.get(holder_a_result) == 42
+    assert ray.get(holder_b_result) == 42
 
-    # Allow holder admission and witness publication.
+    # Allow candidate reports, holder admission, and witness publication.
     time.sleep(5)
 
+    # Release the holder-task outputs first so their task lineages can be removed.
+    del holder_a_result
+    del holder_b_result
+
+    gc.collect()
+    global_gc()
+
+    time.sleep(3)
+
+    # Now release the actual recoverable object.
     del produced_ref
 
     gc.collect()
@@ -117,7 +125,7 @@ try:
     gc.collect()
     global_gc()
 
-    # Allow distributed reference deletion and cleanup passes.
+    # Allow distributed reference deletion and periodic cleanup.
     time.sleep(12)
 
     session_dirs = {
@@ -148,12 +156,12 @@ try:
 
     if not published:
         raise AssertionError(
-            "No owner-side tombstone publication was found.",
+            "No owner-side tombstone publication was found."
         )
 
     if not applied:
         raise AssertionError(
-            "No holder applied the tombstone.",
+            "No holder applied the tombstone."
         )
 
     print("Tombstone publication:")

@@ -131,10 +131,8 @@ class RecoverySuccessionManager {
 
 
 
-  /// Returns newer tombstone manifests for owned tasks whose outputs are all
-  /// out of scope. This method does not modify local state.
-  std::vector<rpc::RecoveryManifest> BuildTombstoneCandidates(
-      const std::function<bool(const ObjectID &)> &has_reference) const;
+  std::optional<rpc::RecoveryManifest> BuildTombstoneForTask(
+      const TaskID &task_id) const;
 
   /// Applies a tombstone and removes retained lineage and object metadata.
   bool ApplyRecoveryTombstone(

@@ -2103,7 +2103,6 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
 
 
-  void CheckRecoverySuccessionCleanup();
 
   void PublishRecoveryTombstone(
       rpc::RecoveryManifest tombstone);

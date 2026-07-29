@@ -818,75 +818,54 @@ void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
 }
 
 
-std::vector<rpc::RecoveryManifest>
-RecoverySuccessionManager::BuildTombstoneCandidates(
-    const std::function<bool(const ObjectID &)> &has_reference) const {
-  std::vector<rpc::RecoveryManifest> tombstones;
-
-  if (!has_reference) {
-    return tombstones;
-  }
-
+std::optional<rpc::RecoveryManifest>
+RecoverySuccessionManager::BuildTombstoneForTask(
+    const TaskID &task_id) const {
   absl::MutexLock lock(&mutex_);
 
-  for (const auto &[task_id, task_state] : task_states_) {
-    if (!task_state.manifest_committed ||
-        task_state.manifest.tombstoned() ||
-        !task_state.task_spec.has_value()) {
-      continue;
-    }
+  const auto task_it = task_states_.find(task_id);
 
-    const rpc::RecoveryHolder *coordinator =
-        FindHolderByRank(
-            task_state.manifest,
-            task_state.manifest.version().coordinator_rank());
-
-    if (coordinator == nullptr ||
-        !SameWorker(coordinator->address(), self_address_)) {
-      continue;
-    }
-
-    bool found_output = false;
-    bool output_still_referenced = false;
-
-    const std::string task_id_binary = task_id.Binary();
-
-    for (const auto &[object_id, metadata] :
-         object_recovery_metadata_) {
-      if (metadata.task_id() != task_id_binary) {
-        continue;
-      }
-
-      found_output = true;
-
-      if (has_reference(object_id)) {
-        output_still_referenced = true;
-        break;
-      }
-    }
-
-    if (!found_output || output_still_referenced) {
-      continue;
-    }
-
-    rpc::RecoveryManifest tombstone;
-    tombstone.CopyFrom(task_state.manifest);
-
-    tombstone.set_tombstoned(true);
-    tombstone.set_frozen(true);
-
-    rpc::RecoveryManifestVersion *version =
-        tombstone.mutable_version();
-
-    version->set_generation(
-        task_state.manifest.version().generation() + 1);
-
-    version->clear_manifest_digest();
-
-    tombstones.push_back(std::move(tombstone));
+  if (task_it == task_states_.end()) {
+    return std::nullopt;
   }
 
-  return tombstones;
+  const TaskRecoveryState &task_state =
+      task_it->second;
+
+  if (!task_state.manifest_committed ||
+      task_state.manifest.tombstoned() ||
+      !task_state.task_spec.has_value()) {
+    return std::nullopt;
+  }
+
+  const rpc::RecoveryHolder *coordinator =
+      FindHolderByRank(
+          task_state.manifest,
+          task_state.manifest.version()
+              .coordinator_rank());
+
+  if (coordinator == nullptr ||
+      !SameWorker(
+          coordinator->address(),
+          self_address_)) {
+    return std::nullopt;
+  }
+
+  rpc::RecoveryManifest tombstone;
+  tombstone.CopyFrom(task_state.manifest);
+
+  tombstone.set_tombstoned(true);
+  tombstone.set_frozen(true);
+
+  rpc::RecoveryManifestVersion *version =
+      tombstone.mutable_version();
+
+  version->set_generation(
+      task_state.manifest.version().generation() + 1);
+
+  version->clear_manifest_digest();
+
+  return tombstone;
 }
 
 bool RecoverySuccessionManager::ApplyRecoveryTombstone(
