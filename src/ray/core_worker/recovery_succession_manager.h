@@ -97,8 +97,36 @@ class RecoverySuccessionManager {
   /// Adds recovery metadata to direct and nested ObjectRef arguments.
   void PopulateTaskArgumentMetadata(rpc::TaskSpec *task_spec) const;
 
-  /// Actual recovery is implemented in Phase 5.
-  bool TryRecoverObject(const ObjectID &object_id);
+
+  struct BorrowedObjectRecoveryPlan {
+  TaskID task_id;
+  uint32_t return_index = 0;
+  rpc::RecoveryManifest cached_manifest;
+  };
+
+  enum class ReplayPreparationResult {
+    READY,
+    TASK_NOT_FOUND,
+    MANIFEST_STALE,
+    TOMBSTONED,
+    RETRY_LIMIT_EXCEEDED,
+    WRONG_HOLDER,
+  };
+
+  bool GetBorrowedObjectRecoveryPlan(
+      const ObjectID &object_id,
+      BorrowedObjectRecoveryPlan *plan) const;
+
+  ReplayPreparationResult PrepareTaskReplay(
+      const rpc::RecoverTaskOutputRequest &request,
+      rpc::TaskSpec *task_spec,
+      rpc::RecoveryManifest *latest_manifest);
+
+  void UpdateBorrowedObjectManifest(
+      const ObjectID &object_id,
+      const rpc::RecoveryManifest &manifest);
+
+
 
   /// Failure-based takeover and repair are implemented later.
   void HandleWorkerFailure(const WorkerID &worker_id);

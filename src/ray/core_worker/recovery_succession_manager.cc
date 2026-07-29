@@ -678,9 +678,129 @@ void RecoverySuccessionManager::UpdateManifestForTaskLocked(
   }
 }
 
-bool RecoverySuccessionManager::TryRecoverObject(const ObjectID &object_id) {
-  static_cast<void>(object_id);
-  return false;
+bool RecoverySuccessionManager::GetBorrowedObjectRecoveryPlan(
+    const ObjectID &object_id,
+    BorrowedObjectRecoveryPlan *plan) const {
+  if (plan == nullptr) {
+    return false;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto borrowed_it = borrowed_objects_.find(object_id);
+  if (borrowed_it == borrowed_objects_.end()) {
+    return false;
+  }
+
+  plan->task_id = borrowed_it->second.task_id;
+  plan->return_index = borrowed_it->second.return_index;
+  plan->cached_manifest.CopyFrom(
+      borrowed_it->second.cached_manifest);
+
+  return true;
+}
+
+RecoverySuccessionManager::ReplayPreparationResult
+RecoverySuccessionManager::PrepareTaskReplay(
+    const rpc::RecoverTaskOutputRequest &request,
+    rpc::TaskSpec *task_spec,
+    rpc::RecoveryManifest *latest_manifest) {
+  if (task_spec == nullptr ||
+      latest_manifest == nullptr ||
+      request.task_id().size() != TaskID::Size() ||
+      !request.has_requester_manifest()) {
+    return ReplayPreparationResult::TASK_NOT_FOUND;
+  }
+
+  const TaskID task_id =
+      TaskID::FromBinary(request.task_id());
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto task_it = task_states_.find(task_id);
+  if (task_it == task_states_.end() ||
+      !task_it->second.task_spec.has_value() ||
+      !task_it->second.manifest_committed) {
+    return ReplayPreparationResult::TASK_NOT_FOUND;
+  }
+
+  TaskRecoveryState &state = task_it->second;
+  latest_manifest->CopyFrom(state.manifest);
+
+  if (state.manifest.tombstoned()) {
+    return ReplayPreparationResult::TOMBSTONED;
+  }
+
+  if (CompareManifestVersions(
+          request.requester_manifest(),
+          state.manifest) < 0) {
+    return ReplayPreparationResult::MANIFEST_STALE;
+  }
+
+  const int32_t max_recovery_attempts =
+    state.manifest.max_recovery_attempts();
+
+  if (max_recovery_attempts >= 0 &&
+      state.manifest.recovery_attempt() >=
+          static_cast<uint32_t>(max_recovery_attempts)) {
+    return ReplayPreparationResult::RETRY_LIMIT_EXCEEDED;
+  }
+
+  bool self_is_holder = false;
+
+  for (const rpc::RecoveryHolder &holder :
+       state.manifest.succession()) {
+    if (SameWorker(holder.address(), self_address_)) {
+      self_is_holder = true;
+      break;
+    }
+  }
+
+  if (!self_is_holder) {
+    return ReplayPreparationResult::WRONG_HOLDER;
+  }
+
+  state.manifest.set_recovery_attempt(
+      state.manifest.recovery_attempt() + 1);
+
+  state.task_spec->mutable_recovery_manifest()->CopyFrom(
+      state.manifest);
+
+  task_spec->CopyFrom(state.task_spec.value());
+  latest_manifest->CopyFrom(state.manifest);
+
+  return ReplayPreparationResult::READY;
+}
+
+void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
+    const ObjectID &object_id,
+    const rpc::RecoveryManifest &manifest) {
+  if (manifest.task_id().empty()) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  auto borrowed_it = borrowed_objects_.find(object_id);
+  if (borrowed_it == borrowed_objects_.end()) {
+    return;
+  }
+
+  if (CompareManifestVersions(
+          manifest,
+          borrowed_it->second.cached_manifest) < 0) {
+    return;
+  }
+
+  borrowed_it->second.cached_manifest.CopyFrom(manifest);
+
+  auto metadata_it =
+      object_recovery_metadata_.find(object_id);
+
+  if (metadata_it != object_recovery_metadata_.end()) {
+    metadata_it->second.mutable_manifest()->CopyFrom(
+        manifest);
+  }
 }
 
 void RecoverySuccessionManager::HandleWorkerFailure(const WorkerID &worker_id) {

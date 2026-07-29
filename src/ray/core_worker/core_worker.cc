@@ -604,7 +604,34 @@ CoreWorker::CoreWorker(
             // the reference went out of scope since the call to the ref counter to get
             // the lost objects. It's okay to not mark the object as failed or recover
             // the object since there are no reference holders.
-            RAY_UNUSED(object_recovery_manager_->RecoverObject(object_id));
+            if (recovery_succession_enabled_ &&
+              recovery_succession_manager_ != nullptr) {
+            RecoverySuccessionManager::
+                BorrowedObjectRecoveryPlan plan;
+
+            if (recovery_succession_manager_
+                    ->GetBorrowedObjectRecoveryPlan(
+                        object_id,
+                        &plan)) {
+              RecoverBorrowedObject(
+                  object_id,
+                  [this, object_id](bool started) {
+                    if (!started) {
+                      RAY_UNUSED(
+                          object_recovery_manager_
+                              ->RecoverObject(object_id));
+                    }
+                  });
+
+                continue;
+                }
+              }
+
+          RAY_UNUSED(
+              object_recovery_manager_->RecoverObject(
+                  object_id));
+
+
           }
         }
       },
@@ -4299,20 +4326,276 @@ void CoreWorker::HandleCommitRecoveryManifest(
   send_reply_callback(Status::OK(), nullptr, nullptr);
 }
 
-void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
-                                         rpc::RecoverTaskOutputReply *reply,
-                                         rpc::SendReplyCallback send_reply_callback) {
-  static_cast<void>(request);
+void CoreWorker::HandleRecoverTaskOutput(
+    rpc::RecoverTaskOutputRequest request,
+    rpc::RecoverTaskOutputReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  if (!recovery_succession_enabled_ ||
+      recovery_succession_manager_ == nullptr) {
+    reply->set_result(
+        rpc::RecoverTaskOutputReply::DISABLED);
 
-  if (!recovery_succession_enabled_ || recovery_succession_manager_ == nullptr) {
-    reply->set_result(rpc::RecoverTaskOutputReply::DISABLED);
-  } else {
-    // Actual recovery is implemented in Phase 5.
-    reply->set_result(rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
+    send_reply_callback(
+        Status::OK(), nullptr, nullptr);
+    return;
   }
 
-  send_reply_callback(Status::OK(), nullptr, nullptr);
+  rpc::TaskSpec replay_task_proto;
+  rpc::RecoveryManifest latest_manifest;
+
+  const auto preparation =
+      recovery_succession_manager_->PrepareTaskReplay(
+          request,
+          &replay_task_proto,
+          &latest_manifest);
+
+  reply->mutable_latest_manifest()->CopyFrom(
+      latest_manifest);
+
+  using PreparationResult =
+      RecoverySuccessionManager::
+          ReplayPreparationResult;
+
+  switch (preparation) {
+  case PreparationResult::TASK_NOT_FOUND:
+  case PreparationResult::WRONG_HOLDER:
+    reply->set_result(
+        rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
+    break;
+
+  case PreparationResult::MANIFEST_STALE:
+    reply->set_result(
+        rpc::RecoverTaskOutputReply::MANIFEST_STALE);
+    break;
+
+  case PreparationResult::TOMBSTONED:
+    reply->set_result(
+        rpc::RecoverTaskOutputReply::TOMBSTONED);
+    break;
+
+  case PreparationResult::RETRY_LIMIT_EXCEEDED:
+    reply->set_result(
+        rpc::RecoverTaskOutputReply::
+            RETRY_LIMIT_EXCEEDED);
+    break;
+
+  case PreparationResult::READY:
+    break;
+  }
+
+  if (preparation != PreparationResult::READY) {
+    send_reply_callback(
+        Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  TaskSpecification replay_task(
+      std::move(replay_task_proto));
+
+  const int32_t max_retries =
+      replay_task.MaxRetries();
+
+  std::vector<rpc::ObjectReference> returned_refs =
+      task_manager_->AddPendingTask(
+          rpc_address_,
+          replay_task,
+          "recovery-succession replay",
+          max_retries);
+
+  if (request.return_index() >= returned_refs.size()) {
+    reply->set_result(
+        rpc::RecoverTaskOutputReply::REPLAY_FAILED);
+
+    send_reply_callback(
+        Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  recovery_succession_manager_->RegisterOwnedTask(
+      replay_task,
+      &returned_refs);
+
+  reply->set_result(
+      rpc::RecoverTaskOutputReply::RECOVERED);
+
+  reply->mutable_replacement_ref()->CopyFrom(
+      returned_refs[request.return_index()]);
+
+  const TaskID task_id =
+      TaskID::FromBinary(request.task_id());
+
+  RAY_LOG(INFO).WithField(task_id)
+      << "Phase 5 recovery replay accepted for return "
+      << request.return_index();
+
+  io_service_.post(
+      [this,
+       replay_task =
+           std::move(replay_task)]() mutable {
+        normal_task_submitter_->SubmitTask(
+            std::move(replay_task));
+      },
+      "CoreWorker.RecoverTaskOutput");
+
+  send_reply_callback(
+      Status::OK(), nullptr, nullptr);
 }
+
+
+void CoreWorker::RecoverBorrowedObject(
+    const ObjectID &object_id,
+    RecoveryAttemptCallback callback) {
+  if (!recovery_succession_enabled_ ||
+      recovery_succession_manager_ == nullptr) {
+    callback(false);
+    return;
+  }
+
+  RecoverySuccessionManager::
+      BorrowedObjectRecoveryPlan plan;
+
+  if (!recovery_succession_manager_
+           ->GetBorrowedObjectRecoveryPlan(
+               object_id,
+               &plan)) {
+    callback(false);
+    return;
+  }
+
+  LookupRecoveryManifestFromWitnesses(
+      plan.cached_manifest,
+      [this,
+       object_id,
+       plan = std::move(plan),
+       callback = std::move(callback)](
+          std::optional<rpc::RecoveryManifest>
+              witness_manifest) mutable {
+        rpc::RecoveryManifest effective_manifest;
+
+        if (witness_manifest.has_value() &&
+            CompareRecoveryManifestVersions(
+                witness_manifest.value(),
+                plan.cached_manifest) > 0) {
+          effective_manifest.CopyFrom(
+              witness_manifest.value());
+
+          recovery_succession_manager_
+              ->UpdateBorrowedObjectManifest(
+                  object_id,
+                  effective_manifest);
+        } else {
+          effective_manifest.CopyFrom(
+              plan.cached_manifest);
+        }
+
+        TryRecoveryHolders(
+            object_id,
+            plan.return_index,
+            effective_manifest,
+            0,
+            std::move(callback));
+      });
+}
+
+void CoreWorker::TryRecoveryHolders(
+    const ObjectID &object_id,
+    uint32_t return_index,
+    const rpc::RecoveryManifest &manifest,
+    size_t holder_index,
+    RecoveryAttemptCallback callback) {
+  if (holder_index >=
+      static_cast<size_t>(
+          manifest.succession_size())) {
+    callback(false);
+    return;
+  }
+
+  const rpc::RecoveryHolder &holder =
+      manifest.succession(
+          static_cast<int>(holder_index));
+
+  // Rank zero is the original owner, which is the worker
+  // whose failure triggered succession recovery.
+  if (holder.rank() == 0) {
+    TryRecoveryHolders(
+        object_id,
+        return_index,
+        manifest,
+        holder_index + 1,
+        std::move(callback));
+    return;
+  }
+
+  rpc::RecoverTaskOutputRequest request;
+  request.set_task_id(manifest.task_id());
+  request.set_return_index(return_index);
+  request.mutable_requester_manifest()->CopyFrom(
+      manifest);
+
+  auto holder_client =
+      core_worker_client_pool_->GetOrConnect(
+          holder.address());
+
+  const uint32_t holder_rank = holder.rank();
+
+  holder_client->RecoverTaskOutput(
+      std::move(request),
+      [this,
+       object_id,
+       return_index,
+       manifest,
+       holder_index,
+       holder_rank,
+       callback = std::move(callback)](
+          const Status &status,
+          rpc::RecoverTaskOutputReply &&reply) mutable {
+        if (!status.ok()) {
+          TryRecoveryHolders(
+              object_id,
+              return_index,
+              manifest,
+              holder_index + 1,
+              std::move(callback));
+          return;
+        }
+
+        if (reply.result() ==
+            rpc::RecoverTaskOutputReply::
+                MANIFEST_STALE &&
+            reply.has_latest_manifest()) {
+          recovery_succession_manager_
+              ->UpdateBorrowedObjectManifest(
+                  object_id,
+                  reply.latest_manifest());
+
+          TryRecoveryHolders(
+              object_id,
+              return_index,
+              reply.latest_manifest(),
+              0,
+              std::move(callback));
+          return;
+        }
+
+        if (reply.result() !=
+            rpc::RecoverTaskOutputReply::RECOVERED) {
+          TryRecoveryHolders(
+              object_id,
+              return_index,
+              manifest,
+              holder_index + 1,
+              std::move(callback));
+          return;
+        }
+
+        RAY_LOG(INFO).WithField(object_id)
+            << "Phase 5 recovery accepted by holder rank "
+            << holder_rank;
+
+        callback(true);
+      });
+}
+
 
 void CoreWorker::HandleApplyRecoveryTombstone(
     rpc::ApplyRecoveryTombstoneRequest request,

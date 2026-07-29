@@ -1613,6 +1613,21 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
       RecoveryWitnessLookupCallback callback);
 
 
+  using RecoveryAttemptCallback =
+    std::function<void(bool)>;
+
+  void RecoverBorrowedObject(
+      const ObjectID &object_id,
+      RecoveryAttemptCallback callback);
+
+  void TryRecoveryHolders(
+      const ObjectID &object_id,
+      uint32_t return_index,
+      const rpc::RecoveryManifest &manifest,
+      size_t holder_index,
+      RecoveryAttemptCallback callback);
+
+
 
   /// Resolve a raylet RPC client by node id. Should be used to only get a temporary RPC
   /// client, since the retryable GRPC client relies on clients going out of scope to
