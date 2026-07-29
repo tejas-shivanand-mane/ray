@@ -58,6 +58,9 @@
 
 #include <functional>
 #include <optional>
+#include "absl/container/flat_hash_set.h"
+
+
 
 namespace ray::core {
 
@@ -2090,8 +2093,23 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// Distributed recovery succession state. Null when the feature is disabled.
   std::shared_ptr<RecoverySuccessionManager> recovery_succession_manager_;
 
+
+  absl::flat_hash_set<TaskID>
+    recovery_tombstones_in_flight_;
+
   /// Manages recovery of objects stored in remote plasma nodes.
   std::unique_ptr<ObjectRecoveryManager> object_recovery_manager_;
+
+
+
+
+  void CheckRecoverySuccessionCleanup();
+
+  void PublishRecoveryTombstone(
+      rpc::RecoveryManifest tombstone);
+
+  void PropagateRecoveryTombstoneToHolders(
+      const rpc::RecoveryManifest &tombstone);
 
   ///
   /// Fields related to actor handles.

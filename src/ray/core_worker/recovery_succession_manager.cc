@@ -481,7 +481,7 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
   const auto task_it = task_states_.find(task_id);
 
   if (task_it == task_states_.end()) {
-    holder_reservations_.erase(reservation_it);
+    holder_reservations_.erase(reservation_it++);
     return false;
   }
 
@@ -489,7 +489,7 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
 
   committed_manifest->CopyFrom(reservation_it->second.proposed_manifest);
 
-  holder_reservations_.erase(reservation_it);
+  holder_reservations_.erase(reservation_it++);
 
   return true;
 }
@@ -718,9 +718,9 @@ RecoverySuccessionManager::PrepareTaskReplay(
   absl::MutexLock lock(&mutex_);
 
   const auto task_it = task_states_.find(task_id);
-  if (task_it == task_states_.end() ||
-      !task_it->second.task_spec.has_value() ||
-      !task_it->second.manifest_committed) {
+
+
+  if (task_it == task_states_.end()) {
     return ReplayPreparationResult::TASK_NOT_FOUND;
   }
 
@@ -730,6 +730,12 @@ RecoverySuccessionManager::PrepareTaskReplay(
   if (state.manifest.tombstoned()) {
     return ReplayPreparationResult::TOMBSTONED;
   }
+
+  if (!state.task_spec.has_value() ||
+      !state.manifest_committed) {
+    return ReplayPreparationResult::TASK_NOT_FOUND;
+  }
+
 
   if (CompareManifestVersions(
           request.requester_manifest(),
@@ -800,6 +806,162 @@ void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
   if (metadata_it != object_recovery_metadata_.end()) {
     metadata_it->second.mutable_manifest()->CopyFrom(
         manifest);
+  }
+}
+
+
+std::vector<rpc::RecoveryManifest>
+RecoverySuccessionManager::BuildTombstoneCandidates(
+    const std::function<bool(const ObjectID &)> &has_reference) const {
+  std::vector<rpc::RecoveryManifest> tombstones;
+
+  if (!has_reference) {
+    return tombstones;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  for (const auto &[task_id, task_state] : task_states_) {
+    if (!task_state.manifest_committed ||
+        task_state.manifest.tombstoned() ||
+        !task_state.task_spec.has_value()) {
+      continue;
+    }
+
+    const rpc::RecoveryHolder *coordinator =
+        FindHolderByRank(
+            task_state.manifest,
+            task_state.manifest.version().coordinator_rank());
+
+    if (coordinator == nullptr ||
+        !SameWorker(coordinator->address(), self_address_)) {
+      continue;
+    }
+
+    bool found_output = false;
+    bool output_still_referenced = false;
+
+    const std::string task_id_binary = task_id.Binary();
+
+    for (const auto &[object_id, metadata] :
+         object_recovery_metadata_) {
+      if (metadata.task_id() != task_id_binary) {
+        continue;
+      }
+
+      found_output = true;
+
+      if (has_reference(object_id)) {
+        output_still_referenced = true;
+        break;
+      }
+    }
+
+    if (!found_output || output_still_referenced) {
+      continue;
+    }
+
+    rpc::RecoveryManifest tombstone;
+    tombstone.CopyFrom(task_state.manifest);
+
+    tombstone.set_tombstoned(true);
+    tombstone.set_frozen(true);
+
+    rpc::RecoveryManifestVersion *version =
+        tombstone.mutable_version();
+
+    version->set_generation(
+        task_state.manifest.version().generation() + 1);
+
+    version->clear_manifest_digest();
+
+    tombstones.push_back(std::move(tombstone));
+  }
+
+  return tombstones;
+}
+
+bool RecoverySuccessionManager::ApplyRecoveryTombstone(
+    const rpc::RecoveryManifest &tombstone) {
+  if (tombstone.task_id().size() != TaskID::Size() ||
+      !tombstone.has_version() ||
+      !tombstone.tombstoned()) {
+    return false;
+  }
+
+  const TaskID task_id =
+      TaskID::FromBinary(tombstone.task_id());
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto task_it = task_states_.find(task_id);
+
+  if (task_it != task_states_.end() &&
+      !task_it->second.manifest.task_id().empty()) {
+    const int comparison =
+        CompareManifestVersions(
+            tombstone,
+            task_it->second.manifest);
+
+    if (comparison < 0) {
+      return false;
+    }
+
+    if (comparison == 0 &&
+        tombstone.SerializeAsString() !=
+            task_it->second.manifest.SerializeAsString()) {
+      return false;
+    }
+  }
+
+  TaskRecoveryState &state = task_states_[task_id];
+  state.manifest.CopyFrom(tombstone);
+  state.manifest_committed = true;
+  state.task_spec.reset();
+  state.provisional_reservation_id.clear();
+
+  EraseTaskObjectMetadataLocked(task_id);
+
+  for (auto reservation_it =
+           holder_reservations_.begin();
+       reservation_it != holder_reservations_.end();) {
+    if (reservation_it->second.task_id == task_id) {
+      reservation_it =
+          holder_reservations_.erase(reservation_it++);
+    } else {
+      ++reservation_it;
+    }
+  }
+
+  candidate_reports_sent_.insert(task_id);
+
+  return true;
+}
+
+void RecoverySuccessionManager::EraseTaskObjectMetadataLocked(
+    const TaskID &task_id) {
+  const std::string task_id_binary = task_id.Binary();
+
+  for (auto metadata_it =
+           object_recovery_metadata_.begin();
+       metadata_it != object_recovery_metadata_.end();) {
+    if (metadata_it->second.task_id() ==
+        task_id_binary) {
+      metadata_it =
+          object_recovery_metadata_.erase(metadata_it++);
+    } else {
+      ++metadata_it;
+    }
+  }
+
+  for (auto borrowed_it = borrowed_objects_.begin();
+       borrowed_it != borrowed_objects_.end();) {
+    if (borrowed_it->second.task_id == task_id) {
+      borrowed_it =
+          borrowed_objects_.erase(borrowed_it++);
+    } else {
+      ++borrowed_it;
+    }
   }
 }
 

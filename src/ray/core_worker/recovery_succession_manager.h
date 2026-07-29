@@ -27,6 +27,9 @@
 #include "ray/common/task/task_spec.h"
 #include "src/ray/protobuf/common.pb.h"
 #include "src/ray/protobuf/core_worker.pb.h"
+#include <functional>
+
+
 
 namespace ray::core {
 
@@ -128,6 +131,17 @@ class RecoverySuccessionManager {
 
 
 
+  /// Returns newer tombstone manifests for owned tasks whose outputs are all
+  /// out of scope. This method does not modify local state.
+  std::vector<rpc::RecoveryManifest> BuildTombstoneCandidates(
+      const std::function<bool(const ObjectID &)> &has_reference) const;
+
+  /// Applies a tombstone and removes retained lineage and object metadata.
+  bool ApplyRecoveryTombstone(
+      const rpc::RecoveryManifest &tombstone);
+
+
+
   /// Failure-based takeover and repair are implemented later.
   void HandleWorkerFailure(const WorkerID &worker_id);
   void HandleNodeFailure(const NodeID &node_id);
@@ -136,6 +150,12 @@ class RecoverySuccessionManager {
   bool HasConfirmedHolderResponsibilities() const;
 
  private:
+
+
+  void EraseTaskObjectMetadataLocked(
+      const TaskID &task_id)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
   struct TaskRecoveryState {
     rpc::RecoveryManifest manifest;
 

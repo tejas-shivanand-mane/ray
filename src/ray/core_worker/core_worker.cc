@@ -638,6 +638,17 @@ CoreWorker::CoreWorker(
       100,
       "CoreWorker.RecoverObjects");
 
+
+
+  if (recovery_succession_enabled_) {
+    periodical_runner_->RunFnPeriodically(
+        [this] {
+          CheckRecoverySuccessionCleanup();
+        },
+        1000,
+        "CoreWorker.RecoverySuccessionCleanup");
+  }
+
   periodical_runner_->RunFnPeriodically(
       [this] { InternalHeartbeat(); },
       RayConfig::instance().core_worker_internal_heartbeat_ms(),
@@ -4601,12 +4612,157 @@ void CoreWorker::HandleApplyRecoveryTombstone(
     rpc::ApplyRecoveryTombstoneRequest request,
     rpc::ApplyRecoveryTombstoneReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
-  // Actual tombstone processing is implemented in Phase 6.
-  static_cast<void>(request);
   static_cast<void>(reply);
 
-  send_reply_callback(Status::OK(), nullptr, nullptr);
+  if (!recovery_succession_enabled_ ||
+      recovery_succession_manager_ == nullptr ||
+      !request.has_tombstone()) {
+    send_reply_callback(
+        Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  const rpc::RecoveryManifest &tombstone =
+      request.tombstone();
+
+  const bool applied =
+      recovery_succession_manager_
+          ->ApplyRecoveryTombstone(tombstone);
+
+  if (applied) {
+    RAY_LOG(INFO)
+        .WithField(
+            TaskID::FromBinary(tombstone.task_id()))
+        << "Applied recovery succession tombstone";
+  }
+
+  send_reply_callback(
+      Status::OK(), nullptr, nullptr);
 }
+
+void CoreWorker::CheckRecoverySuccessionCleanup() {
+  if (!recovery_succession_enabled_ ||
+      recovery_succession_manager_ == nullptr) {
+    return;
+  }
+
+  const std::vector<rpc::RecoveryManifest> tombstones =
+      recovery_succession_manager_
+          ->BuildTombstoneCandidates(
+              [this](const ObjectID &object_id) {
+                return reference_counter_
+                    ->HasReference(object_id);
+              });
+
+  for (const rpc::RecoveryManifest &tombstone :
+       tombstones) {
+    const TaskID task_id =
+        TaskID::FromBinary(tombstone.task_id());
+
+    if (!recovery_tombstones_in_flight_
+             .insert(task_id)
+             .second) {
+      continue;
+    }
+
+    PublishRecoveryTombstone(tombstone);
+  }
+}
+
+void CoreWorker::PublishRecoveryTombstone(
+    rpc::RecoveryManifest tombstone) {
+  const TaskID task_id =
+      TaskID::FromBinary(tombstone.task_id());
+
+  PublishRecoveryManifestToWitnesses(
+      tombstone,
+      [this,
+       task_id,
+       tombstone = std::move(tombstone)](
+          bool stored,
+          std::optional<rpc::RecoveryManifest>
+              newer_manifest) mutable {
+        if (!stored) {
+          if (newer_manifest.has_value() &&
+              newer_manifest->tombstoned()) {
+            recovery_succession_manager_
+                ->ApplyRecoveryTombstone(
+                    newer_manifest.value());
+          }
+
+          recovery_tombstones_in_flight_.erase(
+              task_id);
+          return;
+        }
+
+        const bool applied =
+            recovery_succession_manager_
+                ->ApplyRecoveryTombstone(
+                    tombstone);
+
+        if (!applied) {
+          recovery_tombstones_in_flight_.erase(
+              task_id);
+          return;
+        }
+
+        RAY_LOG(INFO).WithField(task_id)
+            << "Published recovery succession tombstone";
+
+        PropagateRecoveryTombstoneToHolders(
+            tombstone);
+
+        recovery_tombstones_in_flight_.erase(
+            task_id);
+      });
+}
+
+void CoreWorker::PropagateRecoveryTombstoneToHolders(
+    const rpc::RecoveryManifest &tombstone) {
+  const TaskID task_id =
+      TaskID::FromBinary(tombstone.task_id());
+
+  for (const rpc::RecoveryHolder &holder :
+       tombstone.succession()) {
+    if (holder.address().worker_id() ==
+        rpc_address_.worker_id()) {
+      continue;
+    }
+
+    rpc::ApplyRecoveryTombstoneRequest request;
+    request.mutable_tombstone()->CopyFrom(
+        tombstone);
+
+    const uint32_t holder_rank = holder.rank();
+
+    auto holder_client =
+        core_worker_client_pool_->GetOrConnect(
+            holder.address());
+
+    holder_client->ApplyRecoveryTombstone(
+        std::move(request),
+        [task_id, holder_rank](
+            const Status &status,
+            rpc::ApplyRecoveryTombstoneReply
+                &&reply) {
+          static_cast<void>(reply);
+
+          if (!status.ok()) {
+            RAY_LOG(WARNING)
+                .WithField(task_id)
+                << "Failed to send recovery "
+                << "tombstone to rank "
+                << holder_rank << ": "
+                << status;
+          }
+        });
+  }
+}
+
+
+
+
+
 
 void CoreWorker::HandleWaitForActorRefDeleted(
     rpc::WaitForActorRefDeletedRequest request,
