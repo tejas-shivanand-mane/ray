@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "ray/core_worker/core_worker.h"
+#include "ray/core_worker/recovery_succession_manager.h"
 
 #include <algorithm>
 #include <future>
@@ -373,6 +374,9 @@ CoreWorker::CoreWorker(
       object_info_subscriber_(std::move(object_info_subscriber)),
       lease_request_rate_limiter_(std::move(lease_request_rate_limiter)),
       normal_task_submitter_(std::move(normal_task_submitter)),
+      recovery_succession_enabled_(
+          RayConfig::instance().enable_recovery_succession()),
+      recovery_succession_manager_(nullptr),
       object_recovery_manager_(std::move(object_recovery_manager)),
       actor_manager_(std::move(actor_manager)),
       actor_id_(ActorID::Nil()),
@@ -398,6 +402,26 @@ CoreWorker::CoreWorker(
                              "CoreWorker.FreeActorObjectCallback");
           }),
       clock_(clock) {
+
+
+  if (recovery_succession_enabled_) {
+  recovery_succession_manager_ =
+      std::make_shared<RecoverySuccessionManager>(
+          rpc_address_,
+          io_service_,
+          task_execution_service_,
+          core_worker_client_pool_,
+          raylet_client_pool_,
+          gcs_client_,
+          reference_counter_,
+          memory_store_,
+          plasma_store_provider_,
+          task_manager_,
+          normal_task_submitter_.get());
+  }
+
+
+  
   // Initialize task receivers.
   if (options_.worker_type == WorkerType::WORKER) {
     RAY_CHECK(options_.task_execution_callback != nullptr);
@@ -1992,6 +2016,14 @@ void CoreWorker::PrestartWorkers(const std::string &serialized_runtime_env_info,
       });
 }
 
+
+TaskSpecBuilder &SetRecoveryManifest(
+    const rpc::RecoveryManifest &manifest) {
+  message_->mutable_recovery_manifest()->CopyFrom(manifest);
+  return *this;
+}
+
+
 std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     const RayFunction &function,
     const std::vector<std::unique_ptr<TaskArg>> &args,
@@ -2059,11 +2091,39 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             serialized_retry_exception_allowlist,
                             scheduling_strategy,
                             root_detached_actor_id);
+
+  if (recovery_succession_enabled_) {
+    const auto &proto = builder.GetMessage();
+
+    const bool eligible =
+        proto.type() == rpc::TaskType::NORMAL_TASK &&
+        !proto.returns_dynamic() &&
+        !proto.streaming_generator() &&
+        proto.max_retries() != 0;
+
+    if (eligible) {
+      builder.SetRecoveryManifest(
+          recovery_succession_manager_->BuildInitialManifest(
+              task_id,
+              worker_context_->GetCurrentJobID(),
+              max_retries));
+    }
+  }
+
+
+
+
   TaskSpecification task_spec = std::move(builder).ConsumeAndBuild();
   RAY_LOG(DEBUG) << "Submitting normal task " << task_spec.DebugString();
   std::vector<rpc::ObjectReference> returned_refs;
   returned_refs = task_manager_->AddPendingTask(
       task_spec.CallerAddress(), task_spec, CurrentCallSite(), max_retries);
+
+
+  if (recovery_succession_enabled_ && task_spec.GetMessage().has_recovery_manifest()) {
+    recovery_succession_manager_->RegisterOwnedTask(
+        task_spec, &returned_refs);
+  }
 
   io_service_.post(
       [this, task_spec = std::move(task_spec)]() mutable {

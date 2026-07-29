@@ -247,6 +247,8 @@ NodeManager::NodeManager(
       periodical_runner_(periodical_runner),
       report_resources_period_ms_(config.report_resources_period_ms),
       initial_config_(config),
+      recovery_succession_enabled_(
+          RayConfig::instance().enable_recovery_succession()),
       lease_dependency_manager_(lease_dependency_manager),
       wait_manager_(/*is_object_local*/
                     [this](const ObjectID &object_id) {

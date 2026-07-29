@@ -19,49 +19,49 @@ Obtaining file:///home/tejas/Downloads/ray/python
   Installing backend dependencies: started
   Running command installing backend dependencies
   Using pip 26.0.1 from /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip (python 3.10)
-  Collecting pip
-    Obtaining dependency information for pip from https://files.pythonhosted.org/packages/5d/95/6b5cb3461ea5673ba0995989746db58eb18b91b54dbf331e72f569540946/pip-26.1.2-py3-none-any.whl.metadata
-    Using cached pip-26.1.2-py3-none-any.whl.metadata (4.6 kB)
-  Collecting cython>=3.0.12
-    Obtaining dependency information for cython>=3.0.12 from https://files.pythonhosted.org/packages/df/9b/b4ff8cdff357ba0f41791e044a2a95898d0768b20e9247823decf5eabb5e/cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata
-    Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.6 kB)
   Collecting wheel
     Obtaining dependency information for wheel from https://files.pythonhosted.org/packages/87/1b/9e33c09813d65e248f7f773119148a612516a4bea93e9c6f545f78455b7c/wheel-0.47.0-py3-none-any.whl.metadata
     Using cached wheel-0.47.0-py3-none-any.whl.metadata (2.3 kB)
+  Collecting cython>=3.0.12
+    Obtaining dependency information for cython>=3.0.12 from https://files.pythonhosted.org/packages/df/9b/b4ff8cdff357ba0f41791e044a2a95898d0768b20e9247823decf5eabb5e/cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata
+    Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.6 kB)
+  Collecting pip
+    Obtaining dependency information for pip from https://files.pythonhosted.org/packages/5d/95/6b5cb3461ea5673ba0995989746db58eb18b91b54dbf331e72f569540946/pip-26.1.2-py3-none-any.whl.metadata
+    Using cached pip-26.1.2-py3-none-any.whl.metadata (4.6 kB)
   Collecting packaging>=24.0 (from wheel)
     Obtaining dependency information for packaging>=24.0 from https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl.metadata
     Using cached packaging-26.2-py3-none-any.whl.metadata (3.5 kB)
-  Using cached pip-26.1.2-py3-none-any.whl (1.8 MB)
-  Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.5 MB)
   Using cached wheel-0.47.0-py3-none-any.whl (32 kB)
+  Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.5 MB)
+  Using cached pip-26.1.2-py3-none-any.whl (1.8 MB)
   Using cached packaging-26.2-py3-none-any.whl (100 kB)
   Installing collected packages: pip, packaging, cython, wheel
-    Creating /tmp/pip-build-env-y892j5ce/normal/bin
-    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/pip to 775
-    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/pip3 to 775
-    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/pip3.10 to 775
-    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/cygdb to 775
-    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/cython to 775
-    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/cythonize to 775
-    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/wheel to 775
+    Creating /tmp/pip-build-env-cp6wq3j2/normal/bin
+    changing mode of /tmp/pip-build-env-cp6wq3j2/normal/bin/pip to 775
+    changing mode of /tmp/pip-build-env-cp6wq3j2/normal/bin/pip3 to 775
+    changing mode of /tmp/pip-build-env-cp6wq3j2/normal/bin/pip3.10 to 775
+    changing mode of /tmp/pip-build-env-cp6wq3j2/normal/bin/cygdb to 775
+    changing mode of /tmp/pip-build-env-cp6wq3j2/normal/bin/cython to 775
+    changing mode of /tmp/pip-build-env-cp6wq3j2/normal/bin/cythonize to 775
+    changing mode of /tmp/pip-build-env-cp6wq3j2/normal/bin/wheel to 775
 
   Successfully installed cython-3.2.9 packaging-26.2 pip-26.1.2 wheel-0.47.0
   Installing backend dependencies: finished with status 'done'
   Preparing editable metadata (pyproject.toml): started
   Running command Preparing editable metadata (pyproject.toml)
   running dist_info
-  creating /tmp/pip-modern-metadata-81y9xnum/ray.egg-info
-  writing /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/PKG-INFO
-  writing dependency_links to /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/dependency_links.txt
-  writing entry points to /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/entry_points.txt
-  writing requirements to /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/requires.txt
-  writing top-level names to /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/top_level.txt
-  writing manifest file '/tmp/pip-modern-metadata-81y9xnum/ray.egg-info/SOURCES.txt'
-  reading manifest file '/tmp/pip-modern-metadata-81y9xnum/ray.egg-info/SOURCES.txt'
+  creating /tmp/pip-modern-metadata-8w5858qx/ray.egg-info
+  writing /tmp/pip-modern-metadata-8w5858qx/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-modern-metadata-8w5858qx/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-modern-metadata-8w5858qx/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-modern-metadata-8w5858qx/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-modern-metadata-8w5858qx/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-modern-metadata-8w5858qx/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-modern-metadata-8w5858qx/ray.egg-info/SOURCES.txt'
   reading manifest template 'MANIFEST.in'
   adding license file 'LICENSE.txt'
-  writing manifest file '/tmp/pip-modern-metadata-81y9xnum/ray.egg-info/SOURCES.txt'
-  creating '/tmp/pip-modern-metadata-81y9xnum/ray-3.0.0.dev0.dist-info'
+  writing manifest file '/tmp/pip-modern-metadata-8w5858qx/ray.egg-info/SOURCES.txt'
+  creating '/tmp/pip-modern-metadata-8w5858qx/ray-3.0.0.dev0.dist-info'
   Preparing editable metadata (pyproject.toml): finished with status 'done'
 Requirement already satisfied: click>=7.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (8.3.1)
 Requirement already satisfied: filelock in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (3.25.2)
@@ -84,19 +84,19 @@ Building wheels for collected packages: ray
   Building editable for ray (pyproject.toml): started
   Running command Building editable for ray (pyproject.toml)
   running editable_wheel
-  creating /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info
-  writing /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/PKG-INFO
-  writing dependency_links to /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/dependency_links.txt
-  writing entry points to /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/entry_points.txt
-  writing requirements to /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/requires.txt
-  writing top-level names to /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/top_level.txt
-  writing manifest file '/tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/SOURCES.txt'
-  reading manifest file '/tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/SOURCES.txt'
+  creating /tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info
+  writing /tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info/SOURCES.txt'
   reading manifest template 'MANIFEST.in'
   adding license file 'LICENSE.txt'
-  writing manifest file '/tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/SOURCES.txt'
-  creating '/tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray-3.0.0.dev0.dist-info'
-  creating /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray-3.0.0.dev0.dist-info/WHEEL
+  writing manifest file '/tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray.egg-info/SOURCES.txt'
+  creating '/tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray-3.0.0.dev0.dist-info'
+  creating /tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray-3.0.0.dev0.dist-info/WHEEL
   running build_py
   running build_ext
   WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama-0.4.6.dist-info already exists. Specify --upgrade to force replacement.
@@ -128,110 +128,554 @@ Building wheels for collected packages: ray
   WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/typing_extensions-4.16.0.dist-info already exists. Specify --upgrade to force replacement.
   WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/typing_extensions.py already exists. Specify --upgrade to force replacement.
   WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/bin already exists. Specify --upgrade to force replacement.
-  INFO: Invocation ID: be4a4b1d-e942-4d83-9f2e-9172f14e6a45
-  Computing main repo mapping:
-  DEBUG: /home/tejas/Downloads/ray/bazel/ray_deps_setup.bzl:67:14: No implicit mirrors used for org_lzma_lzma because urls were explicitly provided
-  DEBUG: /home/tejas/Downloads/ray/bazel/ray_deps_setup.bzl:67:14: No implicit mirrors used for openssl because urls were explicitly provided
+  INFO: Invocation ID: b2e3d0dd-db9d-440c-ac3f-a824314fb1c8
   Computing main repo mapping:
   Loading:
   Loading: 0 packages loaded
-  Analyzing: 3 targets (2 packages loaded, 0 targets configured)
-  Analyzing: 3 targets (2 packages loaded, 0 targets configured)
+  Analyzing: 3 targets (0 packages loaded, 0 targets configured)
+  Analyzing: 3 targets (0 packages loaded, 0 targets configured)
 
-  DEBUG: /home/tejas/Downloads/ray/bazel/ray.bzl:175:10: [<generated file external/jemalloc/libjemalloc/lib/libjemalloc.so>]
-  Analyzing: 3 targets (40 packages loaded, 2071 targets configured)
-  [13 / 13] no actions running
-  Analyzing: 3 targets (41 packages loaded, 2255 targets configured)
-  [16 / 18] checking cached actions
-  Analyzing: 3 targets (42 packages loaded, 4355 targets configured)
-  [4,395 / 7,013] Compiling cpp/src/ray/worker/default_worker.cc; 0s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  Analyzing: 3 targets (43 packages loaded, 4358 targets configured)
-  [4,579 / 7,013] Compiling src/ray/util/logging.cc; 1s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  Analyzing: 3 targets (43 packages loaded, 4358 targets configured)
-  [4,844 / 7,013] Compiling src/ray/util/logging.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  Analyzing: 3 targets (43 packages loaded, 4358 targets configured)
-  [5,181 / 7,013] Compiling src/ray/util/logging.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  INFO: Analyzed 3 targets (44 packages loaded, 11170 targets configured).
-  [5,183 / 7,013] Compiling src/ray/util/logging.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [5,310 / 7,312] Compiling src/ray/util/logging.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [5,317 / 7,318] Compiling src/ray/util/logging.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [5,416 / 7,318] Compiling src/ray/common/ray_config.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [5,469 / 7,318] Compiling src/ray/common/ray_config.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [5,481 / 7,318] Compiling src/ray/common/ray_config.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  INFO: From Generating proto_library //src/ray/protobuf/public:events_actor_task_definition_event_proto:
-  src/ray/protobuf/public/events_actor_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
-  [6,746 / 7,594] Compiling src/ray/protobuf/common.pb.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [6,748 / 7,594] Compiling src/ray/protobuf/common.pb.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [6,757 / 7,635] Compiling src/ray/protobuf/common.pb.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,072 / 8,774] Compiling src/ray/protobuf/common.pb.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,084 / 8,774] Compiling src/ray/protobuf/common.pb.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,087 / 8,774] Compiling src/ray/protobuf/common.pb.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,130 / 8,869] Compiling src/ray/rpc/authentication/k8s_util.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,132 / 8,869] Compiling src/ray/rpc/authentication/k8s_util.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,149 / 8,869] Compiling src/ray/rpc/authentication/k8s_util.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,155 / 8,869] Compiling src/ray/util/event.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  INFO: From Generating Descriptor Set proto_library //src/ray/protobuf/public:events_actor_task_definition_event_proto:
-  src/ray/protobuf/public/events_actor_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
-  [7,174 / 8,875] Compiling src/ray/util/event.cc; 9s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,175 / 8,875] Compiling src/ray/util/event.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  INFO: From Generating Descriptor Set proto_library //src/ray/protobuf/public:events_task_definition_event_proto:
-  src/ray/protobuf/public/events_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
-  [7,182 / 8,875] Compiling src/ray/protobuf/gcs.pb.cc; 9s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,199 / 8,877] Compiling src/ray/protobuf/node_manager.pb.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,202 / 8,877] Compiling src/ray/protobuf/node_manager.grpc.pb.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,246 / 8,879] Compiling src/ray/protobuf/object_manager.grpc.pb.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,252 / 8,879] Compiling src/ray/protobuf/autoscaler.grpc.pb.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  INFO: From Generating proto_library //src/ray/protobuf/public:events_task_definition_event_proto:
-  src/ray/protobuf/public/events_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
-  [7,480 / 9,058] Compiling src/ray/rpc/authentication/authentication_token_loader.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,498 / 9,058] Compiling src/ray/pubsub/publisher.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,502 / 9,058] Compiling src/ray/observability/open_telemetry_metric_recorder.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  INFO: From Compiling src/ray/thirdparty/setproctitle/spt_setup.c:
-  cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
-  [7,544 / 9,160] Compiling src/ray/observability/open_telemetry_metric_recorder.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,557 / 9,174] Compiling src/ray/observability/open_telemetry_metric_recorder.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,569 / 9,174] Compiling src/ray/common/bundle_spec.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,576 / 9,174] [Sched] Compiling src/ray/common/lease/lease_spec.cc ... (16 actions, 6 running)
-  [7,577 / 9,174] Compiling src/ray/pubsub/publisher.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,601 / 9,217] Compiling src/ray/stats/metric.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,605 / 9,217] Compiling src/ray/common/ray_config.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,613 / 9,225] Compiling src/ray/common/ray_config.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,632 / 9,237] Compiling src/ray/common/bundle_location_index.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,776 / 9,257] Compiling src/ray/observability/ray_node_lifecycle_event.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,777 / 9,257] Compiling src/ray/common/placement_group.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,799 / 9,259] Compiling src/ray/observability/ray_driver_job_definition_event.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,947 / 9,316] Compiling src/ray/stats/percentile_metric.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,953 / 9,316] Compiling src/ray/core_worker/reference_counter.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,965 / 9,322] Compiling src/ray/core_worker/reference_counter.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,971 / 9,330] Compiling src/ray/core_worker/reference_counter.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,972 / 9,330] Compiling src/ray/util/pipe_logger.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,975 / 9,330] Compiling src/ray/protobuf/gcs_service.pb.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,976 / 9,330] Compiling src/ray/protobuf/gcs_service.pb.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,980 / 9,330] Foreign Cc - CMake: Building rocksdb; 7s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [7,997 / 9,338] Foreign Cc - CMake: Building rocksdb; 9s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [7,998 / 9,338] Foreign Cc - CMake: Building rocksdb; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,000 / 9,338] Foreign Cc - CMake: Building rocksdb; 11s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,006 / 9,338] Foreign Cc - CMake: Building rocksdb; 12s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,019 / 9,338] Foreign Cc - CMake: Building rocksdb; 14s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,020 / 9,338] Foreign Cc - CMake: Building rocksdb; 15s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,033 / 9,350] Foreign Cc - CMake: Building rocksdb; 17s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,037 / 9,352] Foreign Cc - CMake: Building rocksdb; 18s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,044 / 9,352] Foreign Cc - CMake: Building rocksdb; 19s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,047 / 9,352] Foreign Cc - CMake: Building rocksdb; 21s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,050 / 9,354] Foreign Cc - CMake: Building rocksdb; 22s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,050 / 9,354] Foreign Cc - CMake: Building rocksdb; 24s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,051 / 9,354] Foreign Cc - CMake: Building rocksdb; 25s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,054 / 9,356] Foreign Cc - CMake: Building rocksdb; 27s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,062 / 9,360] Foreign Cc - CMake: Building rocksdb; 28s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,063 / 9,360] Foreign Cc - CMake: Building rocksdb; 29s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,065 / 9,360] Foreign Cc - CMake: Building rocksdb; 31s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,068 / 9,360] Foreign Cc - CMake: Building rocksdb; 32s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,073 / 9,360] Foreign Cc - CMake: Building rocksdb; 33s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,091 / 9,367] Foreign Cc - CMake: Building rocksdb; 35s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,093 / 9,367] Foreign Cc - CMake: Building rocksdb; 36s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,095 / 9,370] Foreign Cc - CMake: Building rocksdb; 38s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,095 / 9,370] Foreign Cc - CMake: Building rocksdb; 39s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,098 / 9,370] Foreign Cc - CMake: Building rocksdb; 40s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,101 / 9,370] Foreign Cc - CMake: Building rocksdb; 42s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
-  [8,104 / 9,372] Foreign Cc - CMake: Building rocksdb; 43s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
-  [8,104 / 9,372] Foreign Cc - CMake: Building rocksdb; 44s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  INFO: Analyzed 3 targets (1 packages loaded, 2 targets configured).
+  [4,907 / 6,504] Compiling src/ray/common/ray_config.cc; 1s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [4,916 / 6,510] Compiling src/ray/common/ray_config.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [4,922 / 6,514] Compiling src/ray/common/ray_config.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [4,925 / 6,516] Compiling src/ray/common/ray_config.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [4,928 / 6,518] Compiling src/ray/common/ray_config.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [4,937 / 6,524] [Sched] Compiling src/ray/asio/io_context_monitor.cc; 8s ... (16 actions, 7 running)
+  [4,939 / 6,524] [Sched] Compiling src/ray/asio/io_context_monitor.cc; 9s ... (16 actions, 6 running)
+  [4,939 / 6,524] [Sched] Compiling src/ray/common/cgroup2/linux_cgroup_manager_factory.cc; 8s ... (16 actions, 7 running)
+  [5,035 / 6,635] Compiling src/ray/core_worker/experimental_mutable_object_manager.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [5,049 / 6,652] [Sched] Linking src/ray/common/libray_config.a; 6s ... (16 actions, 6 running)
+  [5,056 / 6,658] Compiling src/ray/asio/io_context_monitor.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [5,059 / 6,660] [Sched] Compiling src/ray/pubsub/publisher.cc; 5s ... (16 actions, 6 running)
+  [5,059 / 6,660] [Sched] Compiling src/ray/object_manager/plasma/object_lifecycle_manager.cc; 8s ... (16 actions, 7 running)
+  [5,061 / 6,660] [Sched] Compiling src/ray/object_manager/plasma/object_lifecycle_manager.cc; 9s ... (16 actions, 6 running)
+  [5,071 / 6,668] Compiling src/ray/object_manager/plasma/store.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [5,083 / 6,676] [Sched] Compiling src/ray/util/pipe_logger.cc; 9s ... (16 actions, 6 running)
+  [5,086 / 6,678] [Sched] Compiling src/ray/object_manager/plasma/client.cc; 9s ... (16 actions, 7 running)
+  [5,096 / 6,686] [Sched] Compiling src/ray/object_manager/plasma/client.cc; 11s ... (16 actions, 6 running)
+  [5,096 / 6,686] [Sched] Compiling src/ray/gcs/gcs_health_check_manager.cc; 8s ... (16 actions, 7 running)
+  [5,111 / 6,700] Compiling src/ray/core_worker/grpc_service.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [5,117 / 6,704] Compiling src/ray/core_worker/grpc_service.cc; 9s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,691 / 8,805] Compiling src/ray/core_worker/grpc_service.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [10,141 / 10,810] Compiling src/ray/core_worker/grpc_service.cc; 12s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [10,285 / 10,944] Compiling src/ray/core_worker/grpc_service.cc; 13s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,294 / 10,948] [Sched] Compiling src/ray/object_manager/plasma/store_runner.cc; 7s ... (16 actions, 7 running)
+  [10,337 / 10,984] [Sched] Compiling src/ray/rpc/authentication/authentication_mode.cc; 7s ... (16 actions, 6 running)
+  [10,337 / 10,984] [Sched] Compiling src/ray/rpc/authentication/authentication_mode.cc; 7s ... (16 actions, 7 running)
+  [10,370 / 11,006] Compiling src/ray/common/file_system_monitor.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,382 / 11,014] Compiling src/ray/common/file_system_monitor.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,505 / 11,115] Compiling src/ray/common/file_system_monitor.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [10,505 / 11,115] Compiling src/ray/common/file_system_monitor.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,510 / 11,121] Compiling src/ray/raylet/runtime_env_agent_client.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,518 / 11,125] [Sched] Compiling src/ray/rpc/grpc_server.cc; 8s ... (16 actions, 6 running)
+  [10,518 / 11,125] [Sched] Compiling src/ray/object_manager/plasma/get_request_queue.cc; 11s ... (16 actions, 7 running)
+  [10,523 / 11,127] [Sched] Compiling src/ray/rpc/rpc_chaos.cc; 12s ... (16 actions, 7 running)
+  [10,532 / 11,133] [Sched] Compiling src/ray/rpc/server_call.cc; 13s ... (16 actions, 6 running)
+  [10,532 / 11,133] Compiling src/ray/gcs/grpc_services.cc; 13s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,970 / 11,502] Compiling src/ray/gcs/grpc_services.cc; 15s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,982 / 11,510] Compiling src/ray/gcs/grpc_services.cc; 16s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,984 / 11,513] Compiling src/ray/gcs/grpc_services.cc; 17s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [10,984 / 11,513] Compiling src/ray/gcs/grpc_services.cc; 18s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,991 / 11,515] Compiling src/ray/gcs/grpc_services.cc; 19s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [10,997 / 11,515] Compiling src/ray/gcs/grpc_services.cc; 20s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,003 / 11,520] Compiling src/ray/gcs/grpc_services.cc; 22s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,012 / 11,524] Compiling src/ray/gcs/grpc_services.cc; 23s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,015 / 11,526] Compiling src/ray/gcs/grpc_services.cc; 25s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,058 / 11,556] Compiling src/ray/gcs/grpc_services.cc; 26s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,058 / 11,556] Compiling src/ray/gcs/grpc_services.cc; 27s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,070 / 11,562] [Sched] Compiling src/ray/raylet/scheduling/local_resource_manager.cc; 8s ... (16 actions, 6 running)
+  [11,100 / 11,593] [Sched] Compiling src/ray/object_manager/plasma/dlmalloc.cc; 9s ... (16 actions, 6 running)
+  [11,102 / 11,593] [Sched] Compiling src/ray/ray_syncer/ray_syncer_server.cc; 9s ... (16 actions, 7 running)
+  [11,103 / 11,593] [Sched] Compiling src/ray/common/file_system_monitor.cc; 9s ... (16 actions, 7 running)
+  [11,122 / 11,616] [Sched] Compiling src/ray/gcs/grpc_services.cc; 6s ... (16 actions, 6 running)
+  [11,124 / 11,616] Compiling src/ray/gcs/store_client_kv.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,126 / 11,616] Compiling src/ray/raylet/scheduling/local_resource_manager.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,129 / 11,618] [Sched] Compiling src/ray/stats/metric.cc; 8s ... (16 actions, 6 running)
+  [11,129 / 11,618] [Sched] Compiling src/ray/raylet/scheduling/local_resource_manager.cc; 10s ... (16 actions, 7 running)
+  [11,130 / 11,618] [Sched] Compiling src/ray/raylet/scheduling/local_resource_manager.cc; 11s ... (16 actions, 6 running)
+  [11,132 / 11,618] [Sched] Compiling src/ray/object_manager/plasma/connection.cc; 10s ... (16 actions, 7 running)
+  [11,306 / 11,773] [Sched] Compiling src/ray/object_manager/plasma/connection.cc; 11s ... (16 actions, 6 running)
+  [11,306 / 11,773] [Sched] Compiling src/ray/ray_syncer/ray_syncer_server.cc; 11s ... (16 actions, 7 running)
+  [11,328 / 11,789] Compiling src/ray/raylet/runtime_env_agent_client.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,352 / 11,811] Compiling src/ray/gcs/grpc_services.cc; 13s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,352 / 11,811] Compiling src/ray/gcs/grpc_services.cc; 14s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,461 / 11,889] Compiling src/ray/gcs/grpc_services.cc; 15s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,486 / 11,907] Compiling src/ray/gcs/grpc_services.cc; 16s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,491 / 11,909] Compiling src/ray/gcs/grpc_services.cc; 18s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,491 / 11,909] Compiling src/ray/gcs/grpc_services.cc; 19s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,495 / 11,909] Compiling src/ray/gcs/grpc_services.cc; 20s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,500 / 11,911] Compiling src/ray/gcs/grpc_services.cc; 22s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,508 / 11,913] Compiling src/ray/gcs/grpc_services.cc; 24s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,514 / 11,913] Compiling src/ray/gcs/grpc_services.cc; 25s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,518 / 11,913] Compiling src/ray/gcs/grpc_services.cc; 26s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,520 / 11,913] Compiling src/ray/gcs/grpc_services.cc; 27s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,522 / 11,913] [Sched] Compiling src/ray/gcs/usage_stats_client.cc; 6s ... (16 actions, 7 running)
+  [11,525 / 11,913] [Sched] Compiling src/ray/ray_syncer/node_state.cc; 7s ... (16 actions, 6 running)
+  [11,531 / 11,913] Compiling src/ray/gcs/usage_stats_client.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,533 / 11,913] [Sched] Compiling src/ray/ray_syncer/ray_syncer.cc; 6s ... (16 actions, 7 running)
+  [11,537 / 11,913] [Sched] Compiling src/ray/gcs/gcs_table_storage.cc; 6s ... (16 actions, 6 running)
+  [11,537 / 11,913] [Sched] Compiling src/ray/common/bundle_spec.cc; 7s ... (16 actions, 7 running)
+  [11,540 / 11,913] [Sched] Compiling src/ray/gcs/store_client/rocksdb_store_client.cc; 8s ... (16 actions, 6 running)
+  [11,542 / 11,913] [Sched] Compiling src/ray/observability/ray_node_definition_event.cc; 8s ... (16 actions, 7 running)
+  [11,546 / 11,913] [Sched] Compiling src/ray/observability/ray_node_definition_event.cc; 9s ... (16 actions, 6 running)
+  [11,548 / 11,913] [Sched] Compiling src/ray/gcs/gcs_init_data.cc; 9s ... (16 actions, 7 running)
+  [11,554 / 11,913] Compiling src/ray/gcs/gcs_table_storage.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,556 / 11,913] [Sched] Compiling src/ray/gcs/gcs_init_data.cc; 8s ... (16 actions, 7 running)
+  [11,558 / 11,913] Compiling src/ray/gcs/store_client/rocksdb_store_client.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,562 / 11,913] [Sched] Compiling src/ray/gcs/gcs_table_storage.cc; 7s ... (16 actions, 6 running)
+  [11,562 / 11,913] [Sched] Compiling src/ray/common/bundle_spec.cc; 7s ... (16 actions, 7 running)
+  [11,564 / 11,913] [Sched] Compiling src/ray/core_worker/experimental_mutable_object_provider.cc; 7s ... (16 actions, 7 running)
+  [11,566 / 11,913] [Sched] Compiling src/ray/rpc/metrics_agent_client.cc; 8s ... (16 actions, 7 running)
+  [11,572 / 11,913] [Sched] Compiling src/ray/observability/ray_event_recorder_base.cc; 8s ... (16 actions, 6 running)
+  [11,572 / 11,913] [Sched] Compiling src/ray/gcs/gcs_placement_group.cc; 9s ... (16 actions, 7 running)
+  [11,576 / 11,913] [Sched] Compiling src/ray/observability/ray_event_recorder.cc; 10s ... (16 actions, 6 running)
+  [11,578 / 11,913] [Sched] Compiling src/ray/observability/ray_event_recorder_base.cc; 10s ... (16 actions, 7 running)
+  [11,582 / 11,913] [Sched] Compiling src/ray/gcs/gcs_placement_group.cc; 9s ... (16 actions, 6 running)
+  [11,584 / 11,913] [Sched] Compiling src/ray/rpc/retryable_grpc_client.cc; 7s ... (16 actions, 7 running)
+  [11,586 / 11,913] [Sched] Compiling src/ray/common/function_descriptor.cc; 8s ... (16 actions, 7 running)
+  [11,590 / 11,913] [Sched] Compiling src/ray/core_worker_rpc_client/core_worker_client.cc; 9s ... (16 actions, 6 running)
+  [11,592 / 11,913] [Sched] Compiling src/ray/pubsub/python_gcs_subscriber.cc; 9s ... (16 actions, 7 running)
+  [11,598 / 11,913] [Sched] Compiling src/ray/stats/metric_exporter.cc; 6s ... (16 actions, 7 running)
+  [11,600 / 11,913] [Sched] Compiling src/ray/stats/metric_exporter.cc; 7s ... (16 actions, 6 running)
+  [11,604 / 11,913] [Sched] Compiling src/ray/gcs/store_client/redis_async_context.cc; 6s ... (16 actions, 7 running)
+  [11,606 / 11,913] [Sched] Compiling src/ray/gcs/store_client/redis_async_context.cc; 8s ... (16 actions, 6 running)
+  [11,606 / 11,913] [Sched] Compiling src/ray/observability/ray_event_recorder.cc; 9s ... (16 actions, 7 running)
+  [11,612 / 11,913] Compiling src/ray/core_worker_rpc_client/core_worker_client.cc; 9s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,614 / 11,913] Compiling src/ray/core_worker_rpc_client/core_worker_client.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,620 / 11,913] [Sched] Compiling src/ray/rpc/retryable_grpc_client.cc; 8s ... (16 actions, 6 running)
+  [11,621 / 11,913] [Sched] Compiling src/ray/common/placement_group.cc; 9s ... (16 actions, 6 running)
+  [11,629 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/policy/node_label_scheduling_policy.cc; 5s ... (16 actions, 6 running)
+  [11,629 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/policy/node_label_scheduling_policy.cc; 7s ... (16 actions, 6 running)
+  [11,635 / 11,913] Compiling src/ray/gcs/store_client/redis_store_client.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,637 / 11,913] Compiling src/ray/gcs/store_client/redis_store_client.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,642 / 11,913] Compiling src/ray/gcs/store_client/redis_store_client.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,643 / 11,913] [Sched] Compiling src/ray/common/lease/lease_spec.cc; 8s ... (16 actions, 6 running)
+  [11,643 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/policy/hybrid_scheduling_policy.cc; 9s ... (16 actions, 7 running)
+  [11,649 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,650 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 9s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,650 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,656 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 12s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,658 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 13s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,664 / 11,913] Compiling src/ray/core_worker_rpc_client/core_worker_client.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,666 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/policy/affinity_with_bundle_scheduling_policy.cc; 7s ... (16 actions, 7 running)
+  [11,670 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/cluster_resource_manager.cc; 6s ... (16 actions, 6 running)
+  [11,672 / 11,913] [Sched] Compiling src/ray/raylet/worker_killing_policy_by_time.cc; 7s ... (16 actions, 6 running)
+  [11,672 / 11,913] [Sched] Compiling src/ray/common/bundle_location_index.cc; 9s ... (16 actions, 7 running)
+  [11,678 / 11,913] Compiling src/ray/gcs/store_client/redis_store_client.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,680 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/policy/topology_bundle_scheduling_policy.cc; 8s ... (16 actions, 6 running)
+  [11,684 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,688 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,688 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,692 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 12s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,692 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 13s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,694 / 11,913] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 14s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,698 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor.cc; 7s ... (16 actions, 7 running)
+  [11,702 / 11,913] [Sched] Compiling src/ray/common/protobuf_utils.cc; 9s ... (16 actions, 6 running)
+  [11,702 / 11,913] [Sched] Compiling src/ray/gcs/gcs_task_manager.cc; 10s ... (16 actions, 7 running)
+  [11,706 / 11,913] [Sched] Compiling src/ray/core_worker/common.cc; 11s ... (16 actions, 6 running)
+  [11,708 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor.cc; 9s ... (16 actions, 7 running)
+  [11,712 / 11,913] [Sched] Compiling src/ray/common/protobuf_utils.cc; 9s ... (16 actions, 6 running)
+  [11,713 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/policy/bundle_scheduling_policy.cc; 9s ... (16 actions, 7 running)
+  [11,715 / 11,913] Compiling src/ray/gcs/actor/gcs_actor.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,717 / 11,913] [Sched] Compiling src/ray/raylet/worker.cc; 11s ... (16 actions, 6 running)
+  [11,719 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 10s ... (16 actions, 7 running)
+  [11,721 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 11s ... (16 actions, 6 running)
+  [11,722 / 11,913] [Sched] Compiling src/ray/core_worker/task_execution/concurrency_group_manager.cc; 12s ... (16 actions, 6 running)
+  [11,724 / 11,913] [Sched] Compiling src/ray/core_worker/task_execution/normal_task_execution_queue.cc; 10s ... (16 actions, 7 running)
+  [11,728 / 11,913] [Sched] Compiling src/ray/core_worker/task_submission/out_of_order_actor_submit_queue.cc; 11s ... (16 actions, 6 running)
+  [11,728 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/scheduler_stats.cc; 12s ... (16 actions, 7 running)
+  [11,736 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/cluster_lease_manager.cc; 8s ... (16 actions, 7 running)
+  [11,738 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/cluster_lease_manager.cc; 9s ... (16 actions, 6 running)
+  [11,738 / 11,913] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,742 / 11,913] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 9s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,744 / 11,913] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,748 / 11,913] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,749 / 11,913] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 13s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,749 / 11,913] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 14s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,753 / 11,913] [Sched] Compiling src/ray/raylet/worker_pool.cc; 10s ... (16 actions, 7 running)
+  [11,755 / 11,913] [Sched] Compiling src/ray/raylet/worker_pool.cc; 11s ... (16 actions, 6 running)
+  [11,755 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/default_accessor_factory.cc; 11s ... (16 actions, 7 running)
+  [11,759 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/default_gcs_client_context.cc; 12s ... (16 actions, 6 running)
+  [11,759 / 11,913] Compiling src/ray/gcs_rpc_client/accessors/actor_info_accessor.cc; 14s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,764 / 11,913] [Sched] Compiling src/ray/core_worker/actor_management/actor_creator.cc; 13s ... (16 actions, 6 running)
+  [11,764 / 11,913] [Sched] Compiling src/ray/gcs/gcs_node_manager.cc; 19s ... (16 actions, 7 running)
+  [11,766 / 11,913] Compiling src/ray/gcs_rpc_client/accessor.cc; 18s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,768 / 11,913] Compiling src/ray/gcs_rpc_client/accessor.cc; 19s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,770 / 11,913] Compiling src/ray/gcs_rpc_client/accessor.cc; 20s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,776 / 11,913] Compiling src/ray/gcs_rpc_client/accessor.cc; 22s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,776 / 11,913] Compiling src/ray/gcs_rpc_client/accessor.cc; 27s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,779 / 11,913] [Sched] Compiling src/ray/gcs/gcs_resource_manager.cc; 19s ... (16 actions, 6 running)
+  [11,781 / 11,913] [Sched] Compiling src/ray/gcs/gcs_node_manager.cc; 20s ... (16 actions, 6 running)
+  [11,781 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/gcs_client.cc; 14s ... (16 actions, 7 running)
+  [11,783 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/gcs_client.cc; 15s ... (16 actions, 6 running)
+  [11,783 / 11,913] Compiling src/ray/gcs/gcs_node_manager.cc; 18s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,785 / 11,913] [Sched] Compiling src/ray/core_worker_rpc_client/core_worker_client_pool.cc; 19s ... (16 actions, 6 running)
+  [11,787 / 11,913] [Sched] Compiling src/ray/raylet_rpc_client/raylet_client_pool.cc; 19s ... (16 actions, 6 running)
+  [11,787 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/accessor.cc; 23s ... (16 actions, 7 running)
+  [11,789 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/accessor.cc; 24s ... (16 actions, 6 running)
+  [11,791 / 11,913] [Sched] Compiling src/ray/gcs/gcs_resource_load_puller.cc; 25s ... (16 actions, 6 running)
+  [11,793 / 11,913] [Sched] Compiling src/ray/gcs_rpc_client/gcs_client.cc; 27s ... (16 actions, 6 running)
+  [11,795 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor_scheduler.cc; 21s ... (16 actions, 7 running)
+  [11,798 / 11,913] [Sched] Compiling src/ray/gcs/gcs_job_manager.cc; 22s ... (16 actions, 6 running)
+  [11,798 / 11,913] [Sched] Compiling src/ray/gcs/gcs_job_manager.cc; 23s ... (16 actions, 7 running)
+  [11,800 / 11,913] [Sched] Compiling src/ray/gcs/gcs_job_manager.cc; 24s ... (16 actions, 6 running)
+  [11,800 / 11,913] [Sched] Compiling src/ray/core_worker/profile_event.cc; 20s ... (16 actions, 7 running)
+  [11,802 / 11,913] [Sched] Compiling src/ray/core_worker/profile_event.cc; 22s ... (16 actions, 6 running)
+  [11,802 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor_manager.cc; 25s ... (16 actions, 7 running)
+  [11,804 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor_manager.cc; 26s ... (16 actions, 6 running)
+  [11,804 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor_manager.cc; 22s ... (16 actions, 7 running)
+  [11,806 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor_manager.cc; 24s ... (16 actions, 6 running)
+  [11,808 / 11,913] Compiling src/ray/gcs_rpc_client/accessor.cc; 24s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,808 / 11,913] Compiling src/ray/gcs_rpc_client/accessor.cc; 26s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,810 / 11,913] Compiling src/ray/gcs_rpc_client/accessor.cc; 27s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,814 / 11,913] [Sched] Compiling src/ray/core_worker_rpc_client/core_worker_client_pool.cc; 25s ... (16 actions, 6 running)
+  [11,814 / 11,913] [Sched] Compiling src/ray/core_worker_rpc_client/core_worker_client_pool.cc; 26s ... (16 actions, 6 running)
+  [11,814 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor_scheduler.cc; 29s ... (16 actions, 7 running)
+  [11,816 / 11,913] [Sched] Compiling src/ray/gcs/actor/gcs_actor_scheduler.cc; 31s ... (16 actions, 6 running)
+  [11,816 / 11,913] [Sched] Compiling src/ray/gcs/gcs_placement_group_manager.cc; 35s ... (16 actions, 7 running)
+  [11,818 / 11,913] [Sched] Compiling src/ray/gcs/gcs_placement_group_manager.cc; 37s ... (16 actions, 6 running)
+  [11,824 / 11,913] Compiling src/ray/gcs/actor/gcs_actor_manager.cc; 24s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,828 / 11,913] [Sched] Compiling src/ray/core_worker/task_submission/normal_task_submitter.cc; 21s ... (16 actions, 6 running)
+  [11,828 / 11,913] [Sched] Compiling src/ray/core_worker/task_submission/normal_task_submitter.cc; 32s ... (16 actions, 6 running)
+  [11,828 / 11,913] [Sched] Compiling src/ray/object_manager/pull_manager.cc; 32s ... (16 actions, 7 running)
+  [11,830 / 11,913] [Sched] Compiling src/ray/object_manager/pull_manager.cc; 34s ... (16 actions, 6 running)
+  [11,832 / 11,913] [Sched] Compiling src/ray/object_manager/ownership_object_directory.cc; 35s ... (16 actions, 6 running)
+  [11,832 / 11,913] [Sched] Compiling src/ray/object_manager/object_manager.cc; 31s ... (16 actions, 7 running)
+  [11,836 / 11,913] Compiling src/ray/gcs/gcs_placement_group_manager.cc; 21s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,838 / 11,913] [Sched] Compiling src/ray/object_manager/object_manager.cc; 21s ... (16 actions, 7 running)
+  [11,840 / 11,913] [Sched] Compiling src/ray/object_manager/object_manager.cc; 23s ... (16 actions, 6 running)
+  [11,842 / 11,913] [Sched] Compiling src/ray/object_manager/pull_manager.cc; 25s ... (16 actions, 6 running)
+  [11,842 / 11,913] [Sched] Compiling src/ray/core_worker/task_submission/actor_task_submitter.cc; 30s ... (16 actions, 7 running)
+  [11,844 / 11,913] [Sched] Compiling src/ray/core_worker/task_submission/actor_task_submitter.cc; 31s ... (16 actions, 6 running)
+  [11,846 / 11,913] [Sched] Compiling src/ray/core_worker/actor_management/actor_manager.cc; 32s ... (16 actions, 6 running)
+  [11,850 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/local_lease_manager.cc; 18s ... (16 actions, 6 running)
+  [11,850 / 11,913] [Sched] Compiling src/ray/raylet/scheduling/local_lease_manager.cc; 20s ... (16 actions, 6 running)
+  [11,852 / 11,913] [Sched] Compiling src/ray/core_worker/task_manager.cc; 19s ... (16 actions, 6 running)
+  [11,852 / 11,913] Compiling src/ray/object_manager/object_manager.cc; 22s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,854 / 11,913] [Sched] Compiling src/ray/core_worker/object_recovery_manager.cc; 24s ... (16 actions, 6 running)
+  [11,854 / 11,913] [Sched] Compiling src/ray/raylet/lease_dependency_manager.cc; 25s ... (16 actions, 7 running)
+  [11,856 / 11,913] [Sched] Compiling src/ray/raylet/lease_dependency_manager.cc; 27s ... (16 actions, 6 running)
+  [11,856 / 11,913] [Sched] Compiling src/ray/raylet/node_manager.cc; 27s ... (16 actions, 7 running)
+  [11,862 / 11,913] [Sched] Compiling src/ray/gcs/gcs_server.cc; 19s ... (16 actions, 6 running)
+  [11,862 / 11,913] [Sched] Compiling cpp/src/ray/api.cc; 21s ... (16 actions, 7 running)
+  [11,863 / 11,913] [Sched] Compiling cpp/src/ray/api.cc; 23s ... (16 actions, 6 running)
+  [11,863 / 11,913] [Sched] Compiling src/ray/internal/internal.cc; 28s ... (16 actions, 7 running)
+  [11,866 / 11,913] [Sched] Compiling src/ray/raylet/main.cc; 29s ... (16 actions, 7 running)
+  [11,871 / 11,913] [Sched] Compiling python/ray/_raylet.cpp; 28s ... (16 actions, 6 running)
+  [11,872 / 11,913] [Sched] Compiling src/ray/gcs/gcs_server_main.cc; 25s ... (16 actions, 6 running)
+  [11,872 / 11,913] [Sched] Compiling src/ray/gcs/gcs_server_main.cc; 33s ... (16 actions, 6 running)
+  [11,872 / 11,913] [Sched] Compiling src/ray/gcs/gcs_server.cc; 37s ... (16 actions, 7 running)
+  [11,875 / 11,913] [Sched] Compiling src/ray/core_worker/core_worker_shutdown_executor.cc; 35s ... (16 actions, 6 running)
+  [11,878 / 11,913] Compiling src/ray/raylet/node_manager.cc; 37s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,878 / 11,913] Compiling src/ray/raylet/node_manager.cc; 44s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,880 / 11,913] [Sched] Compiling src/ray/core_worker/core_worker.cc; 45s ... (16 actions, 6 running)
+  [11,880 / 11,913] [Sched] Linking src/ray/raylet/scheduling/liblocal_lease_manager.pic.a; 44s ... (16 actions, 7 running)
+  [11,881 / 11,913] [Sched] Linking src/ray/raylet/scheduling/liblocal_lease_manager.pic.a; 45s ... (16 actions, 6 running)
+  [11,881 / 11,913] [Sched] Compiling cpp/src/ray/util/process_helper.cc; 40s ... (16 actions, 7 running)
+  [11,883 / 11,913] [Sched] Compiling cpp/src/ray/runtime/task/task_executor.cc; 40s ... (16 actions, 6 running)
+  [11,883 / 11,913] [Sched] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 41s ... (16 actions, 7 running)
+  [11,885 / 11,913] [Sched] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 42s ... (16 actions, 6 running)
+  [11,885 / 11,913] Compiling python/ray/_raylet.cpp; 47s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,887 / 11,913] Compiling python/ray/_raylet.cpp; 48s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [11,887 / 11,913] Compiling python/ray/_raylet.cpp; 57s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,889 / 11,913] Compiling python/ray/_raylet.cpp; 58s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [11,890 / 11,913] Compiling python/ray/_raylet.cpp; 59s disk-cache, processwrapper-sandbox ... (15 actions, 6 running)
+  [11,890 / 11,913] Compiling python/ray/_raylet.cpp; 61s disk-cache, processwrapper-sandbox ... (15 actions, 7 running)
+  [11,891 / 11,913] Compiling python/ray/_raylet.cpp; 62s disk-cache, processwrapper-sandbox ... (14 actions, 6 running)
+  [11,891 / 11,913] Compiling python/ray/_raylet.cpp; 65s disk-cache, processwrapper-sandbox ... (14 actions, 7 running)
+  [11,892 / 11,913] Compiling python/ray/_raylet.cpp; 66s disk-cache, processwrapper-sandbox ... (13 actions, 7 running)
+  [11,895 / 11,913] [Sched] Compiling cpp/src/ray/runtime/metric/metric.cc; 30s ... (12 actions, 6 running)
+  [11,896 / 11,913] [Sched] Compiling cpp/src/ray/runtime/local_mode_ray_runtime.cc; 29s ... (11 actions, 6 running)
+  [11,896 / 11,913] [Sched] Compiling cpp/src/ray/runtime/abstract_ray_runtime.cc; 24s ... (11 actions, 7 running)
+  [11,897 / 11,913] [Sched] Compiling cpp/src/ray/runtime/abstract_ray_runtime.cc; 26s ... (10 actions, 6 running)
+  [11,897 / 11,913] Compiling cpp/src/ray/runtime/task/local_mode_task_submitter.cc; 22s disk-cache, processwrapper-sandbox ... (10 actions, 7 running)
+  [11,898 / 11,913] [Sched] Linking src/ray/raylet/raylet; 23s ... (9 actions, 6 running)
+  [11,898 / 11,913] [Sched] Linking src/ray/raylet/raylet; 25s ... (9 actions, 7 running)
+  [11,899 / 11,913] [Sched] Linking src/ray/raylet/raylet; 26s ... (8 actions, 6 running)
+  [11,899 / 11,913] Compiling cpp/src/ray/runtime/object/native_object_store.cc; 20s disk-cache, processwrapper-sandbox ... (8 actions, 7 running)
+  [11,900 / 11,913] Compiling cpp/src/ray/runtime/object/native_object_store.cc; 21s disk-cache, processwrapper-sandbox ... (7 actions running)
+  [11,902 / 11,913] Compiling cpp/src/ray/runtime/object/local_mode_object_store.cc; 21s disk-cache, processwrapper-sandbox ... (5 actions running)
+  [11,905 / 11,913] Compiling cpp/src/ray/runtime/local_mode_ray_runtime.cc; 16s disk-cache, processwrapper-sandbox ... (3 actions, 2 running)
+  [11,905 / 11,913] Compiling cpp/src/ray/runtime/local_mode_ray_runtime.cc; 18s disk-cache, processwrapper-sandbox ... (3 actions running)
+  INFO: From PackageZip ray_pkg.zip:
+  /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/2305/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    ts = datetime.datetime.utcfromtimestamp(ts)
+  [11,907 / 11,913] Compiling cpp/src/ray/runtime/abstract_ray_runtime.cc; 14s disk-cache, processwrapper-sandbox
+  [11,909 / 11,913] [Prepa] Linking cpp/libray_api.so
+  [11,909 / 11,913] Linking cpp/libray_api.so; 1s disk-cache, processwrapper-sandbox
+  [11,910 / 11,913] [Prepa] action 'SolibSymlink _solib_k8/_U_S_Scpp_Cray_Ucpp_Ulib___Ucpp/libray_api.so'
+  [11,912 / 11,913] PackageZip cpp/ray_cpp_pkg.zip; 1s disk-cache, processwrapper-sandbox
+  INFO: From PackageZip cpp/ray_cpp_pkg.zip:
+  /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/2308/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    ts = datetime.datetime.utcfromtimestamp(ts)
+  INFO: Found 3 targets...
+  INFO: Elapsed time: 479.499s, Critical Path: 133.92s
+  INFO: 324 processes: 3 internal, 321 processwrapper-sandbox.
+  INFO: Build completed successfully, 324 total actions
+  INFO: Invocation ID: d2b124b4-2025-4346-a285-cac913fd6838
+  Computing main repo mapping:
+  Loading:
+  Loading: 0 packages loaded
+  Analyzing: target //:gen_ray_pkg (0 packages loaded, 0 targets configured)
+  Analyzing: target //:gen_ray_pkg (0 packages loaded, 0 targets configured)
+
+  INFO: Analyzed target //:gen_ray_pkg (0 packages loaded, 0 targets configured).
+  INFO: Found 1 target...
+  Target //:gen_ray_pkg up-to-date:
+    bazel-bin/gen_ray_pkg
+  INFO: Elapsed time: 0.277s, Critical Path: 0.01s
+  INFO: 1 process: 1 internal.
+  INFO: Build completed successfully, 1 total action
+  INFO: Running command line: bazel-bin/gen_ray_pkg
+  INFO: Invocation ID: 067105c4-3ce7-4038-8840-6ee7a5019062
+  Computing main repo mapping:
+  Loading:
+  Loading: 0 packages loaded
+  Analyzing: target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured)
+  Analyzing: target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured)
+
+  INFO: Analyzed target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured).
+  INFO: Found 1 target...
+  Target //cpp:gen_ray_cpp_pkg up-to-date:
+    bazel-bin/cpp/gen_ray_cpp_pkg
+  INFO: Elapsed time: 0.224s, Critical Path: 0.00s
+  INFO: 1 process: 1 internal.
+  INFO: Build completed successfully, 1 total action
+  INFO: Running command line: bazel-bin/cpp/gen_ray_cpp_pkg
+  INFO: Invocation ID: 49464120-64c0-4b72-8f98-b4c878f0a050
+  Computing main repo mapping:
+  Loading:
+  Loading: 0 packages loaded
+  Analyzing: target //:gen_redis_pkg (0 packages loaded, 0 targets configured)
+  Analyzing: target //:gen_redis_pkg (0 packages loaded, 0 targets configured)
+
+  INFO: Analyzed target //:gen_redis_pkg (0 packages loaded, 0 targets configured).
+  INFO: Found 1 target...
+  Target //:gen_redis_pkg up-to-date:
+    bazel-bin/gen_redis_pkg
+  INFO: Elapsed time: 0.199s, Critical Path: 0.00s
+  INFO: 1 process: 1 internal.
+  INFO: Build completed successfully, 1 total action
+  INFO: Running command line: bazel-bin/gen_redis_pkg
+  # of files copied to /tmp/tmpyp32fcmk.build-lib: 385
+  running egg_info
+  creating /tmp/tmpiha0uw_e.build-temp/ray.egg-info
+  writing /tmp/tmpiha0uw_e.build-temp/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/tmpiha0uw_e.build-temp/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/tmpiha0uw_e.build-temp/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/tmpiha0uw_e.build-temp/ray.egg-info/requires.txt
+  writing top-level names to /tmp/tmpiha0uw_e.build-temp/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/tmpiha0uw_e.build-temp/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/tmpiha0uw_e.build-temp/ray.egg-info/SOURCES.txt'
+  reading manifest template 'MANIFEST.in'
+  adding license file 'LICENSE.txt'
+  writing manifest file '/tmp/tmpiha0uw_e.build-temp/ray.egg-info/SOURCES.txt'
+  /tmp/pip-build-env-cp6wq3j2/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.attr' is absent from the `packages` configuration.
+  !!
+
+          ********************************************************************************
+          ############################
+          # Package would be ignored #
+          ############################
+          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.attr' as an importable package[^1],
+          but it is absent from setuptools' `packages` configuration.
+
+          This leads to an ambiguous overall configuration. If you want to distribute this
+          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.attr' is explicitly added
+          to the `packages` configuration field.
+
+          Alternatively, you can also rely on setuptools' discovery methods
+          (for example by using `find_namespace_packages(...)`/`find_namespace:`
+          instead of `find_packages(...)`/`find:`).
+
+          You can read more about "package discovery" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+
+          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.attr' to be distributed and are
+          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.attr' via
+          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+          you can try to use `exclude_package_data`, or `include-package-data=False` in
+          combination with a more fine grained `package-data` configuration.
+
+          You can read more about "package data files" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+
+
+          [^1]: For Python, any directory (with suitable naming) can be imported,
+                even if it does not contain any `.py` files.
+                On the other hand, currently there is no concept of package data
+                directory, all directories are treated like packages.
+          ********************************************************************************
+
+  !!
+    check.warn(importable)
+  /tmp/pip-build-env-cp6wq3j2/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.attrs' is absent from the `packages` configuration.
+  !!
+
+          ********************************************************************************
+          ############################
+          # Package would be ignored #
+          ############################
+          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.attrs' as an importable package[^1],
+          but it is absent from setuptools' `packages` configuration.
+
+          This leads to an ambiguous overall configuration. If you want to distribute this
+          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.attrs' is explicitly added
+          to the `packages` configuration field.
+
+          Alternatively, you can also rely on setuptools' discovery methods
+          (for example by using `find_namespace_packages(...)`/`find_namespace:`
+          instead of `find_packages(...)`/`find:`).
+
+          You can read more about "package discovery" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+
+          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.attrs' to be distributed and are
+          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.attrs' via
+          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+          you can try to use `exclude_package_data`, or `include-package-data=False` in
+          combination with a more fine grained `package-data` configuration.
+
+          You can read more about "package data files" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+
+
+          [^1]: For Python, any directory (with suitable naming) can be imported,
+                even if it does not contain any `.py` files.
+                On the other hand, currently there is no concept of package data
+                directory, all directories are treated like packages.
+          ********************************************************************************
+
+  !!
+    check.warn(importable)
+  /tmp/pip-build-env-cp6wq3j2/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' is absent from the `packages` configuration.
+  !!
+
+          ********************************************************************************
+          ############################
+          # Package would be ignored #
+          ############################
+          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' as an importable package[^1],
+          but it is absent from setuptools' `packages` configuration.
+
+          This leads to an ambiguous overall configuration. If you want to distribute this
+          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' is explicitly added
+          to the `packages` configuration field.
+
+          Alternatively, you can also rely on setuptools' discovery methods
+          (for example by using `find_namespace_packages(...)`/`find_namespace:`
+          instead of `find_packages(...)`/`find:`).
+
+          You can read more about "package discovery" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+
+          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' to be distributed and are
+          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' via
+          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+          you can try to use `exclude_package_data`, or `include-package-data=False` in
+          combination with a more fine grained `package-data` configuration.
+
+          You can read more about "package data files" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+
+
+          [^1]: For Python, any directory (with suitable naming) can be imported,
+                even if it does not contain any `.py` files.
+                On the other hand, currently there is no concept of package data
+                directory, all directories are treated like packages.
+          ********************************************************************************
+
+  !!
+    check.warn(importable)
+  /tmp/pip-build-env-cp6wq3j2/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray.includes' is absent from the `packages` configuration.
+  !!
+
+          ********************************************************************************
+          ############################
+          # Package would be ignored #
+          ############################
+          Python recognizes 'ray.includes' as an importable package[^1],
+          but it is absent from setuptools' `packages` configuration.
+
+          This leads to an ambiguous overall configuration. If you want to distribute this
+          package, please make sure that 'ray.includes' is explicitly added
+          to the `packages` configuration field.
+
+          Alternatively, you can also rely on setuptools' discovery methods
+          (for example by using `find_namespace_packages(...)`/`find_namespace:`
+          instead of `find_packages(...)`/`find:`).
+
+          You can read more about "package discovery" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+
+          If you don't want 'ray.includes' to be distributed and are
+          already explicitly excluding 'ray.includes' via
+          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+          you can try to use `exclude_package_data`, or `include-package-data=False` in
+          combination with a more fine grained `package-data` configuration.
+
+          You can read more about "package data files" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+
+
+          [^1]: For Python, any directory (with suitable naming) can be imported,
+                even if it does not contain any `.py` files.
+                On the other hand, currently there is no concept of package data
+                directory, all directories are treated like packages.
+          ********************************************************************************
+
+  !!
+    check.warn(importable)
+  Editable install will be performed using a meta path finder.
+
+  Options like `package-data`, `include/exclude-package-data` or
+  `packages.find.exclude/include` may have no effect.
+
+  adding '__editable___ray_3_0_0_dev0_finder.py'
+  adding '__editable__.ray-3.0.0.dev0.pth'
+  creating '/tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpjtj3ppdq/.tmp-d4cbyez8/ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl' and adding '/tmp/tmpttd7sq6_ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl' to it
+  adding 'ray-3.0.0.dev0.dist-info/licenses/LICENSE.txt'
+  adding 'ray-3.0.0.dev0.dist-info/METADATA'
+  adding 'ray-3.0.0.dev0.dist-info/WHEEL'
+  adding 'ray-3.0.0.dev0.dist-info/entry_points.txt'
+  adding 'ray-3.0.0.dev0.dist-info/top_level.txt'
+  adding 'ray-3.0.0.dev0.dist-info/RECORD'
+  /tmp/pip-build-env-cp6wq3j2/overlay/lib/python3.10/site-packages/setuptools/command/editable_wheel.py:352: InformationOnly: Editable installation.
+  !!
+
+          ********************************************************************************
+          Please be careful with folders in your working directory with the same
+          name as your package as they may take precedence during imports.
+          ********************************************************************************
+
+  !!
+    with strategy, WheelFile(wheel_path, "w") as wheel_obj:
+  Building editable for ray (pyproject.toml): finished with status 'done'
+  Created wheel for ray: filename=ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl size=8049 sha256=081136d77adcb6418f018fb391414bc2252d7fedbd8379c5a254398b8295fd6d
+  Stored in directory: /tmp/pip-ephem-wheel-cache-3ttgbpxl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa
+Successfully built ray
+Installing collected packages: ray
+  Attempting uninstall: ray
+    Found existing installation: ray 3.0.0.dev0
+    Uninstalling ray-3.0.0.dev0:
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/ray
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/serve
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/tune
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__editable__.ray-3.0.0.dev0.pth
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__editable___ray_3_0_0_dev0_finder.py
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__pycache__/__editable___ray_3_0_0_dev0_finder.cpython-310.pyc
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/ray-3.0.0.dev0.dist-info/
+      Successfully uninstalled ray-3.0.0.dev0
+  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/ray to 775
+  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/serve to 775
+  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/tune to 775
+Successfully installed ray-3.0.0.dev0

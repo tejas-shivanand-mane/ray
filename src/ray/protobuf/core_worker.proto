@@ -218,6 +218,9 @@ message GetObjectStatusReply {
   repeated bytes node_ids = 3;
   // The size of the object in bytes.
   uint64 object_size = 4;
+
+  optional RecoveryObjectMetadata recovery_metadata = 5;
+
 }
 
 message WaitForActorRefDeletedRequest {
@@ -463,6 +466,88 @@ message RegisterMutableObjectReaderReply {
   // Empty for now.
 }
 
+// Recovery succession
+
+message ReportRecoveryCandidateRequest {
+  bytes task_id = 1;
+  Address candidate_address = 2;
+  RecoveryManifest cached_manifest = 3;
+
+  // True for the executor because PushTask already delivered the TaskSpec.
+  bool already_stores_task_spec = 4;
+}
+
+message ReportRecoveryCandidateReply {
+  enum Result {
+    ACCEPTED = 0;
+    NO_SLOT = 1;
+    FROZEN = 2;
+    STALE_MANIFEST = 3;
+    WRONG_COORDINATOR = 4;
+    TOMBSTONED = 5;
+    DISABLED = 6;
+  }
+
+  Result result = 1;
+  RecoveryManifest latest_manifest = 2;
+}
+
+message InstallRecoveryHolderRequest {
+  bytes task_id = 1;
+  bytes reservation_id = 2;
+  uint32 proposed_rank = 3;
+  TaskSpec task_spec = 4;
+  RecoveryManifest proposed_manifest = 5;
+}
+
+message InstallRecoveryHolderReply {
+  bool stored = 1;
+  bytes reservation_id = 2;
+}
+
+message CommitRecoveryManifestRequest {
+  RecoveryManifest manifest = 1;
+}
+
+message CommitRecoveryManifestReply {}
+
+message RecoverTaskOutputRequest {
+  bytes task_id = 1;
+  uint32 return_index = 2;
+  RecoveryManifest requester_manifest = 3;
+}
+
+message RecoverTaskOutputReply {
+  enum Result {
+    RECOVERED = 0;
+    MANIFEST_STALE = 1;
+    TASK_NOT_FOUND = 2;
+    TOMBSTONED = 3;
+    RETRY_LIMIT_EXCEEDED = 4;
+    REPLAY_FAILED = 5;
+    DISABLED = 6;
+  }
+
+  Result result = 1;
+  ObjectReference replacement_ref = 2;
+  RecoveryManifest latest_manifest = 3;
+}
+
+message ApplyRecoveryTombstoneRequest {
+  RecoveryManifest tombstone = 1;
+}
+
+message ApplyRecoveryTombstoneReply {}
+
+
+
+
+
+
+
+
+
+
 service CoreWorkerService {
   // Raylet notifies its workers that the GCS has restarted.
   // Failure: Always from local raylet, should not fail.
@@ -586,4 +671,24 @@ service CoreWorkerService {
   // Failure: TODO: Needs failure behavior.
   rpc RegisterMutableObjectReader(RegisterMutableObjectReaderRequest)
       returns (RegisterMutableObjectReaderReply);
+
+
+
+  rpc ReportRecoveryCandidate(ReportRecoveryCandidateRequest)
+      returns (ReportRecoveryCandidateReply);
+
+  rpc InstallRecoveryHolder(InstallRecoveryHolderRequest)
+      returns (InstallRecoveryHolderReply);
+
+  rpc CommitRecoveryManifest(CommitRecoveryManifestRequest)
+      returns (CommitRecoveryManifestReply);
+
+  rpc RecoverTaskOutput(RecoverTaskOutputRequest)
+      returns (RecoverTaskOutputReply);
+
+  rpc ApplyRecoveryTombstone(ApplyRecoveryTombstoneRequest)
+      returns (ApplyRecoveryTombstoneReply);
+      
+
+      
 }

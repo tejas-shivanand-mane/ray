@@ -154,6 +154,9 @@ class TaskCounter {
   ray::observability::MetricInterface &actor_by_state_gauge_;
 };
 
+
+class RecoverySuccessionManager;
+
 struct TaskToRetry {
   /// Time when the task should be retried.
   int64_t execution_time_ms{};
@@ -2005,6 +2008,13 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   // Interface to submit non-actor tasks directly to leased workers.
   std::unique_ptr<NormalTaskSubmitter> normal_task_submitter_;
+
+
+  /// Enables the experimental recovery succession path for this process.
+  const bool recovery_succession_enabled_;
+
+  /// Distributed recovery succession state. Null when the feature is disabled.
+  std::shared_ptr<RecoverySuccessionManager> recovery_succession_manager_;
 
   /// Manages recovery of objects stored in remote plasma nodes.
   std::unique_ptr<ObjectRecoveryManager> object_recovery_manager_;

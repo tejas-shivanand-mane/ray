@@ -629,6 +629,10 @@ message TaskSpec {
   // Private streaming generator option. The number of ObjectRefs produced by
   // each generator yield. Defaults to 1.
   uint64 num_objects_per_yield = 46;
+
+  optional RecoveryManifest recovery_manifest = 47;
+
+
 }
 
 message TaskInfoEntry {
@@ -736,6 +740,9 @@ message ObjectReference {
   // The tensor transport to use for this object. If not specified, then use the
   // default object store.
   optional string tensor_transport = 4;
+
+  optional RecoveryObjectMetadata recovery_metadata = 5;
+
 }
 
 message ObjectReferenceCount {
@@ -1153,4 +1160,49 @@ message LineageReconstructionTask {
   // If the task is an actor task,
   // this has the labels of the corresponding actor.
   map<string, string> labels = 3;
+}
+
+
+
+message RecoveryManifestVersion {
+  uint64 generation = 1;
+  uint32 coordinator_rank = 2;
+  bytes manifest_digest = 3;
+}
+
+message RecoveryHolder {
+  Address address = 1;
+  uint32 rank = 2;
+
+  // Initially use NodeID as the failure domain.
+  bytes failure_domain_id = 3;
+}
+
+message RecoveryManifest {
+  bytes task_id = 1;
+  bytes job_id = 2;
+
+  // succession[0] is the original owner.
+  repeated RecoveryHolder succession = 3;
+
+  // Number of non-owner holders desired.
+  uint32 target_holder_count = 4;
+
+  repeated Address witness_raylets = 5;
+  uint32 witness_quorum = 6;
+
+  RecoveryManifestVersion version = 7;
+
+  bool frozen = 8;
+  bool tombstoned = 9;
+
+  // Globally visible replay-attempt accounting.
+  uint32 recovery_attempt = 10;
+  int32 max_recovery_attempts = 11;
+}
+
+message RecoveryObjectMetadata {
+  bytes task_id = 1;
+  uint32 return_index = 2;
+  RecoveryManifest manifest = 3;
 }

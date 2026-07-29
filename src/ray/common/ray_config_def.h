@@ -194,6 +194,13 @@ RAY_CONFIG(bool, lineage_pinning_enabled, true)
 /// inlined args.
 RAY_CONFIG(int64_t, max_lineage_bytes, 1024 * 1024 * 1024)
 
+
+
+/// Enables experimental distributed recovery succession for stateless task outputs.
+/// When false, Ray uses the official owner-based recovery behavior unchanged.
+RAY_CONFIG(bool, enable_recovery_succession, false)
+
+
 /// Whether to re-populate plasma memory. This avoids memory allocation failures
 /// at runtime (SIGBUS errors creating new objects), however it will use more memory
 /// upfront and can slow down Ray startup.

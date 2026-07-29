@@ -888,9 +888,19 @@ class NodeManager : public rpc::NodeManagerServiceHandler,
   bool recorded_metrics_ = false;
   /// Initial node manager configuration.
   const NodeManagerConfig initial_config_;
+    
+  
+  /// Enables recovery-manifest witness handling on this raylet.
+  const bool recovery_succession_enabled_;
 
-  /// A manager to resolve objects needed by queued tasks and workers that
-  /// called `ray.get` or `ray.wait`.
+  /// Witness copies of the latest manifest for each task.
+  absl::Mutex recovery_manifest_mu_;
+
+  absl::flat_hash_map<TaskID, rpc::RecoveryManifest>
+        recovery_manifests_
+            ABSL_GUARDED_BY(recovery_manifest_mu_);
+
+  /// A manager to resolve objects needed by queued tasks.
   LeaseDependencyManager &lease_dependency_manager_;
 
   /// A manager for wait requests.
