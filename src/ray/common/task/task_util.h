@@ -129,6 +129,11 @@ class TaskSpecBuilder {
   /// Get a reference to the internal protobuf message object.
   const rpc::TaskSpec &GetMessage() const { return *message_; }
 
+  /// Get mutable access to the task protobuf while it is being built.
+  rpc::TaskSpec *MutableMessage() {
+    return message_.get();
+  }
+
   /// Set the common attributes of the task spec.
   /// See `common.proto` for meaning of the arguments.
   ///

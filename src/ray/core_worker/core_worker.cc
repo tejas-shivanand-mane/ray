@@ -1996,6 +1996,14 @@ void CoreWorker::BuildCommonTaskSpec(
   for (const auto &arg : args) {
     builder.AddArg(*arg);
   }
+
+  if (recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr) {
+    recovery_succession_manager_->PopulateTaskArgumentMetadata(
+        builder.MutableMessage());
+  }
+
+
 }
 
 void CoreWorker::PrestartWorkers(const std::string &serialized_runtime_env_info,

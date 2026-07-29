@@ -46,7 +46,9 @@ struct BorrowedObjectRecoveryState {
 absl::flat_hash_map<TaskID, TaskRecoveryState> task_states_;
 absl::flat_hash_map<ObjectID, BorrowedObjectRecoveryState> borrowed_objects_;
 
-
+absl::flat_hash_map<ObjectID, rpc::RecoveryObjectMetadata>
+    object_recovery_metadata_
+        ABSL_GUARDED_BY(mutex_);
 
 
 
@@ -59,6 +61,10 @@ class RecoverySuccessionManager {
 
   /// Returns whether recovery succession supports this task.
   static bool IsEligibleTask(const rpc::TaskSpec &task_spec);
+
+
+  /// Adds cached recovery metadata to every ObjectRef dependency in a TaskSpec.
+  void PopulateTaskArgumentMetadata(rpc::TaskSpec *task_spec) const;
 
 
   void RegisterOwnedTask(
