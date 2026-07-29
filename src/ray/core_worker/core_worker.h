@@ -154,7 +154,6 @@ class TaskCounter {
   ray::observability::MetricInterface &actor_by_state_gauge_;
 };
 
-
 class RecoverySuccessionManager;
 
 struct TaskToRetry {
@@ -1378,6 +1377,31 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                              rpc::GetObjectStatusReply *reply,
                              rpc::SendReplyCallback send_reply_callback);
 
+  /// Handles a worker volunteering as a recovery holder.
+  void HandleReportRecoveryCandidate(rpc::ReportRecoveryCandidateRequest request,
+                                     rpc::ReportRecoveryCandidateReply *reply,
+                                     rpc::SendReplyCallback send_reply_callback);
+
+  /// Installs lineage and a provisional manifest on a holder.
+  void HandleInstallRecoveryHolder(rpc::InstallRecoveryHolderRequest request,
+                                   rpc::InstallRecoveryHolderReply *reply,
+                                   rpc::SendReplyCallback send_reply_callback);
+
+  /// Commits a newer recovery manifest on a holder.
+  void HandleCommitRecoveryManifest(rpc::CommitRecoveryManifestRequest request,
+                                    rpc::CommitRecoveryManifestReply *reply,
+                                    rpc::SendReplyCallback send_reply_callback);
+
+  /// Requests reconstruction of one static task return.
+  void HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
+                               rpc::RecoverTaskOutputReply *reply,
+                               rpc::SendReplyCallback send_reply_callback);
+
+  /// Applies a recovery-state tombstone.
+  void HandleApplyRecoveryTombstone(rpc::ApplyRecoveryTombstoneRequest request,
+                                    rpc::ApplyRecoveryTombstoneReply *reply,
+                                    rpc::SendReplyCallback send_reply_callback);
+
   /// Implements gRPC server handler.
   void HandleWaitForActorRefDeleted(rpc::WaitForActorRefDeletedRequest request,
                                     rpc::WaitForActorRefDeletedReply *reply,
@@ -2008,7 +2032,6 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   // Interface to submit non-actor tasks directly to leased workers.
   std::unique_ptr<NormalTaskSubmitter> normal_task_submitter_;
-
 
   /// Enables the experimental recovery succession path for this process.
   const bool recovery_succession_enabled_;

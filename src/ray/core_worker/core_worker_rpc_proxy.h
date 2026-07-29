@@ -50,6 +50,13 @@ class CoreWorkerServiceHandlerProxy : public rpc::CoreWorkerServiceHandler {
   RAY_CORE_WORKER_RPC_PROXY(ActorCallArgWaitComplete)
   RAY_CORE_WORKER_RPC_PROXY(RayletNotifyGCSRestart)
   RAY_CORE_WORKER_RPC_PROXY(GetObjectStatus)
+
+  RAY_CORE_WORKER_RPC_PROXY(ReportRecoveryCandidate)
+  RAY_CORE_WORKER_RPC_PROXY(InstallRecoveryHolder)
+  RAY_CORE_WORKER_RPC_PROXY(CommitRecoveryManifest)
+  RAY_CORE_WORKER_RPC_PROXY(RecoverTaskOutput)
+  RAY_CORE_WORKER_RPC_PROXY(ApplyRecoveryTombstone)
+
   RAY_CORE_WORKER_RPC_PROXY(WaitForActorRefDeleted)
   RAY_CORE_WORKER_RPC_PROXY(PubsubLongPolling)
   RAY_CORE_WORKER_RPC_PROXY(PubsubCommandBatch)

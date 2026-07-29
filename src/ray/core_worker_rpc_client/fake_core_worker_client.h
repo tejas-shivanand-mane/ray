@@ -58,6 +58,26 @@ class FakeCoreWorkerClient : public CoreWorkerClientInterface {
   void GetObjectStatus(GetObjectStatusRequest &&request,
                        const ClientCallback<GetObjectStatusReply> &callback) override {}
 
+  void ReportRecoveryCandidate(
+      ReportRecoveryCandidateRequest &&request,
+      const ClientCallback<ReportRecoveryCandidateReply> &callback) override {}
+
+  void InstallRecoveryHolder(
+      InstallRecoveryHolderRequest &&request,
+      const ClientCallback<InstallRecoveryHolderReply> &callback) override {}
+
+  void CommitRecoveryManifest(
+      CommitRecoveryManifestRequest &&request,
+      const ClientCallback<CommitRecoveryManifestReply> &callback) override {}
+
+  void RecoverTaskOutput(
+      RecoverTaskOutputRequest &&request,
+      const ClientCallback<RecoverTaskOutputReply> &callback) override {}
+
+  void ApplyRecoveryTombstone(
+      ApplyRecoveryTombstoneRequest &&request,
+      const ClientCallback<ApplyRecoveryTombstoneReply> &callback) override {}
+
   void WaitForActorRefDeleted(
       WaitForActorRefDeletedRequest &&request,
       const ClientCallback<WaitForActorRefDeletedReply> &callback) override {}

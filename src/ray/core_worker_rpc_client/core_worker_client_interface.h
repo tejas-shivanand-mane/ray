@@ -52,6 +52,27 @@ class CoreWorkerClientInterface : public pubsub::SubscriberClientInterface {
   virtual void GetObjectStatus(GetObjectStatusRequest &&request,
                                const ClientCallback<GetObjectStatusReply> &callback) = 0;
 
+  // Recovery succession RPCs.
+  virtual void ReportRecoveryCandidate(
+      ReportRecoveryCandidateRequest &&request,
+      const ClientCallback<ReportRecoveryCandidateReply> &callback) = 0;
+
+  virtual void InstallRecoveryHolder(
+      InstallRecoveryHolderRequest &&request,
+      const ClientCallback<InstallRecoveryHolderReply> &callback) = 0;
+
+  virtual void CommitRecoveryManifest(
+      CommitRecoveryManifestRequest &&request,
+      const ClientCallback<CommitRecoveryManifestReply> &callback) = 0;
+
+  virtual void RecoverTaskOutput(
+      RecoverTaskOutputRequest &&request,
+      const ClientCallback<RecoverTaskOutputReply> &callback) = 0;
+
+  virtual void ApplyRecoveryTombstone(
+      ApplyRecoveryTombstoneRequest &&request,
+      const ClientCallback<ApplyRecoveryTombstoneReply> &callback) = 0;
+
   virtual void WaitForActorRefDeleted(
       WaitForActorRefDeletedRequest &&request,
       const ClientCallback<WaitForActorRefDeletedReply> &callback) = 0;

@@ -3955,6 +3955,69 @@ void CoreWorker::PopulateObjectStatus(const ObjectID &object_id,
   }
 }
 
+void CoreWorker::HandleReportRecoveryCandidate(
+    rpc::ReportRecoveryCandidateRequest request,
+    rpc::ReportRecoveryCandidateReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  static_cast<void>(request);
+
+  if (!recovery_succession_enabled_ || recovery_succession_manager_ == nullptr) {
+    reply->set_result(rpc::ReportRecoveryCandidateReply::DISABLED);
+  } else {
+    // Replaced by actual admission logic in Phase 3B.
+    reply->set_result(rpc::ReportRecoveryCandidateReply::NO_SLOT);
+  }
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
+void CoreWorker::HandleInstallRecoveryHolder(rpc::InstallRecoveryHolderRequest request,
+                                             rpc::InstallRecoveryHolderReply *reply,
+                                             rpc::SendReplyCallback send_reply_callback) {
+  // Replaced by actual holder installation in Phase 3B.
+  reply->set_stored(false);
+  reply->set_reservation_id(request.reservation_id());
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
+void CoreWorker::HandleCommitRecoveryManifest(
+    rpc::CommitRecoveryManifestRequest request,
+    rpc::CommitRecoveryManifestReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  // Replaced by manifest validation and storage in Phase 3B.
+  static_cast<void>(request);
+  static_cast<void>(reply);
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
+void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
+                                         rpc::RecoverTaskOutputReply *reply,
+                                         rpc::SendReplyCallback send_reply_callback) {
+  static_cast<void>(request);
+
+  if (!recovery_succession_enabled_ || recovery_succession_manager_ == nullptr) {
+    reply->set_result(rpc::RecoverTaskOutputReply::DISABLED);
+  } else {
+    // Actual recovery is implemented in Phase 5.
+    reply->set_result(rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
+  }
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
+void CoreWorker::HandleApplyRecoveryTombstone(
+    rpc::ApplyRecoveryTombstoneRequest request,
+    rpc::ApplyRecoveryTombstoneReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  // Actual tombstone processing is implemented in Phase 6.
+  static_cast<void>(request);
+  static_cast<void>(reply);
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
 void CoreWorker::HandleWaitForActorRefDeleted(
     rpc::WaitForActorRefDeletedRequest request,
     rpc::WaitForActorRefDeletedReply *reply,
