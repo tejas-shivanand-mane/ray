@@ -4,6 +4,7 @@ from pathlib import Path
 
 import ray
 from ray.cluster_utils import Cluster
+from ray._private.internal_api import global_gc
 
 
 def find_log_lines(
@@ -24,7 +25,7 @@ def find_log_lines(
 
             try:
                 content = path.read_text(
-                    errors="replace"
+                    errors="replace",
                 )
             except OSError:
                 continue
@@ -32,7 +33,7 @@ def find_log_lines(
             for line in content.splitlines():
                 if text in line:
                     matches.append(
-                        f"{path.name}: {line}"
+                        f"{path.name}: {line}",
                     )
 
     return matches
@@ -46,6 +47,8 @@ cluster.add_node(
     _system_config={
         "enable_recovery_succession": True,
         "recovery_succession_witness_count": 2,
+        "local_gc_min_interval_s": 1,
+        "global_gc_min_interval_s": 1,
     },
 )
 
@@ -94,22 +97,28 @@ try:
     assert ray.get(produced_ref) == 42
 
     assert ray.get(
-        holder_a.remote([produced_ref])
+        holder_a.remote([produced_ref]),
     ) == 42
 
     assert ray.get(
-        holder_b.remote([produced_ref])
+        holder_b.remote([produced_ref]),
     ) == 42
 
     # Allow holder admission and witness publication.
     time.sleep(5)
 
     del produced_ref
-    gc.collect()
 
-    # Allow distributed reference deletion and the
-    # one-second cleanup pass to complete.
-    time.sleep(8)
+    gc.collect()
+    global_gc()
+
+    time.sleep(3)
+
+    gc.collect()
+    global_gc()
+
+    # Allow distributed reference deletion and cleanup passes.
+    time.sleep(12)
 
     session_dirs = {
         Path(node.get_session_dir_path())
@@ -126,22 +135,34 @@ try:
         "Applied recovery succession tombstone",
     )
 
+    cleanup_scans = find_log_lines(
+        session_dirs,
+        "Phase 6 cleanup scan",
+    )
+
+    if cleanup_scans:
+        print("Cleanup scans:")
+
+        for line in cleanup_scans:
+            print(f"  {line}")
+
     if not published:
         raise AssertionError(
-            "No owner-side tombstone publication "
-            "was found."
+            "No owner-side tombstone publication was found.",
         )
 
-    if len(applied) < 1:
+    if not applied:
         raise AssertionError(
-            "No holder applied the tombstone."
+            "No holder applied the tombstone.",
         )
 
     print("Tombstone publication:")
+
     for line in published:
         print(f"  {line}")
 
     print("Tombstone application:")
+
     for line in applied:
         print(f"  {line}")
 

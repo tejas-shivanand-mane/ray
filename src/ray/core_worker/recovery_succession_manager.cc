@@ -463,33 +463,41 @@ bool RecoverySuccessionManager::InstallRecoveryHolder(
 }
 
 bool RecoverySuccessionManager::CommitHolderAdmission(
-    const std::string &reservation_id, rpc::RecoveryManifest *committed_manifest) {
-  if (reservation_id.empty() || committed_manifest == nullptr) {
+    const std::string &reservation_id,
+    rpc::RecoveryManifest *committed_manifest) {
+  if (reservation_id.empty() ||
+      committed_manifest == nullptr) {
     return false;
   }
 
   absl::MutexLock lock(&mutex_);
 
-  const auto reservation_it = holder_reservations_.find(reservation_id);
+  const auto reservation_it =
+      holder_reservations_.find(reservation_id);
 
   if (reservation_it == holder_reservations_.end()) {
     return false;
   }
 
-  const TaskID task_id = reservation_it->second.task_id;
+  const TaskID task_id =
+      reservation_it->second.task_id;
 
   const auto task_it = task_states_.find(task_id);
 
   if (task_it == task_states_.end()) {
-    holder_reservations_.erase(reservation_it++);
+    holder_reservations_.erase(reservation_it);
     return false;
   }
 
-  UpdateManifestForTaskLocked(task_id, reservation_it->second.proposed_manifest, true);
+  UpdateManifestForTaskLocked(
+      task_id,
+      reservation_it->second.proposed_manifest,
+      true);
 
-  committed_manifest->CopyFrom(reservation_it->second.proposed_manifest);
+  committed_manifest->CopyFrom(
+      reservation_it->second.proposed_manifest);
 
-  holder_reservations_.erase(reservation_it++);
+  holder_reservations_.erase(reservation_it);
 
   return true;
 }
@@ -923,11 +931,13 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
   EraseTaskObjectMetadataLocked(task_id);
 
   for (auto reservation_it =
-           holder_reservations_.begin();
-       reservation_it != holder_reservations_.end();) {
+          holder_reservations_.begin();
+      reservation_it !=
+          holder_reservations_.end();) {
     if (reservation_it->second.task_id == task_id) {
-      reservation_it =
-          holder_reservations_.erase(reservation_it++);
+      auto erase_it = reservation_it;
+      ++reservation_it;
+      holder_reservations_.erase(erase_it);
     } else {
       ++reservation_it;
     }
@@ -938,27 +948,33 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
   return true;
 }
 
-void RecoverySuccessionManager::EraseTaskObjectMetadataLocked(
-    const TaskID &task_id) {
-  const std::string task_id_binary = task_id.Binary();
+void RecoverySuccessionManager::
+    EraseTaskObjectMetadataLocked(
+        const TaskID &task_id) {
+  const std::string task_id_binary =
+      task_id.Binary();
 
   for (auto metadata_it =
            object_recovery_metadata_.begin();
-       metadata_it != object_recovery_metadata_.end();) {
+       metadata_it !=
+           object_recovery_metadata_.end();) {
     if (metadata_it->second.task_id() ==
         task_id_binary) {
-      metadata_it =
-          object_recovery_metadata_.erase(metadata_it++);
+      auto erase_it = metadata_it;
+      ++metadata_it;
+      object_recovery_metadata_.erase(erase_it);
     } else {
       ++metadata_it;
     }
   }
 
-  for (auto borrowed_it = borrowed_objects_.begin();
+  for (auto borrowed_it =
+           borrowed_objects_.begin();
        borrowed_it != borrowed_objects_.end();) {
     if (borrowed_it->second.task_id == task_id) {
-      borrowed_it =
-          borrowed_objects_.erase(borrowed_it++);
+      auto erase_it = borrowed_it;
+      ++borrowed_it;
+      borrowed_objects_.erase(erase_it);
     } else {
       ++borrowed_it;
     }
