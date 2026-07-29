@@ -4249,10 +4249,7 @@ void CoreWorker::HandleReportRecoveryCandidate(
               send_reply_callback(
                   Status::OK(), nullptr, nullptr);
             });
-          return;
-        }
-
-        reply->set_result(rpc::ReportRecoveryCandidateReply::ACCEPTED);
+          
         reply->mutable_latest_manifest()->CopyFrom(committed_manifest);
 
         RAY_LOG(INFO).WithField(task_id)

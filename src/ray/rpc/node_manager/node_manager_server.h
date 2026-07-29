@@ -66,8 +66,10 @@ class ServerCallFactory;
   RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(GetWorkerPIDs)                  \
   RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(GetAgentPIDs)                   \
   RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(KillLocalActor)                 \
-  RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(CancelLocalTask)                \
-  RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(FreeLocalObjects)
+    RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(CancelLocalTask)                \
+    RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(FreeLocalObjects)               \
+    RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(UpdateRecoveryWitness)          \
+    RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(GetRecoveryWitness)
 
 /// Interface of the `NodeManagerService`, see `src/ray/protobuf/node_manager.proto`.
 class NodeManagerServiceHandler {
@@ -208,9 +210,20 @@ class NodeManagerServiceHandler {
                                      CancelLocalTaskReply *reply,
                                      SendReplyCallback send_reply_callback) = 0;
 
-  virtual void HandleFreeLocalObjects(FreeLocalObjectsRequest request,
-                                      FreeLocalObjectsReply *reply,
-                                      SendReplyCallback send_reply_callback) = 0;
+    virtual void HandleFreeLocalObjects(
+        FreeLocalObjectsRequest request,
+        FreeLocalObjectsReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
+    virtual void HandleUpdateRecoveryWitness(
+        UpdateRecoveryWitnessRequest request,
+        UpdateRecoveryWitnessReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
+    virtual void HandleGetRecoveryWitness(
+        GetRecoveryWitnessRequest request,
+        GetRecoveryWitnessReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
 };
 
 /// The `GrpcService` for `NodeManagerService`.
