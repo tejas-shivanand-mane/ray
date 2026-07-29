@@ -64,6 +64,31 @@ class CoreWorkerServiceHandler : public DelayedServiceHandler {
                                      GetObjectStatusReply *reply,
                                      SendReplyCallback send_reply_callback) = 0;
 
+    virtual void HandleReportRecoveryCandidate(
+        ReportRecoveryCandidateRequest request,
+        ReportRecoveryCandidateReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
+    virtual void HandleInstallRecoveryHolder(
+        InstallRecoveryHolderRequest request,
+        InstallRecoveryHolderReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
+    virtual void HandleCommitRecoveryManifest(
+        CommitRecoveryManifestRequest request,
+        CommitRecoveryManifestReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
+    virtual void HandleRecoverTaskOutput(
+        RecoverTaskOutputRequest request,
+        RecoverTaskOutputReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
+    virtual void HandleApplyRecoveryTombstone(
+        ApplyRecoveryTombstoneRequest request,
+        ApplyRecoveryTombstoneReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
   virtual void HandleWaitForActorRefDeleted(WaitForActorRefDeletedRequest request,
                                             WaitForActorRefDeletedReply *reply,
                                             SendReplyCallback send_reply_callback) = 0;

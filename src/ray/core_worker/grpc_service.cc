@@ -45,6 +45,36 @@ void CoreWorkerGrpcService::InitServerCallFactories(
                                                           GetObjectStatus,
                                                           max_active_rpcs_per_handler_,
                                                           ClusterIdAuthType::NO_AUTH);
+  RPC_SERVICE_HANDLER_CUSTOM_AUTH_SERVER_METRICS_DISABLED(
+        CoreWorkerService,
+        ReportRecoveryCandidate,
+        max_active_rpcs_per_handler_,
+        ClusterIdAuthType::NO_AUTH);
+
+  RPC_SERVICE_HANDLER_CUSTOM_AUTH_SERVER_METRICS_DISABLED(
+        CoreWorkerService,
+        InstallRecoveryHolder,
+        max_active_rpcs_per_handler_,
+        ClusterIdAuthType::NO_AUTH);
+
+  RPC_SERVICE_HANDLER_CUSTOM_AUTH_SERVER_METRICS_DISABLED(
+        CoreWorkerService,
+        CommitRecoveryManifest,
+        max_active_rpcs_per_handler_,
+        ClusterIdAuthType::NO_AUTH);
+
+  RPC_SERVICE_HANDLER_CUSTOM_AUTH_SERVER_METRICS_DISABLED(
+        CoreWorkerService,
+        RecoverTaskOutput,
+        max_active_rpcs_per_handler_,
+        ClusterIdAuthType::NO_AUTH);
+
+  RPC_SERVICE_HANDLER_CUSTOM_AUTH_SERVER_METRICS_DISABLED(
+        CoreWorkerService,
+        ApplyRecoveryTombstone,
+        max_active_rpcs_per_handler_,
+        ClusterIdAuthType::NO_AUTH);
+
   RPC_SERVICE_HANDLER_CUSTOM_AUTH_SERVER_METRICS_DISABLED(CoreWorkerService,
                                                           WaitForActorRefDeleted,
                                                           max_active_rpcs_per_handler_,

@@ -4249,44 +4249,6 @@ void CoreWorker::HandleReportRecoveryCandidate(
               send_reply_callback(
                   Status::OK(), nullptr, nullptr);
             });
-          
-        reply->mutable_latest_manifest()->CopyFrom(committed_manifest);
-
-        RAY_LOG(INFO).WithField(task_id)
-            << "Committed recovery succession "
-               "manifest with "
-            << committed_manifest.succession_size() << " total members";
-
-        for (const rpc::RecoveryHolder &holder : committed_manifest.succession()) {
-          if (holder.address().worker_id() == rpc_address_.worker_id()) {
-            continue;
-          }
-
-          rpc::CommitRecoveryManifestRequest commit_request;
-
-          commit_request.mutable_manifest()->CopyFrom(committed_manifest);
-
-          const uint32_t holder_rank = holder.rank();
-
-          auto holder_client = core_worker_client_pool_->GetOrConnect(holder.address());
-
-          holder_client->CommitRecoveryManifest(
-              std::move(commit_request),
-              [task_id, holder_rank](const Status &commit_status,
-                                     rpc::CommitRecoveryManifestReply &&commit_reply) {
-                static_cast<void>(commit_reply);
-
-                if (!commit_status.ok()) {
-                  RAY_LOG(WARNING).WithField(task_id)
-                      << "Failed to commit "
-                         "recovery manifest "
-                         "to rank "
-                      << holder_rank << ": " << commit_status;
-                }
-              });
-        }
-
-        send_reply_callback(Status::OK(), nullptr, nullptr);
       });
 }
 
@@ -5537,7 +5499,7 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     request.mutable_manifest()->CopyFrom(manifest);
 
     auto witness_client =
-        raylet_client_pool_->GetOrConnect(witness);
+    raylet_client_pool_->GetOrConnectByAddress(witness);
 
     witness_client->UpdateRecoveryWitness(
         std::move(request),
@@ -5625,7 +5587,7 @@ void CoreWorker::LookupRecoveryManifestFromWitnesses(
         cached_manifest.task_id());
 
     auto witness_client =
-        raylet_client_pool_->GetOrConnect(witness);
+    raylet_client_pool_->GetOrConnectByAddress(witness);
 
     witness_client->GetRecoveryWitness(
         std::move(request),
