@@ -80,7 +80,9 @@ ray_cc_library(
         "//src/ray/common:id",
         "//src/ray/common:task_common",
         "//src/ray/protobuf:common_cc_proto",
+        "//src/ray/protobuf:core_worker_cc_proto",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/synchronization",
     ],
 )

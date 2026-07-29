@@ -21,10 +21,53 @@ namespace ray::core {
 
 namespace {
 
-/// Number of non-owner lineage holders requested by the initial implementation.
-///
-/// This becomes a Ray configuration option in a later phase.
 constexpr uint32_t kDefaultTargetHolderCount = 2;
+
+const rpc::RecoveryHolder *FindHolderByRank(const rpc::RecoveryManifest &manifest,
+                                            uint32_t rank) {
+  for (const rpc::RecoveryHolder &holder : manifest.succession()) {
+    if (holder.rank() == rank) {
+      return &holder;
+    }
+  }
+
+  return nullptr;
+}
+
+bool SameWorker(const rpc::Address &left, const rpc::Address &right) {
+  return !left.worker_id().empty() && left.worker_id() == right.worker_id();
+}
+
+bool ContainsWorker(const rpc::RecoveryManifest &manifest, const rpc::Address &address) {
+  for (const rpc::RecoveryHolder &holder : manifest.succession()) {
+    if (SameWorker(holder.address(), address)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+int CompareManifestVersions(const rpc::RecoveryManifest &left,
+                            const rpc::RecoveryManifest &right) {
+  if (left.version().generation() < right.version().generation()) {
+    return -1;
+  }
+
+  if (left.version().generation() > right.version().generation()) {
+    return 1;
+  }
+
+  if (left.version().coordinator_rank() < right.version().coordinator_rank()) {
+    return -1;
+  }
+
+  if (left.version().coordinator_rank() > right.version().coordinator_rank()) {
+    return 1;
+  }
+
+  return 0;
+}
 
 }  // namespace
 
@@ -43,12 +86,9 @@ rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
   manifest.set_task_id(task_id.Binary());
   manifest.set_job_id(job_id.Binary());
   manifest.set_target_holder_count(kDefaultTargetHolderCount);
-
-  // Witnesses are selected in the witness phase.
   manifest.set_witness_quorum(0);
 
-  // Generation 1 is the initial owner-created version.
-  auto *version = manifest.mutable_version();
+  rpc::RecoveryManifestVersion *version = manifest.mutable_version();
   version->set_generation(1);
   version->set_coordinator_rank(0);
 
@@ -57,8 +97,7 @@ rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
   manifest.set_recovery_attempt(0);
   manifest.set_max_recovery_attempts(max_retries);
 
-  // Rank 0 is always the original owner.
-  auto *owner = manifest.add_succession();
+  rpc::RecoveryHolder *owner = manifest.add_succession();
   owner->mutable_address()->CopyFrom(self_address_);
   owner->set_rank(0);
   owner->set_failure_domain_id(self_address_.node_id());
@@ -84,6 +123,7 @@ void RecoverySuccessionManager::RegisterOwnedTask(
   TaskRecoveryState task_state;
   task_state.manifest.CopyFrom(task_proto.recovery_manifest());
   task_state.task_spec = task_proto;
+  task_state.manifest_committed = true;
 
   absl::MutexLock lock(&mutex_);
 
@@ -109,7 +149,8 @@ void RecoverySuccessionManager::RegisterOwnedTask(
   }
 }
 
-void RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) {
+std::vector<RecoverySuccessionManager::CandidateReport>
+RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) {
   std::vector<std::pair<ObjectID, rpc::RecoveryObjectMetadata>> received_metadata;
 
   auto collect_metadata = [&received_metadata](const rpc::ObjectReference &object_ref) {
@@ -141,30 +182,58 @@ void RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_s
                                  task_spec.has_recovery_manifest() &&
                                  !task_spec.task_id().empty();
 
+  std::vector<CandidateReport> reports;
+
   absl::MutexLock lock(&mutex_);
 
   for (const auto &[object_id, metadata] : received_metadata) {
+    rpc::RecoveryObjectMetadata effective_metadata;
+    effective_metadata.CopyFrom(metadata);
+
+    const auto existing_metadata = object_recovery_metadata_.find(object_id);
+
+    if (existing_metadata != object_recovery_metadata_.end() &&
+        CompareManifestVersions(existing_metadata->second.manifest(),
+                                metadata.manifest()) > 0) {
+      effective_metadata.CopyFrom(existing_metadata->second);
+    }
+
     BorrowedObjectRecoveryState borrowed_state;
-    borrowed_state.task_id = TaskID::FromBinary(metadata.task_id());
-    borrowed_state.return_index = metadata.return_index();
-    borrowed_state.cached_manifest.CopyFrom(metadata.manifest());
+    borrowed_state.task_id = TaskID::FromBinary(effective_metadata.task_id());
+    borrowed_state.return_index = effective_metadata.return_index();
+    borrowed_state.cached_manifest.CopyFrom(effective_metadata.manifest());
 
     borrowed_objects_[object_id] = std::move(borrowed_state);
 
-    object_recovery_metadata_[object_id] = metadata;
+    object_recovery_metadata_[object_id] = effective_metadata;
   }
 
-  if (!should_store_task) {
-    return;
+  if (should_store_task) {
+    const TaskID task_id = TaskID::FromBinary(task_spec.task_id());
+
+    TaskRecoveryState &task_state = task_states_[task_id];
+
+    if (task_state.manifest.task_id().empty() ||
+        CompareManifestVersions(task_spec.recovery_manifest(), task_state.manifest) > 0) {
+      task_state.manifest.CopyFrom(task_spec.recovery_manifest());
+    }
+
+    rpc::TaskSpec stored_task_spec;
+    stored_task_spec.CopyFrom(task_spec);
+    stored_task_spec.mutable_recovery_manifest()->CopyFrom(task_state.manifest);
+
+    task_state.task_spec = std::move(stored_task_spec);
+
+    MaybeAddCandidateReportLocked(task_state.manifest, true, &reports);
   }
 
-  const TaskID task_id = TaskID::FromBinary(task_spec.task_id());
+  for (const auto &[object_id, metadata] : received_metadata) {
+    static_cast<void>(object_id);
 
-  TaskRecoveryState task_state;
-  task_state.manifest.CopyFrom(task_spec.recovery_manifest());
-  task_state.task_spec = task_spec;
+    MaybeAddCandidateReportLocked(metadata.manifest(), false, &reports);
+  }
 
-  task_states_[task_id] = std::move(task_state);
+  return reports;
 }
 
 void RecoverySuccessionManager::RegisterBorrowedObject(
@@ -173,16 +242,284 @@ void RecoverySuccessionManager::RegisterBorrowedObject(
     return;
   }
 
-  BorrowedObjectRecoveryState borrowed_state;
-  borrowed_state.task_id = TaskID::FromBinary(metadata.task_id());
-  borrowed_state.return_index = metadata.return_index();
-  borrowed_state.cached_manifest.CopyFrom(metadata.manifest());
+  rpc::RecoveryObjectMetadata effective_metadata;
+  effective_metadata.CopyFrom(metadata);
 
   absl::MutexLock lock(&mutex_);
 
+  const auto existing_metadata = object_recovery_metadata_.find(object_id);
+
+  if (existing_metadata != object_recovery_metadata_.end() &&
+      CompareManifestVersions(existing_metadata->second.manifest(), metadata.manifest()) >
+          0) {
+    effective_metadata.CopyFrom(existing_metadata->second);
+  }
+
+  BorrowedObjectRecoveryState borrowed_state;
+  borrowed_state.task_id = TaskID::FromBinary(effective_metadata.task_id());
+  borrowed_state.return_index = effective_metadata.return_index();
+  borrowed_state.cached_manifest.CopyFrom(effective_metadata.manifest());
+
   borrowed_objects_[object_id] = std::move(borrowed_state);
 
-  object_recovery_metadata_[object_id] = metadata;
+  object_recovery_metadata_[object_id] = effective_metadata;
+}
+
+rpc::ReportRecoveryCandidateReply::Result
+RecoverySuccessionManager::PrepareHolderAdmission(
+    const rpc::ReportRecoveryCandidateRequest &request,
+    HolderAdmissionPlan *plan,
+    rpc::RecoveryManifest *latest_manifest) {
+  if (plan == nullptr || latest_manifest == nullptr || request.task_id().empty() ||
+      !request.has_candidate_address() || !request.has_cached_manifest()) {
+    return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
+  }
+
+  *plan = HolderAdmissionPlan();
+  latest_manifest->Clear();
+
+  const rpc::Address &candidate_address = request.candidate_address();
+
+  if (candidate_address.worker_id().empty() || candidate_address.node_id().empty() ||
+      candidate_address.ip_address().empty() || candidate_address.port() <= 0) {
+    return rpc::ReportRecoveryCandidateReply::NO_SLOT;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(request.task_id());
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto task_it = task_states_.find(task_id);
+
+  if (task_it == task_states_.end() || !task_it->second.task_spec.has_value()) {
+    return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
+  }
+
+  const TaskRecoveryState &task_state = task_it->second;
+
+  latest_manifest->CopyFrom(task_state.manifest);
+
+  if (task_state.manifest.tombstoned()) {
+    return rpc::ReportRecoveryCandidateReply::TOMBSTONED;
+  }
+
+  const uint32_t coordinator_rank = task_state.manifest.version().coordinator_rank();
+
+  const rpc::RecoveryHolder *coordinator =
+      FindHolderByRank(task_state.manifest, coordinator_rank);
+
+  if (coordinator == nullptr || !SameWorker(coordinator->address(), self_address_)) {
+    return rpc::ReportRecoveryCandidateReply::WRONG_COORDINATOR;
+  }
+
+  if (request.cached_manifest().version().coordinator_rank() != coordinator_rank) {
+    return rpc::ReportRecoveryCandidateReply::WRONG_COORDINATOR;
+  }
+
+  if (request.cached_manifest().version().generation() >
+      task_state.manifest.version().generation()) {
+    return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
+  }
+
+  if (ContainsWorker(task_state.manifest, candidate_address)) {
+    return rpc::ReportRecoveryCandidateReply::ACCEPTED;
+  }
+
+  if (task_state.manifest.frozen()) {
+    return rpc::ReportRecoveryCandidateReply::FROZEN;
+  }
+
+  const uint32_t confirmed_non_owner_holders =
+      task_state.manifest.succession_size() > 0
+          ? static_cast<uint32_t>(task_state.manifest.succession_size() - 1)
+          : 0;
+
+  if (confirmed_non_owner_holders >= task_state.manifest.target_holder_count()) {
+    return rpc::ReportRecoveryCandidateReply::NO_SLOT;
+  }
+
+  for (const auto &[reservation_id, reservation] : holder_reservations_) {
+    static_cast<void>(reservation_id);
+
+    if (reservation.task_id == task_id) {
+      return rpc::ReportRecoveryCandidateReply::NO_SLOT;
+    }
+  }
+
+  for (const rpc::RecoveryHolder &holder : task_state.manifest.succession()) {
+    if (!holder.failure_domain_id().empty() &&
+        holder.failure_domain_id() == candidate_address.node_id()) {
+      return rpc::ReportRecoveryCandidateReply::NO_SLOT;
+    }
+  }
+
+  rpc::RecoveryManifest proposed_manifest;
+  proposed_manifest.CopyFrom(task_state.manifest);
+
+  const uint32_t proposed_rank =
+      static_cast<uint32_t>(proposed_manifest.succession_size());
+
+  rpc::RecoveryHolder *new_holder = proposed_manifest.add_succession();
+  new_holder->mutable_address()->CopyFrom(candidate_address);
+  new_holder->set_rank(proposed_rank);
+  new_holder->set_failure_domain_id(candidate_address.node_id());
+
+  rpc::RecoveryManifestVersion *new_version = proposed_manifest.mutable_version();
+  new_version->set_generation(task_state.manifest.version().generation() + 1);
+  new_version->clear_manifest_digest();
+
+  const uint32_t holders_after_admission =
+      static_cast<uint32_t>(proposed_manifest.succession_size() - 1);
+
+  if (holders_after_admission >= proposed_manifest.target_holder_count()) {
+    proposed_manifest.set_frozen(true);
+  }
+
+  const std::string reservation_id = UniqueID::FromRandom().Binary();
+
+  HolderReservation reservation;
+  reservation.task_id = task_id;
+  reservation.candidate_address.CopyFrom(candidate_address);
+  reservation.proposed_manifest.CopyFrom(proposed_manifest);
+
+  holder_reservations_[reservation_id] = std::move(reservation);
+
+  plan->reservation_id = reservation_id;
+  plan->candidate_address.CopyFrom(candidate_address);
+  plan->task_spec.CopyFrom(task_it->second.task_spec.value());
+  plan->task_spec.mutable_recovery_manifest()->CopyFrom(proposed_manifest);
+  plan->proposed_manifest.CopyFrom(proposed_manifest);
+
+  return rpc::ReportRecoveryCandidateReply::ACCEPTED;
+}
+
+bool RecoverySuccessionManager::InstallRecoveryHolder(
+    const rpc::InstallRecoveryHolderRequest &request) {
+  if (request.task_id().empty() || request.reservation_id().empty() ||
+      !request.has_task_spec() || !request.has_proposed_manifest() ||
+      request.task_spec().task_id() != request.task_id() ||
+      request.proposed_manifest().task_id() != request.task_id() ||
+      !IsEligibleTask(request.task_spec())) {
+    return false;
+  }
+
+  const rpc::RecoveryHolder *proposed_holder =
+      FindHolderByRank(request.proposed_manifest(), request.proposed_rank());
+
+  if (proposed_holder == nullptr ||
+      !SameWorker(proposed_holder->address(), self_address_) ||
+      proposed_holder->failure_domain_id() != self_address_.node_id()) {
+    return false;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(request.task_id());
+
+  absl::MutexLock lock(&mutex_);
+
+  TaskRecoveryState &task_state = task_states_[task_id];
+
+  if (!task_state.manifest.task_id().empty()) {
+    const int comparison =
+        CompareManifestVersions(task_state.manifest, request.proposed_manifest());
+
+    if (comparison > 0) {
+      return false;
+    }
+
+    if (comparison == 0 && task_state.manifest_committed &&
+        ContainsWorker(task_state.manifest, self_address_)) {
+      return true;
+    }
+  }
+
+  task_state.manifest.CopyFrom(request.proposed_manifest());
+
+  rpc::TaskSpec stored_task_spec;
+  stored_task_spec.CopyFrom(request.task_spec());
+  stored_task_spec.mutable_recovery_manifest()->CopyFrom(request.proposed_manifest());
+
+  task_state.task_spec = std::move(stored_task_spec);
+  task_state.manifest_committed = false;
+  task_state.provisional_reservation_id = request.reservation_id();
+
+  candidate_reports_sent_.insert(task_id);
+
+  return true;
+}
+
+bool RecoverySuccessionManager::CommitHolderAdmission(
+    const std::string &reservation_id, rpc::RecoveryManifest *committed_manifest) {
+  if (reservation_id.empty() || committed_manifest == nullptr) {
+    return false;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto reservation_it = holder_reservations_.find(reservation_id);
+
+  if (reservation_it == holder_reservations_.end()) {
+    return false;
+  }
+
+  const TaskID task_id = reservation_it->second.task_id;
+
+  const auto task_it = task_states_.find(task_id);
+
+  if (task_it == task_states_.end()) {
+    holder_reservations_.erase(reservation_it);
+    return false;
+  }
+
+  UpdateManifestForTaskLocked(task_id, reservation_it->second.proposed_manifest, true);
+
+  committed_manifest->CopyFrom(reservation_it->second.proposed_manifest);
+
+  holder_reservations_.erase(reservation_it);
+
+  return true;
+}
+
+void RecoverySuccessionManager::AbortHolderAdmission(const std::string &reservation_id) {
+  if (reservation_id.empty()) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  holder_reservations_.erase(reservation_id);
+}
+
+bool RecoverySuccessionManager::ApplyCommittedManifest(
+    const rpc::RecoveryManifest &manifest) {
+  if (manifest.task_id().empty()) {
+    return false;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(manifest.task_id());
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto task_it = task_states_.find(task_id);
+
+  if (task_it != task_states_.end() && !task_it->second.manifest.task_id().empty()) {
+    const int comparison = CompareManifestVersions(manifest, task_it->second.manifest);
+
+    if (comparison < 0) {
+      return false;
+    }
+
+    if (comparison == 0 &&
+        manifest.SerializeAsString() != task_it->second.manifest.SerializeAsString()) {
+      return false;
+    }
+  }
+
+  UpdateManifestForTaskLocked(task_id, manifest, true);
+
+  if (ContainsWorker(manifest, self_address_)) {
+    candidate_reports_sent_.insert(task_id);
+  }
+
+  return true;
 }
 
 bool RecoverySuccessionManager::PopulateRecoveryMetadata(
@@ -193,13 +530,14 @@ bool RecoverySuccessionManager::PopulateRecoveryMetadata(
 
   absl::MutexLock lock(&mutex_);
 
-  const auto it = object_recovery_metadata_.find(object_id);
+  const auto metadata_it = object_recovery_metadata_.find(object_id);
 
-  if (it == object_recovery_metadata_.end()) {
+  if (metadata_it == object_recovery_metadata_.end()) {
     return false;
   }
 
-  metadata->CopyFrom(it->second);
+  metadata->CopyFrom(metadata_it->second);
+
   return true;
 }
 
@@ -242,34 +580,118 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
   }
 }
 
+void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
+    const rpc::RecoveryManifest &manifest,
+    bool already_stores_task_spec,
+    std::vector<CandidateReport> *reports) {
+  if (reports == nullptr || manifest.task_id().empty()) {
+    return;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(manifest.task_id());
+
+  if (candidate_reports_sent_.contains(task_id)) {
+    return;
+  }
+
+  rpc::RecoveryManifest effective_manifest;
+  effective_manifest.CopyFrom(manifest);
+
+  const auto task_it = task_states_.find(task_id);
+
+  if (task_it != task_states_.end() && !task_it->second.manifest.task_id().empty() &&
+      CompareManifestVersions(task_it->second.manifest, effective_manifest) > 0) {
+    effective_manifest.CopyFrom(task_it->second.manifest);
+  }
+
+  if (effective_manifest.frozen() || effective_manifest.tombstoned() ||
+      ContainsWorker(effective_manifest, self_address_)) {
+    return;
+  }
+
+  const rpc::RecoveryHolder *coordinator = FindHolderByRank(
+      effective_manifest, effective_manifest.version().coordinator_rank());
+
+  if (coordinator == nullptr || SameWorker(coordinator->address(), self_address_)) {
+    return;
+  }
+
+  CandidateReport report;
+  report.coordinator_address.CopyFrom(coordinator->address());
+
+  report.request.set_task_id(effective_manifest.task_id());
+  report.request.mutable_candidate_address()->CopyFrom(self_address_);
+  report.request.mutable_cached_manifest()->CopyFrom(effective_manifest);
+  report.request.set_already_stores_task_spec(already_stores_task_spec);
+
+  reports->push_back(std::move(report));
+
+  candidate_reports_sent_.insert(task_id);
+}
+
+void RecoverySuccessionManager::UpdateManifestForTaskLocked(
+    const TaskID &task_id, const rpc::RecoveryManifest &manifest, bool committed) {
+  TaskRecoveryState &task_state = task_states_[task_id];
+
+  task_state.manifest.CopyFrom(manifest);
+  task_state.manifest_committed = committed;
+
+  if (committed) {
+    task_state.provisional_reservation_id.clear();
+  }
+
+  if (task_state.task_spec.has_value()) {
+    task_state.task_spec->mutable_recovery_manifest()->CopyFrom(manifest);
+  }
+
+  const std::string task_id_binary = task_id.Binary();
+
+  for (auto &[object_id, metadata] : object_recovery_metadata_) {
+    static_cast<void>(object_id);
+
+    if (metadata.task_id() == task_id_binary) {
+      metadata.mutable_manifest()->CopyFrom(manifest);
+    }
+  }
+
+  for (auto &[object_id, borrowed_state] : borrowed_objects_) {
+    static_cast<void>(object_id);
+
+    if (borrowed_state.task_id == task_id) {
+      borrowed_state.cached_manifest.CopyFrom(manifest);
+    }
+  }
+}
+
 bool RecoverySuccessionManager::TryRecoverObject(const ObjectID &object_id) {
-  // Actual holder traversal and replay are added later.
   static_cast<void>(object_id);
   return false;
 }
 
 void RecoverySuccessionManager::HandleWorkerFailure(const WorkerID &worker_id) {
-  // Failure-based coordinator takeover is added later.
   static_cast<void>(worker_id);
 }
 
 void RecoverySuccessionManager::HandleNodeFailure(const NodeID &node_id) {
-  // Holder failure detection and repair are added later.
   static_cast<void>(node_id);
 }
 
 bool RecoverySuccessionManager::HasConfirmedHolderResponsibilities() const {
   absl::MutexLock lock(&mutex_);
 
-  for (const auto &entry : task_states_) {
-    const rpc::RecoveryManifest &manifest = entry.second.manifest;
+  for (const auto &[task_id, task_state] : task_states_) {
+    static_cast<void>(task_id);
 
-    for (const rpc::RecoveryHolder &holder : manifest.succession()) {
+    if (!task_state.manifest_committed || !task_state.task_spec.has_value()) {
+      continue;
+    }
+
+    for (const rpc::RecoveryHolder &holder : task_state.manifest.succession()) {
       if (holder.rank() == 0) {
         continue;
       }
 
-      if (holder.address().worker_id() == self_address_.worker_id()) {
+      if (SameWorker(holder.address(), self_address_)) {
         return true;
       }
     }
