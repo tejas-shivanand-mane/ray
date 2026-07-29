@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <utility>
 
@@ -29,6 +30,9 @@ namespace core {
 using ReportLocalityDataCallback =
     std::function<void(const ObjectID &, const absl::flat_hash_set<NodeID> &, uint64_t)>;
 
+using RecoveryMetadataCallback =
+    std::function<void(const ObjectID &, const rpc::RecoveryObjectMetadata &)>;
+
 // Resolve values for futures that were given to us before the value
 // was available. This class is thread-safe.
 class FutureResolver {
@@ -43,6 +47,13 @@ class FutureResolver {
         report_locality_data_callback_(std::move(report_locality_data_callback)),
         owner_clients_(std::move(core_worker_client_pool)),
         rpc_address_(std::move(rpc_address)) {}
+
+  /// Installs a callback for recovery metadata received from owners.
+  ///
+  /// This is configured once during CoreWorker initialization.
+  void SetRecoveryMetadataCallback(RecoveryMetadataCallback callback) {
+    recovery_metadata_callback_ = std::move(callback);
+  }
 
   /// Resolve the value for a future. This will periodically contact the given
   /// owner until the owner dies or the owner has finished creating the object.
@@ -82,6 +93,9 @@ class FutureResolver {
   /// address, so the owner can contact us to ask when our reference to the
   /// object has gone out of scope.
   rpc::Address rpc_address_;
+
+  /// Called when GetObjectStatus returns recovery metadata.
+  RecoveryMetadataCallback recovery_metadata_callback_;
 };
 
 }  // namespace core

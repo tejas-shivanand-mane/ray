@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include "ray/core_worker/core_worker.h"
-#include "ray/core_worker/recovery_succession_manager.h"
 
 #include <algorithm>
 #include <future>
@@ -25,6 +24,7 @@
 #include <vector>
 
 #include "ray/core_worker/core_worker_shutdown_executor.h"
+#include "ray/core_worker/recovery_succession_manager.h"
 #include "ray/core_worker/shutdown_coordinator.h"
 
 #ifndef _WIN32
@@ -374,8 +374,7 @@ CoreWorker::CoreWorker(
       object_info_subscriber_(std::move(object_info_subscriber)),
       lease_request_rate_limiter_(std::move(lease_request_rate_limiter)),
       normal_task_submitter_(std::move(normal_task_submitter)),
-      recovery_succession_enabled_(
-          RayConfig::instance().enable_recovery_succession()),
+      recovery_succession_enabled_(RayConfig::instance().enable_recovery_succession()),
       recovery_succession_manager_(nullptr),
       object_recovery_manager_(std::move(object_recovery_manager)),
       actor_manager_(std::move(actor_manager)),
@@ -402,16 +401,28 @@ CoreWorker::CoreWorker(
                              "CoreWorker.FreeActorObjectCallback");
           }),
       clock_(clock) {
-
-
   if (recovery_succession_enabled_) {
     recovery_succession_manager_ =
-        std::make_shared<RecoverySuccessionManager>(
-            rpc_address_);
+        std::make_shared<RecoverySuccessionManager>(rpc_address_);
+
+    if (future_resolver_ != nullptr) {
+      std::weak_ptr<RecoverySuccessionManager> weak_recovery_manager =
+          recovery_succession_manager_;
+
+      future_resolver_->SetRecoveryMetadataCallback(
+          [weak_recovery_manager](const ObjectID &object_id,
+                                  const rpc::RecoveryObjectMetadata &metadata) {
+            const auto recovery_manager = weak_recovery_manager.lock();
+
+            if (recovery_manager == nullptr) {
+              return;
+            }
+
+            recovery_manager->RegisterBorrowedObject(object_id, metadata);
+          });
+    }
   }
 
-
-  
   // Initialize task receivers.
   if (options_.worker_type == WorkerType::WORKER) {
     RAY_CHECK(options_.task_execution_callback != nullptr);
@@ -1000,16 +1011,29 @@ std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
     const std::vector<ObjectID> &object_ids) const {
   std::vector<rpc::ObjectReference> refs;
   refs.reserve(object_ids.size());
+
   for (const auto &object_id : object_ids) {
     rpc::ObjectReference ref;
     ref.set_object_id(object_id.Binary());
+
     rpc::Address owner_address;
     if (reference_counter_->GetOwner(object_id, &owner_address)) {
-      // NOTE(swang): Detached actors do not have an owner address set.
+      // NOTE(swang): Detached actors do not have an
+      // owner address set.
       *ref.mutable_owner_address() = std::move(owner_address);
     }
+
+    if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+      rpc::RecoveryObjectMetadata metadata;
+
+      if (recovery_succession_manager_->PopulateRecoveryMetadata(object_id, &metadata)) {
+        ref.mutable_recovery_metadata()->CopyFrom(metadata);
+      }
+    }
+
     refs.emplace_back(std::move(ref));
   }
+
   return refs;
 }
 
@@ -1036,10 +1060,21 @@ Status CoreWorker::GetOwnershipInfo(const ObjectID &object_id,
   // Optimization: if the object exists, serialize and inline its status. This also
   // resolves some race conditions in resource release (#16025).
   auto existing_object = memory_store_->GetIfExists(object_id);
+
   if (existing_object != nullptr) {
     PopulateObjectStatus(object_id, existing_object, &object_status);
   }
+
+  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+    rpc::RecoveryObjectMetadata metadata;
+
+    if (recovery_succession_manager_->PopulateRecoveryMetadata(object_id, &metadata)) {
+      object_status.mutable_recovery_metadata()->CopyFrom(metadata);
+    }
+  }
+
   *serialized_object_status = object_status.SerializeAsString();
+
   return Status::OK();
 }
 
@@ -1054,6 +1089,12 @@ void CoreWorker::RegisterOwnershipInfoAndResolveFuture(
 
   rpc::GetObjectStatusReply object_status;
   object_status.ParseFromString(serialized_object_status);
+
+  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr &&
+      object_status.has_recovery_metadata()) {
+    recovery_succession_manager_->RegisterBorrowedObject(
+        object_id, object_status.recovery_metadata());
+  }
 
   if (object_status.has_object() && !reference_counter_->OwnedByUs(object_id)) {
     // We already have the inlined object status, process it immediately.
@@ -1987,13 +2028,9 @@ void CoreWorker::BuildCommonTaskSpec(
     builder.AddArg(*arg);
   }
 
-  if (recovery_succession_enabled_ &&
-      recovery_succession_manager_ != nullptr) {
-    recovery_succession_manager_->PopulateTaskArgumentMetadata(
-        builder.MutableMessage());
+  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+    recovery_succession_manager_->PopulateTaskArgumentMetadata(builder.MutableMessage());
   }
-
-
 }
 
 void CoreWorker::PrestartWorkers(const std::string &serialized_runtime_env_info,
@@ -2013,8 +2050,6 @@ void CoreWorker::PrestartWorkers(const std::string &serialized_runtime_env_info,
         }
       });
 }
-
-
 
 std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     const RayFunction &function,
@@ -2084,19 +2119,11 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             scheduling_strategy,
                             root_detached_actor_id);
 
-  if (recovery_succession_enabled_ &&
-      recovery_succession_manager_ != nullptr &&
-      RecoverySuccessionManager::IsEligibleTask(
-          builder.GetMessage())) {
-    builder.SetRecoveryManifest(
-        recovery_succession_manager_->BuildInitialManifest(
-            task_id,
-            worker_context_->GetCurrentJobID(),
-            max_retries));
+  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr &&
+      RecoverySuccessionManager::IsEligibleTask(builder.GetMessage())) {
+    builder.SetRecoveryManifest(recovery_succession_manager_->BuildInitialManifest(
+        task_id, worker_context_->GetCurrentJobID(), max_retries));
   }
-
-
-
 
   TaskSpecification task_spec = std::move(builder).ConsumeAndBuild();
   RAY_LOG(DEBUG) << "Submitting normal task " << task_spec.DebugString();
@@ -2104,12 +2131,9 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   returned_refs = task_manager_->AddPendingTask(
       task_spec.CallerAddress(), task_spec, CurrentCallSite(), max_retries);
 
-
-  if (recovery_succession_enabled_ &&
-      recovery_succession_manager_ != nullptr &&
+  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr &&
       task_spec.GetMessage().has_recovery_manifest()) {
-    recovery_succession_manager_->RegisterOwnedTask(
-        task_spec, &returned_refs);
+    recovery_succession_manager_->RegisterOwnedTask(task_spec, &returned_refs);
   }
 
   io_service_.post(
@@ -3726,6 +3750,10 @@ void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
     return;
   }
 
+  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+    recovery_succession_manager_->RegisterExecutorTask(request.task_spec());
+  }
+
   // Set actor info in the worker context.
   if (request.task_spec().type() == TaskType::ACTOR_CREATION_TASK) {
     auto actor_id =
@@ -3845,6 +3873,14 @@ void CoreWorker::HandleGetObjectStatus(rpc::GetObjectStatusRequest request,
   ObjectID object_id = ObjectID::FromBinary(request.object_id());
   RAY_LOG(DEBUG).WithField(object_id) << "Received GetObjectStatus";
 
+  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+    rpc::RecoveryObjectMetadata metadata;
+
+    if (recovery_succession_manager_->PopulateRecoveryMetadata(object_id, &metadata)) {
+      reply->mutable_recovery_metadata()->CopyFrom(metadata);
+    }
+  }
+
   rpc::Address owner_address;
   auto has_owner = reference_counter_->GetOwner(object_id, &owner_address);
   if (!has_owner) {
@@ -3889,9 +3925,25 @@ void CoreWorker::PopulateObjectStatus(const ObjectID &object_id,
     const auto &metadata = obj->GetMetadata();
     object->set_metadata(metadata->Data(), metadata->Size());
   }
+
   for (const auto &nested_ref : obj->GetNestedRefs()) {
-    object->add_nested_inlined_refs()->CopyFrom(nested_ref);
+    rpc::ObjectReference *serialized_ref = object->add_nested_inlined_refs();
+
+    serialized_ref->CopyFrom(nested_ref);
+
+    if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr &&
+        !nested_ref.object_id().empty()) {
+      rpc::RecoveryObjectMetadata metadata;
+
+      const ObjectID nested_object_id = ObjectID::FromBinary(nested_ref.object_id());
+
+      if (recovery_succession_manager_->PopulateRecoveryMetadata(nested_object_id,
+                                                                 &metadata)) {
+        serialized_ref->mutable_recovery_metadata()->CopyFrom(metadata);
+      }
+    }
   }
+
   reply->set_status(rpc::GetObjectStatusReply::CREATED);
   // Set locality data.
   const auto &locality_data = reference_counter_->GetLocalityData(object_id);

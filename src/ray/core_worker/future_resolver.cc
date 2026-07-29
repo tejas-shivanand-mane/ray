@@ -44,6 +44,10 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
                                            const rpc::Address &owner_address,
                                            const Status &status,
                                            const rpc::GetObjectStatusReply &reply) {
+  if (status.ok() && reply.has_recovery_metadata() && recovery_metadata_callback_) {
+    recovery_metadata_callback_(object_id, reply.recovery_metadata());
+  }
+
   if (!status.ok()) {
     RAY_LOG(WARNING).WithField(object_id)
         << "Failed to retrieve deserialized object value: " << status;
@@ -105,9 +109,14 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     auto inlined_refs =
         VectorFromProtobuf<rpc::ObjectReference>(reply.object().nested_inlined_refs());
     for (const auto &inlined_ref : inlined_refs) {
-      reference_counter_->AddBorrowedObject(ObjectID::FromBinary(inlined_ref.object_id()),
-                                            object_id,
-                                            inlined_ref.owner_address());
+      const ObjectID nested_object_id = ObjectID::FromBinary(inlined_ref.object_id());
+
+      reference_counter_->AddBorrowedObject(
+          nested_object_id, object_id, inlined_ref.owner_address());
+
+      if (inlined_ref.has_recovery_metadata() && recovery_metadata_callback_) {
+        recovery_metadata_callback_(nested_object_id, inlined_ref.recovery_metadata());
+      }
     }
     in_memory_store_->Put(RayObject(data_buffer, metadata_buffer, inlined_refs),
                           object_id,
