@@ -60,25 +60,6 @@ class CoreWorkerClientPool {
   /// Removes connections to all workers on a node.
   void Disconnect(const NodeID &node_id);
 
-  /// Set a callback to be called when a new worker connects.
-  /// Used to send gossip entries to newly connected workers.
-  void SetOnNewConnectionCallback(
-      std::function<void(std::shared_ptr<CoreWorkerClientInterface>)> cb) {
-    absl::MutexLock lock(&mu_);
-    on_new_connection_cb_ = std::move(cb);
-  }
-
-  /// Returns addresses of all currently connected workers.
-  /// Used for gossip propagation.
-  std::vector<rpc::Address> GetAllConnectedAddresses() {
-    absl::MutexLock lock(&mu_);
-    std::vector<rpc::Address> addresses;
-    for (const auto &entry : client_list_) {
-      addresses.push_back(entry.core_worker_client_->Addr());
-    }
-    return addresses;
-  }
-
  private:
   friend void AssertID(WorkerID worker_id,
                        CoreWorkerClientPool &client_pool,
@@ -133,8 +114,6 @@ class CoreWorkerClientPool {
   /// Map from NodeID to map of workerid -> client iterators. Used to disconnect all
   /// workers on a node.
   absl::flat_hash_map<NodeID, WorkerIdClientMap> node_clients_map_ ABSL_GUARDED_BY(mu_);
-  std::function<void(std::shared_ptr<CoreWorkerClientInterface>)>
-      on_new_connection_cb_ ABSL_GUARDED_BY(mu_);
 };
 
 }  // namespace rpc

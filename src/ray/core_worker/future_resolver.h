@@ -37,16 +37,12 @@ class FutureResolver {
                  std::shared_ptr<ReferenceCounterInterface> ref_counter,
                  ReportLocalityDataCallback report_locality_data_callback,
                  std::shared_ptr<rpc::CoreWorkerClientPool> core_worker_client_pool,
-                 rpc::Address rpc_address,
-                 std::function<bool(const ObjectID &)> gossip_recovery_callback = nullptr,
-                 std::function<void(const ObjectID &)> gossip_prune_callback = nullptr)
+                 rpc::Address rpc_address)
       : in_memory_store_(std::move(store)),
         reference_counter_(std::move(ref_counter)),
         report_locality_data_callback_(std::move(report_locality_data_callback)),
         owner_clients_(std::move(core_worker_client_pool)),
-        rpc_address_(std::move(rpc_address)),
-        gossip_recovery_callback_(std::move(gossip_recovery_callback)),
-        gossip_prune_callback_(std::move(gossip_prune_callback)) {}
+        rpc_address_(std::move(rpc_address)) {}
 
   /// Resolve the value for a future. This will periodically contact the given
   /// owner until the owner dies or the owner has finished creating the object.
@@ -57,14 +53,6 @@ class FutureResolver {
   /// \param[in] owner_address The address of the task or actor that owns the
   /// future.
   void ResolveFutureAsync(const ObjectID &object_id, const rpc::Address &owner_address);
-
-
-  void SetGossipCallbacks(
-      std::function<bool(const ObjectID &)> recovery_cb,
-      std::function<void(const ObjectID &)> prune_cb) {
-    gossip_recovery_callback_ = std::move(recovery_cb);
-    gossip_prune_callback_ = std::move(prune_cb);
-  }
 
   /// Process a resolved future. This can be used if we already have the objec
   /// status and don't need to ask the owner for it right away.
@@ -94,11 +82,6 @@ class FutureResolver {
   /// address, so the owner can contact us to ask when our reference to the
   /// object has gone out of scope.
   rpc::Address rpc_address_;
-
-  /// Gossip recovery callback — checks gossip table before marking object failed.
-  /// Returns true if recovery was triggered, false if no gossip entry found.
-  std::function<bool(const ObjectID &)> gossip_recovery_callback_;
-  std::function<void(const ObjectID &)> gossip_prune_callback_;
 };
 
 }  // namespace core

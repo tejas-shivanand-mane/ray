@@ -133,20 +133,13 @@ std::shared_ptr<CoreWorkerClientInterface> CoreWorkerClientPool::GetOrConnect(
     entry = CoreWorkerClientEntry(
         worker_id, node_id, core_worker_client_factory_(addr_proto));
   }
-  bool is_new = (it == worker_client_map_.end());
   client_list_.emplace_front(entry);
   worker_client_map_[worker_id] = client_list_.begin();
   node_clients_map_[node_id][worker_id] = client_list_.begin();
+
   RAY_LOG(DEBUG) << "Connected to worker " << worker_id << " with address "
                  << BuildAddress(addr_proto.ip_address(), addr_proto.port());
-  auto client = entry.core_worker_client_;
-  if (is_new && on_new_connection_cb_) {
-    auto cb = on_new_connection_cb_;
-    mu_.Unlock();
-    cb(client);
-    mu_.Lock();
-  }
-  return client;
+  return entry.core_worker_client_;
 }
 
 void CoreWorkerClientPool::RemoveIdleClients() {

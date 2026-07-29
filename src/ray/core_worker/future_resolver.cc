@@ -22,8 +22,6 @@ namespace core {
 
 void FutureResolver::ResolveFutureAsync(const ObjectID &object_id,
                                         const rpc::Address &owner_address) {
-  RAY_LOG(INFO).WithField(object_id)
-      << "FUTURE_RESOLVER: ResolveFutureAsync called for " << object_id.Hex();
   if (rpc_address_.worker_id() == owner_address.worker_id()) {
     // We do not need to resolve objects that we own. This can happen if a task
     // with a borrowed reference executes on the object's owning worker.
@@ -34,9 +32,6 @@ void FutureResolver::ResolveFutureAsync(const ObjectID &object_id,
   rpc::GetObjectStatusRequest request;
   request.set_object_id(object_id.Binary());
   request.set_owner_worker_id(owner_address.worker_id());
-  if (gossip_recovery_callback_) {
-    *request.mutable_requester_address() = rpc_address_;
-  }
   conn->GetObjectStatus(
       std::move(request),
       [this, object_id, owner_address](const Status &status,
@@ -49,28 +44,17 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
                                            const rpc::Address &owner_address,
                                            const Status &status,
                                            const rpc::GetObjectStatusReply &reply) {
-  RAY_LOG(INFO).WithField(object_id)
-      << "FUTURE_RESOLVER: ProcessResolvedObject called status_ok="
-      << status.ok();
   if (!status.ok()) {
     RAY_LOG(WARNING).WithField(object_id)
         << "Failed to retrieve deserialized object value: " << status;
   }
+
   if (!status.ok()) {
-    // Check gossip table before marking as failed
-    if (gossip_recovery_callback_ && gossip_recovery_callback_(object_id)) {
-      RAY_LOG(INFO).WithField(object_id)
-          << "GOSSIP_RECOVER: recovery triggered via gossip table";
-      // Recovery triggered — do NOT store OWNER_DIED error
-    } else {
-      RAY_LOG(INFO).WithField(object_id)
-          << "GOSSIP_MISS: no gossip entry, marking as OWNER_DIED";
-      // The owner is unreachable. Store an error so that an exception will be
-      // thrown immediately when the worker tries to get the value.
-      in_memory_store_->Put(RayObject(rpc::ErrorType::OWNER_DIED),
-                            object_id,
-                            reference_counter_->HasReference(object_id));
-    }
+    // The owner is unreachable. Store an error so that an exception will be
+    // thrown immediately when the worker tries to get the value.
+    in_memory_store_->Put(RayObject(rpc::ErrorType::OWNER_DIED),
+                          object_id,
+                          reference_counter_->HasReference(object_id));
   } else if (reply.status() == rpc::GetObjectStatusReply::OUT_OF_SCOPE) {
     // The owner replied that the object has gone out of scope (this is an edge
     // case in the distributed ref counting protocol where a borrower dies
@@ -128,8 +112,6 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     in_memory_store_->Put(RayObject(data_buffer, metadata_buffer, inlined_refs),
                           object_id,
                           reference_counter_->HasReference(object_id));
-    // Prune gossip table — object resolved, no longer needs recovery
-    if (gossip_prune_callback_) gossip_prune_callback_(object_id);
   }
 }
 

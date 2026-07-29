@@ -26,15 +26,13 @@ OwnershipBasedObjectDirectory::OwnershipBasedObjectDirectory(
     gcs::GcsClient &gcs_client,
     pubsub::SubscriberInterface *object_location_subscriber,
     rpc::CoreWorkerClientPool *owner_client_pool,
-    std::function<void(const ObjectID &, const rpc::ErrorType &)> mark_as_failed,
-    std::function<bool(const ObjectID &)> gossip_recovery_callback)
+    std::function<void(const ObjectID &, const rpc::ErrorType &)> mark_as_failed)
     : io_service_(io_service),
       gcs_client_(gcs_client),
       object_location_subscriber_(object_location_subscriber),
       owner_client_pool_(owner_client_pool),
       kMaxObjectReportBatchSize(RayConfig::instance().max_object_report_batch_size()),
-      mark_as_failed_(std::move(mark_as_failed)),
-      gossip_recovery_callback_(std::move(gossip_recovery_callback)) {}
+      mark_as_failed_(std::move(mark_as_failed)) {}
 
 namespace {
 
@@ -344,8 +342,21 @@ void OwnershipBasedObjectDirectory::SubscribeObjectLocations(
                                                   const Status &status) {
       const auto obj_id = ObjectID::FromBinary(object_id_binary);
       if (!status.ok()) {
-        RAY_LOG(INFO).WithField(obj_id) << "Owner of object died: " << status.ToString();
-        mark_as_failed_(obj_id, rpc::ErrorType::OWNER_DIED);
+        if (is_shutting_down_) {
+          // We are shutting down, so this long-poll failure is caused by our
+          // own gRPC client being torn down, not a genuine remote owner death.
+          // Leave failure classification to the GCS node/worker-death path and
+          // let dependent tasks be retried on a live node.
+          RAY_LOG(INFO).WithField(obj_id).WithField(
+              WorkerID::FromBinary(owner_address.worker_id()))
+              << "Current node is shutting down; aborting SubscribeObjectLocations "
+                 "for the object location subscription: "
+              << status.ToString();
+        } else {
+          RAY_LOG(INFO).WithField(obj_id)
+              << "Owner of object died: " << status.ToString();
+          mark_as_failed_(obj_id, rpc::ErrorType::OWNER_DIED);
+        }
       } else {
         // Owner is still alive but published a failure because the ref was deleted.
         RAY_LOG(INFO).WithField(obj_id)

@@ -264,8 +264,7 @@ class ReferenceCounterInterface {
   /// \param[in] owner_address The owner's address.
   virtual bool AddBorrowedObject(const ObjectID &object_id,
                                  const ObjectID &outer_id,
-                                 const rpc::Address &owner_address,
-                                 bool foreign_owner_already_monitoring = false) = 0;
+                                 const rpc::Address &owner_address) = 0;
 
   /// Get the owner address of the given object.
   ///
@@ -285,10 +284,6 @@ class ReferenceCounterInterface {
   /// \param[in] object_id The ID of the object.
   /// \return if the object has an owner.
   virtual bool HasOwner(const ObjectID &object_id) const = 0;
-  /// Returns true if this worker borrowed the object directly from the owner
-  /// (not via another borrower). Used for single recoverer election in gossip
-  /// recovery — only direct borrowers should recover lost objects.
-  virtual bool IsDirectBorrower(const ObjectID &object_id) const = 0;
 
   //// Checks to see if objects have an owner.
   ///
@@ -378,8 +373,8 @@ class ReferenceCounterInterface {
   /// Returns the total number of actors owned by this worker.
   virtual size_t NumActorsOwnedByUs() const = 0;
 
-  /// Reports observability metrics to underlying monitoring system
-  virtual void RecordMetrics() = 0;
+  /// Reports owner-side observability metrics to underlying monitoring system.
+  virtual void RecordOwnerMetrics() = 0;
 
   /// Returns a set of all ObjectIDs currently in scope (i.e., nonzero reference count).
   virtual std::unordered_set<ObjectID> GetAllInScopeObjectIDs() const = 0;

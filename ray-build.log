@@ -1,0 +1,237 @@
+Using pip 26.0.1 from /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip (python 3.10)
+Obtaining file:///home/tejas/Downloads/ray/python
+  Installing build dependencies: started
+  Running command installing build dependencies
+  Using pip 26.0.1 from /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip (python 3.10)
+  Collecting setuptools>=40.8.0
+    Obtaining dependency information for setuptools>=40.8.0 from https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl.metadata
+    Using cached setuptools-83.0.0-py3-none-any.whl.metadata (6.6 kB)
+  Using cached setuptools-83.0.0-py3-none-any.whl (1.0 MB)
+  Installing collected packages: setuptools
+  Successfully installed setuptools-83.0.0
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Running command Checking if build backend supports build_editable
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Running command Getting requirements to build editable
+  Getting requirements to build editable: finished with status 'done'
+  Installing backend dependencies: started
+  Running command installing backend dependencies
+  Using pip 26.0.1 from /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip (python 3.10)
+  Collecting pip
+    Obtaining dependency information for pip from https://files.pythonhosted.org/packages/5d/95/6b5cb3461ea5673ba0995989746db58eb18b91b54dbf331e72f569540946/pip-26.1.2-py3-none-any.whl.metadata
+    Using cached pip-26.1.2-py3-none-any.whl.metadata (4.6 kB)
+  Collecting cython>=3.0.12
+    Obtaining dependency information for cython>=3.0.12 from https://files.pythonhosted.org/packages/df/9b/b4ff8cdff357ba0f41791e044a2a95898d0768b20e9247823decf5eabb5e/cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata
+    Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.6 kB)
+  Collecting wheel
+    Obtaining dependency information for wheel from https://files.pythonhosted.org/packages/87/1b/9e33c09813d65e248f7f773119148a612516a4bea93e9c6f545f78455b7c/wheel-0.47.0-py3-none-any.whl.metadata
+    Using cached wheel-0.47.0-py3-none-any.whl.metadata (2.3 kB)
+  Collecting packaging>=24.0 (from wheel)
+    Obtaining dependency information for packaging>=24.0 from https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl.metadata
+    Using cached packaging-26.2-py3-none-any.whl.metadata (3.5 kB)
+  Using cached pip-26.1.2-py3-none-any.whl (1.8 MB)
+  Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.5 MB)
+  Using cached wheel-0.47.0-py3-none-any.whl (32 kB)
+  Using cached packaging-26.2-py3-none-any.whl (100 kB)
+  Installing collected packages: pip, packaging, cython, wheel
+    Creating /tmp/pip-build-env-y892j5ce/normal/bin
+    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/pip to 775
+    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/pip3 to 775
+    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/pip3.10 to 775
+    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/cygdb to 775
+    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/cython to 775
+    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/cythonize to 775
+    changing mode of /tmp/pip-build-env-y892j5ce/normal/bin/wheel to 775
+
+  Successfully installed cython-3.2.9 packaging-26.2 pip-26.1.2 wheel-0.47.0
+  Installing backend dependencies: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Running command Preparing editable metadata (pyproject.toml)
+  running dist_info
+  creating /tmp/pip-modern-metadata-81y9xnum/ray.egg-info
+  writing /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-modern-metadata-81y9xnum/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-modern-metadata-81y9xnum/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-modern-metadata-81y9xnum/ray.egg-info/SOURCES.txt'
+  reading manifest template 'MANIFEST.in'
+  adding license file 'LICENSE.txt'
+  writing manifest file '/tmp/pip-modern-metadata-81y9xnum/ray.egg-info/SOURCES.txt'
+  creating '/tmp/pip-modern-metadata-81y9xnum/ray-3.0.0.dev0.dist-info'
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: click>=7.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (8.3.1)
+Requirement already satisfied: filelock in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (3.25.2)
+Requirement already satisfied: jsonschema in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (4.26.0)
+Requirement already satisfied: msgpack<2.0.0,>=1.0.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (1.1.2)
+Requirement already satisfied: packaging>=24.2 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (26.0)
+Requirement already satisfied: protobuf>=3.20.3 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (6.33.6)
+Requirement already satisfied: pyyaml in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (6.0.3)
+Requirement already satisfied: requests in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (2.32.5)
+Requirement already satisfied: attrs>=22.2.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from jsonschema->ray==3.0.0.dev0) (26.1.0)
+Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from jsonschema->ray==3.0.0.dev0) (2025.9.1)
+Requirement already satisfied: referencing>=0.28.4 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from jsonschema->ray==3.0.0.dev0) (0.37.0)
+Requirement already satisfied: rpds-py>=0.25.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from jsonschema->ray==3.0.0.dev0) (0.30.0)
+Requirement already satisfied: typing-extensions>=4.4.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from referencing>=0.28.4->jsonschema->ray==3.0.0.dev0) (4.15.0)
+Requirement already satisfied: charset_normalizer<4,>=2 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from requests->ray==3.0.0.dev0) (3.4.6)
+Requirement already satisfied: idna<4,>=2.5 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from requests->ray==3.0.0.dev0) (3.11)
+Requirement already satisfied: urllib3<3,>=1.21.1 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from requests->ray==3.0.0.dev0) (2.6.3)
+Requirement already satisfied: certifi>=2017.4.17 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from requests->ray==3.0.0.dev0) (2026.2.25)
+Building wheels for collected packages: ray
+  Building editable for ray (pyproject.toml): started
+  Running command Building editable for ray (pyproject.toml)
+  running editable_wheel
+  creating /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info
+  writing /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/SOURCES.txt'
+  reading manifest template 'MANIFEST.in'
+  adding license file 'LICENSE.txt'
+  writing manifest file '/tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray.egg-info/SOURCES.txt'
+  creating '/tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray-3.0.0.dev0.dist-info'
+  creating /tmp/pip-ephem-wheel-cache-cunga1hl/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmpu402x1mq/.tmp-soz3n80n/ray-3.0.0.dev0.dist-info/WHEEL
+  running build_py
+  running build_ext
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama-0.4.6.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/psutil-7.2.2.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/psutil already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohttp-3.14.3.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohttp already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/yarl-1.24.5.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/yarl already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiosignal-1.4.0.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiosignal already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/multidict-6.7.1.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/multidict already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohappyeyeballs-2.7.1.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohappyeyeballs already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/async_timeout-5.0.1.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/async_timeout already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attrs-26.1.0.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attrs already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attr already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/frozenlist-1.8.0.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/frozenlist already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/idna-3.18.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/idna already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/propcache-0.5.2.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/propcache already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/__pycache__ already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/typing_extensions-4.16.0.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/typing_extensions.py already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/bin already exists. Specify --upgrade to force replacement.
+  INFO: Invocation ID: be4a4b1d-e942-4d83-9f2e-9172f14e6a45
+  Computing main repo mapping:
+  DEBUG: /home/tejas/Downloads/ray/bazel/ray_deps_setup.bzl:67:14: No implicit mirrors used for org_lzma_lzma because urls were explicitly provided
+  DEBUG: /home/tejas/Downloads/ray/bazel/ray_deps_setup.bzl:67:14: No implicit mirrors used for openssl because urls were explicitly provided
+  Computing main repo mapping:
+  Loading:
+  Loading: 0 packages loaded
+  Analyzing: 3 targets (2 packages loaded, 0 targets configured)
+  Analyzing: 3 targets (2 packages loaded, 0 targets configured)
+
+  DEBUG: /home/tejas/Downloads/ray/bazel/ray.bzl:175:10: [<generated file external/jemalloc/libjemalloc/lib/libjemalloc.so>]
+  Analyzing: 3 targets (40 packages loaded, 2071 targets configured)
+  [13 / 13] no actions running
+  Analyzing: 3 targets (41 packages loaded, 2255 targets configured)
+  [16 / 18] checking cached actions
+  Analyzing: 3 targets (42 packages loaded, 4355 targets configured)
+  [4,395 / 7,013] Compiling cpp/src/ray/worker/default_worker.cc; 0s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  Analyzing: 3 targets (43 packages loaded, 4358 targets configured)
+  [4,579 / 7,013] Compiling src/ray/util/logging.cc; 1s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  Analyzing: 3 targets (43 packages loaded, 4358 targets configured)
+  [4,844 / 7,013] Compiling src/ray/util/logging.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  Analyzing: 3 targets (43 packages loaded, 4358 targets configured)
+  [5,181 / 7,013] Compiling src/ray/util/logging.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  INFO: Analyzed 3 targets (44 packages loaded, 11170 targets configured).
+  [5,183 / 7,013] Compiling src/ray/util/logging.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [5,310 / 7,312] Compiling src/ray/util/logging.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [5,317 / 7,318] Compiling src/ray/util/logging.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [5,416 / 7,318] Compiling src/ray/common/ray_config.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [5,469 / 7,318] Compiling src/ray/common/ray_config.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [5,481 / 7,318] Compiling src/ray/common/ray_config.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  INFO: From Generating proto_library //src/ray/protobuf/public:events_actor_task_definition_event_proto:
+  src/ray/protobuf/public/events_actor_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
+  [6,746 / 7,594] Compiling src/ray/protobuf/common.pb.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [6,748 / 7,594] Compiling src/ray/protobuf/common.pb.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [6,757 / 7,635] Compiling src/ray/protobuf/common.pb.cc; 7s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,072 / 8,774] Compiling src/ray/protobuf/common.pb.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,084 / 8,774] Compiling src/ray/protobuf/common.pb.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,087 / 8,774] Compiling src/ray/protobuf/common.pb.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,130 / 8,869] Compiling src/ray/rpc/authentication/k8s_util.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,132 / 8,869] Compiling src/ray/rpc/authentication/k8s_util.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,149 / 8,869] Compiling src/ray/rpc/authentication/k8s_util.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,155 / 8,869] Compiling src/ray/util/event.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  INFO: From Generating Descriptor Set proto_library //src/ray/protobuf/public:events_actor_task_definition_event_proto:
+  src/ray/protobuf/public/events_actor_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
+  [7,174 / 8,875] Compiling src/ray/util/event.cc; 9s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,175 / 8,875] Compiling src/ray/util/event.cc; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  INFO: From Generating Descriptor Set proto_library //src/ray/protobuf/public:events_task_definition_event_proto:
+  src/ray/protobuf/public/events_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
+  [7,182 / 8,875] Compiling src/ray/protobuf/gcs.pb.cc; 9s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,199 / 8,877] Compiling src/ray/protobuf/node_manager.pb.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,202 / 8,877] Compiling src/ray/protobuf/node_manager.grpc.pb.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,246 / 8,879] Compiling src/ray/protobuf/object_manager.grpc.pb.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,252 / 8,879] Compiling src/ray/protobuf/autoscaler.grpc.pb.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  INFO: From Generating proto_library //src/ray/protobuf/public:events_task_definition_event_proto:
+  src/ray/protobuf/public/events_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
+  [7,480 / 9,058] Compiling src/ray/rpc/authentication/authentication_token_loader.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,498 / 9,058] Compiling src/ray/pubsub/publisher.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,502 / 9,058] Compiling src/ray/observability/open_telemetry_metric_recorder.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  INFO: From Compiling src/ray/thirdparty/setproctitle/spt_setup.c:
+  cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
+  [7,544 / 9,160] Compiling src/ray/observability/open_telemetry_metric_recorder.cc; 4s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,557 / 9,174] Compiling src/ray/observability/open_telemetry_metric_recorder.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,569 / 9,174] Compiling src/ray/common/bundle_spec.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,576 / 9,174] [Sched] Compiling src/ray/common/lease/lease_spec.cc ... (16 actions, 6 running)
+  [7,577 / 9,174] Compiling src/ray/pubsub/publisher.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,601 / 9,217] Compiling src/ray/stats/metric.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,605 / 9,217] Compiling src/ray/common/ray_config.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,613 / 9,225] Compiling src/ray/common/ray_config.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,632 / 9,237] Compiling src/ray/common/bundle_location_index.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,776 / 9,257] Compiling src/ray/observability/ray_node_lifecycle_event.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,777 / 9,257] Compiling src/ray/common/placement_group.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,799 / 9,259] Compiling src/ray/observability/ray_driver_job_definition_event.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,947 / 9,316] Compiling src/ray/stats/percentile_metric.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,953 / 9,316] Compiling src/ray/core_worker/reference_counter.cc; 3s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,965 / 9,322] Compiling src/ray/core_worker/reference_counter.cc; 5s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,971 / 9,330] Compiling src/ray/core_worker/reference_counter.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,972 / 9,330] Compiling src/ray/util/pipe_logger.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,975 / 9,330] Compiling src/ray/protobuf/gcs_service.pb.cc; 6s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,976 / 9,330] Compiling src/ray/protobuf/gcs_service.pb.cc; 8s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,980 / 9,330] Foreign Cc - CMake: Building rocksdb; 7s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [7,997 / 9,338] Foreign Cc - CMake: Building rocksdb; 9s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [7,998 / 9,338] Foreign Cc - CMake: Building rocksdb; 10s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,000 / 9,338] Foreign Cc - CMake: Building rocksdb; 11s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,006 / 9,338] Foreign Cc - CMake: Building rocksdb; 12s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,019 / 9,338] Foreign Cc - CMake: Building rocksdb; 14s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,020 / 9,338] Foreign Cc - CMake: Building rocksdb; 15s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,033 / 9,350] Foreign Cc - CMake: Building rocksdb; 17s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,037 / 9,352] Foreign Cc - CMake: Building rocksdb; 18s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,044 / 9,352] Foreign Cc - CMake: Building rocksdb; 19s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,047 / 9,352] Foreign Cc - CMake: Building rocksdb; 21s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,050 / 9,354] Foreign Cc - CMake: Building rocksdb; 22s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,050 / 9,354] Foreign Cc - CMake: Building rocksdb; 24s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,051 / 9,354] Foreign Cc - CMake: Building rocksdb; 25s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,054 / 9,356] Foreign Cc - CMake: Building rocksdb; 27s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,062 / 9,360] Foreign Cc - CMake: Building rocksdb; 28s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,063 / 9,360] Foreign Cc - CMake: Building rocksdb; 29s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,065 / 9,360] Foreign Cc - CMake: Building rocksdb; 31s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,068 / 9,360] Foreign Cc - CMake: Building rocksdb; 32s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,073 / 9,360] Foreign Cc - CMake: Building rocksdb; 33s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,091 / 9,367] Foreign Cc - CMake: Building rocksdb; 35s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,093 / 9,367] Foreign Cc - CMake: Building rocksdb; 36s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,095 / 9,370] Foreign Cc - CMake: Building rocksdb; 38s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,095 / 9,370] Foreign Cc - CMake: Building rocksdb; 39s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,098 / 9,370] Foreign Cc - CMake: Building rocksdb; 40s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,101 / 9,370] Foreign Cc - CMake: Building rocksdb; 42s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)
+  [8,104 / 9,372] Foreign Cc - CMake: Building rocksdb; 43s disk-cache, processwrapper-sandbox ... (16 actions, 6 running)
+  [8,104 / 9,372] Foreign Cc - CMake: Building rocksdb; 44s disk-cache, processwrapper-sandbox ... (16 actions, 7 running)

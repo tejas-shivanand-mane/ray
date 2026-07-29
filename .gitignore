@@ -245,17 +245,12 @@ tag-mapping.json
 # Custom BYOD build rayci yaml file
 .buildkite/release/custom_byod_build.rayci.yml
 
-# Claude files
-/.claude/
-# Wheels anywhere in repo
-**/*.whl
-# Docker build artifacts
-/docker/*.whl
-/docker/*.so
-# Node modules
-**/node_modules/
-# Prometheus
-prometheus-*.tar.gz
-prometheus-*/
-# Test data
-**/tests/data/**/*.parquet
+# Claude Code — track shared config, ignore personal/local files
+/.claude/settings.local.json
+/CLAUDE.md
+/CLAUDE-*.md
+CLAUDE.local.md
+
+# Worktrees
+.worktrees/
+.claude/worktrees/

@@ -14,13 +14,14 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <unordered_set>
 #include <utility>
 
 #include "absl/container/flat_hash_map.h"
-#include "ray/common/asio/instrumented_io_context.h"
+#include "ray/asio/instrumented_io_context.h"
 #include "ray/common/id.h"
 #include "ray/common/status.h"
 #include "ray/core_worker_rpc_client/core_worker_client_pool.h"
@@ -45,8 +46,7 @@ class OwnershipBasedObjectDirectory : public IObjectDirectory {
       gcs::GcsClient &gcs_client,
       pubsub::SubscriberInterface *object_location_subscriber,
       rpc::CoreWorkerClientPool *owner_client_pool,
-      std::function<void(const ObjectID &, const rpc::ErrorType &)> mark_as_failed,
-      std::function<bool(const ObjectID &)> gossip_recovery_callback = nullptr);
+      std::function<void(const ObjectID &, const rpc::ErrorType &)> mark_as_failed);
 
   void HandleNodeRemoved(const NodeID &node_id) override;
 
@@ -80,6 +80,13 @@ class OwnershipBasedObjectDirectory : public IObjectDirectory {
   void RecordMetrics(uint64_t duration_ms) override;
 
   std::string DebugString() const override;
+
+  /// Signal that the owning node is shutting down. After this call,
+  /// object-location subscription failures caused by local client
+  /// teardown are no longer surfaced as fatal remote-owner failures
+  /// to dependent tasks. Other signals (e.g. object deletion) and
+  /// location updates still flow.
+  void MarkShuttingDown() override { is_shutting_down_ = true; }
 
  private:
   friend class OwnershipBasedObjectDirectoryTest;
@@ -122,10 +129,6 @@ class OwnershipBasedObjectDirectory : public IObjectDirectory {
   const int64_t kMaxObjectReportBatchSize;
   /// The callback used to mark an object as failed.
   std::function<void(const ObjectID &, const rpc::ErrorType &)> mark_as_failed_;
-  /// Gossip recovery callback — checks gossip table before marking failed.
-  /// Returns true if recovery was triggered, false if no gossip entry found.
-  std::function<bool(const ObjectID &)> gossip_recovery_callback_;
-  
 
   /// A buffer for batch object location updates.
   /// owner id -> {(FIFO object queue (to avoid starvation), map for the latest update of
@@ -138,6 +141,14 @@ class OwnershipBasedObjectDirectory : public IObjectDirectory {
 
   /// A set of in-flight UpdateObjectLocationBatch requests.
   absl::flat_hash_set<WorkerID> in_flight_requests_;
+
+  /// Whether this node is shutting down. When true, object-location
+  /// subscription failures are no longer surfaced as fatal remote-owner
+  /// failures, to avoid misclassifying local client teardown as remote
+  /// owner death. Atomic because it can be set from the shutdown path
+  /// (e.g. agent-monitor thread) while the pubsub failure callback
+  /// reads it on the main service thread.
+  std::atomic<bool> is_shutting_down_ = false;
 
   /// Get or create the rpc client in the worker_rpc_clients.
   std::shared_ptr<rpc::CoreWorkerClientInterface> GetClient(
