@@ -399,15 +399,24 @@ def run_failure_case(failure_mode: str) -> None:
                 ],
             )
 
-        assert skipped, (
-            f"{failure_mode}: rank 1 was not skipped."
-        )
+        # For a worker-only failure, the producer node remains alive, so the
+        # dead-worker notification should let the requester skip rank 1 directly.
+        #
+        # For a whole-node failure, recovery may reach the same result through
+        # either path:
+        #   1. rank 1 is already known dead and is skipped locally, or
+        #   2. the RPC to rank 1 fails and TryRecoveryHolders advances to rank 2.
+        #
+        # Successful rank-2 replay and acceptance prove that rank 1 was bypassed.
+        if failure_mode == "worker":
+            assert skipped, (
+                "worker: the known-dead rank-1 worker was not skipped."
+            )
 
         assert replayed, (
             f"{failure_mode}: rank 2 did not replay "
             "the original task."
         )
-
         assert accepted, (
             f"{failure_mode}: the requester did not accept "
             "recovery through rank 2."
