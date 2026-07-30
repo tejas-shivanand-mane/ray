@@ -72,8 +72,7 @@ using AsyncRetryTaskCallback =
     std::function<void(TaskSpecification &spec, uint32_t delay_ms)>;
 using ReconstructObjectCallback = std::function<void(const ObjectID &object_id)>;
 
-using LineageReleasedCallback =
-    std::function<void(const TaskID &task_id)>;
+using LineageReleasedCallback = std::function<void(const TaskID &task_id)>;
 
 using PushErrorCallback = std::function<Status(const JobID &job_id,
                                                const std::string &type,
@@ -300,16 +299,20 @@ class TaskManager : public TaskManagerInterface {
         });
   }
 
-
-  void SetLineageReleasedCallback(
-    LineageReleasedCallback callback) {
-        lineage_released_callback_ = std::move(callback);
-    }
+  void SetLineageReleasedCallback(LineageReleasedCallback callback) {
+    lineage_released_callback_ = std::move(callback);
+  }
 
   std::vector<rpc::ObjectReference> AddPendingTask(const rpc::Address &caller_address,
                                                    const TaskSpecification &spec,
                                                    const std::string &call_site,
                                                    int max_retries = 0) override;
+
+  std::vector<rpc::ObjectReference> AddPendingTaskForRecovery(
+      const rpc::Address &caller_address,
+      const TaskSpecification &spec,
+      const std::string &call_site,
+      int max_retries);
 
   std::optional<rpc::ErrorType> ResubmitTask(const TaskID &task_id,
                                              std::vector<ObjectID> *task_deps) override;
@@ -642,9 +645,12 @@ class TaskManager : public TaskManagerInterface {
   void RecordTaskState(const std::tuple<std::string, rpc::TaskStatus, bool> &key,
                        int64_t value) ABSL_EXCLUSIVE_LOCKS_REQUIRED(&mu_);
 
-
-
-
+  std::vector<rpc::ObjectReference> AddPendingTaskInternal(
+      const rpc::Address &caller_address,
+      const TaskSpecification &spec,
+      const std::string &call_site,
+      int max_retries,
+      bool recovery_replay);
 
   LineageReleasedCallback lineage_released_callback_;
 

@@ -321,6 +321,31 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTask(
     const TaskSpecification &spec,
     const std::string &call_site,
     int max_retries) {
+  return AddPendingTaskInternal(caller_address,
+                                spec,
+                                call_site,
+                                max_retries,
+                                /*recovery_replay=*/false);
+}
+
+std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskForRecovery(
+    const rpc::Address &caller_address,
+    const TaskSpecification &spec,
+    const std::string &call_site,
+    int max_retries) {
+  return AddPendingTaskInternal(caller_address,
+                                spec,
+                                call_site,
+                                max_retries,
+                                /*recovery_replay=*/true);
+}
+
+std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskInternal(
+    const rpc::Address &caller_address,
+    const TaskSpecification &spec,
+    const std::string &call_site,
+    int max_retries,
+    bool recovery_replay) {
   int32_t max_oom_retries =
       (max_retries != 0) ? RayConfig::instance().task_oom_retries() : 0;
   RAY_LOG(DEBUG) << "Adding pending task " << spec.TaskId() << " with " << max_retries
@@ -371,15 +396,24 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTask(
       // object is considered in scope before we return the ObjectRef to the
       // language frontend. Note that the language bindings should set
       // skip_adding_local_ref=True to avoid double referencing the object.
-      reference_counter_.AddOwnedObject(return_id,
-                                        /*contained_ids=*/{},
-                                        caller_address,
-                                        call_site,
-                                        -1,
-                                        lineage_eligibility,
-                                        /*add_local_ref=*/true,
-                                        /*pinned_at_node_id=*/std::optional<NodeID>(),
-                                        tensor_transport);
+      if (recovery_replay) {
+        RAY_CHECK(reference_counter_.AddOrPromoteOwnedObjectForRecovery(
+            return_id, caller_address, call_site, lineage_eligibility, tensor_transport))
+            << "Failed to register succession replay "
+               "return "
+            << return_id;
+      } else {
+        reference_counter_.AddOwnedObject(return_id,
+                                          /*contained_ids=*/{},
+                                          caller_address,
+                                          call_site,
+                                          -1,
+                                          lineage_eligibility,
+                                          /*add_local_ref=*/true,
+                                          /*pinned_at_node_id=*/
+                                          std::optional<NodeID>(),
+                                          tensor_transport);
+      }
     }
 
     return_ids.push_back(return_id);
@@ -1733,8 +1767,7 @@ int64_t TaskManager::RemoveLineageReference(const ObjectID &object_id,
                  << it->second.reconstructable_return_ids_.size()
                  << " plasma returns in scope";
 
-  if (it->second.reconstructable_return_ids_.empty() &&
-      !it->second.IsPending()) {
+  if (it->second.reconstructable_return_ids_.empty() && !it->second.IsPending()) {
     // Notify CoreWorker before deleting the normal Ray lineage.
     if (lineage_released_callback_) {
       lineage_released_callback_(task_id);
@@ -1742,36 +1775,25 @@ int64_t TaskManager::RemoveLineageReference(const ObjectID &object_id,
 
     // If the task can no longer be retried, decrement the lineage ref count
     // for each of the task's args.
-    for (size_t i = 0;
-        i < it->second.spec_.NumArgs();
-        i++) {
+    for (size_t i = 0; i < it->second.spec_.NumArgs(); i++) {
       if (it->second.spec_.ArgByRef(i)) {
-        released_objects->push_back(
-            it->second.spec_.ArgObjectId(i));
+        released_objects->push_back(it->second.spec_.ArgObjectId(i));
       } else {
-        const auto &inlined_refs =
-            it->second.spec_.ArgInlinedRefs(i);
+        const auto &inlined_refs = it->second.spec_.ArgInlinedRefs(i);
 
-        for (const auto &inlined_ref :
-            inlined_refs) {
-          released_objects->push_back(
-              ObjectID::FromBinary(
-                  inlined_ref.object_id()));
+        for (const auto &inlined_ref : inlined_refs) {
+          released_objects->push_back(ObjectID::FromBinary(inlined_ref.object_id()));
         }
       }
     }
 
     if (it->second.spec_.IsActorTask()) {
-      const auto actor_creation_return_id =
-          it->second.spec_
-              .ActorCreationDummyObjectId();
+      const auto actor_creation_return_id = it->second.spec_.ActorCreationDummyObjectId();
 
-      released_objects->push_back(
-          actor_creation_return_id);
+      released_objects->push_back(actor_creation_return_id);
     }
 
-    total_lineage_footprint_bytes_ -=
-        it->second.lineage_footprint_bytes_;
+    total_lineage_footprint_bytes_ -= it->second.lineage_footprint_bytes_;
 
     // The task has finished and none of its returns are in scope.
     submissible_tasks_.erase(it);

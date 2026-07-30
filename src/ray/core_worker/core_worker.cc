@@ -4475,12 +4475,18 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     return;
   }
 
+  // The acting holder becomes the owner of outputs produced by
+  // this replay. Keep the original task and return IDs, but replace
+  // the dead caller address.
+  replay_task_proto.mutable_caller_address()->CopyFrom(rpc_address_);
+
   TaskSpecification replay_task(std::move(replay_task_proto));
 
   const int32_t max_retries = replay_task.MaxRetries();
 
-  std::vector<rpc::ObjectReference> returned_refs = task_manager_->AddPendingTask(
-      rpc_address_, replay_task, "recovery-succession replay", max_retries);
+  std::vector<rpc::ObjectReference> returned_refs =
+      task_manager_->AddPendingTaskForRecovery(
+          rpc_address_, replay_task, "recovery-succession replay", max_retries);
 
   if (request.return_index() >= returned_refs.size()) {
     reply->set_result(rpc::RecoverTaskOutputReply::REPLAY_FAILED);
@@ -4662,6 +4668,40 @@ void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
                              witness_lookup_attempted,
                              std::move(callback));
           return;
+        }
+
+        if (!reply.has_replacement_ref()) {
+          TryRecoveryHolders(object_id,
+                             return_index,
+                             manifest,
+                             holder_index + 1,
+                             witness_lookup_attempted,
+                             std::move(callback));
+          return;
+        }
+
+        const rpc::ObjectReference &replacement_ref = reply.replacement_ref();
+
+        if (replacement_ref.object_id() != object_id.Binary() ||
+            replacement_ref.owner_address().worker_id().size() != WorkerID::Size()) {
+          TryRecoveryHolders(object_id,
+                             return_index,
+                             manifest,
+                             holder_index + 1,
+                             witness_lookup_attempted,
+                             std::move(callback));
+          return;
+        }
+
+        // Transition the requester from the failed original owner to
+        // the acting holder. AddBorrowedObject preserves the requester's
+        // existing local ObjectRef count.
+        reference_counter_->AddBorrowedObject(
+            object_id, ObjectID::Nil(), replacement_ref.owner_address());
+
+        if (replacement_ref.has_recovery_metadata()) {
+          recovery_succession_manager_->RegisterBorrowedObject(
+              object_id, replacement_ref.recovery_metadata());
         }
 
         RAY_LOG(INFO).WithField(object_id) << "Recovery succession accepted by "

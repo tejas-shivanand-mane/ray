@@ -66,6 +66,14 @@ class ReferenceCounter : public ReferenceCounterInterface,
 
   ~ReferenceCounter() override = default;
 
+  bool AddOrPromoteOwnedObjectForRecovery(
+      const ObjectID &object_id,
+      const rpc::Address &owner_address,
+      const std::string &call_site,
+      LineageReconstructionEligibility lineage_eligibility,
+      const std::optional<std::string> &tensor_transport) override
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
   void DrainAndShutdown(std::function<void()> shutdown) override
       ABSL_LOCKS_EXCLUDED(mutex_);
 
@@ -108,6 +116,86 @@ class ReferenceCounter : public ReferenceCounterInterface,
       const std::optional<NodeID> &pinned_at_node_id = std::optional<NodeID>(),
       const std::optional<std::string> &tensor_transport = std::nullopt) override
       ABSL_LOCKS_EXCLUDED(mutex_);
+
+  bool ReferenceCounter::AddOrPromoteOwnedObjectForRecovery(
+      const ObjectID &object_id,
+      const rpc::Address &owner_address,
+      const std::string &call_site,
+      LineageReconstructionEligibility lineage_eligibility,
+      const std::optional<std::string> &tensor_transport) {
+    if (object_id.IsNil() || ObjectID::IsActorID(object_id)) {
+      return false;
+    }
+
+    absl::MutexLock lock(&mutex_);
+
+    auto it = object_id_refs_.find(object_id);
+
+    if (it == object_id_refs_.end()) {
+      return AddOwnedObjectInternal(object_id,
+                                    /*inner_ids=*/{},
+                                    owner_address,
+                                    call_site,
+                                    /*object_size=*/-1,
+                                    lineage_eligibility,
+                                    /*add_local_ref=*/false,
+                                    /*pinned_at_node_id=*/std::nullopt,
+                                    tensor_transport);
+    }
+
+    Reference &reference = it->second;
+
+    if (reference.owned_by_us_) {
+      RAY_LOG(WARNING).WithField(object_id) << "Cannot promote recovery return because "
+                                               "it is already owned locally";
+      return false;
+    }
+
+    // Preserve the existing local ref count, submitted-task refs,
+    // nested-reference state, and downstream borrower information.
+    // Only transition the ownership and object-creation state.
+    reference.owner_address_ = owner_address;
+    reference.call_site_ = call_site;
+    reference.object_size_ = -1;
+    reference.tensor_transport_ = tensor_transport;
+    reference.owned_by_us_ = true;
+    reference.lineage_eligibility_ = lineage_eligibility;
+    reference.pending_creation_ = true;
+
+    // This worker is no longer borrowing the object from the failed
+    // original owner.
+    reference.publish_ref_removed = false;
+
+    // The old value has been lost. The replay has not established a
+    // new primary location or spill location yet.
+    reference.locations.clear();
+    reference.pinned_at_node_id_.reset();
+    reference.spilled_url.clear();
+    reference.spilled_node_id = NodeID::Nil();
+    reference.spilled = false;
+    reference.did_spill = false;
+
+    num_objects_owned_by_us_++;
+
+    reconstructable_owned_objects_.emplace_back(object_id);
+
+    auto reconstructable_it = reconstructable_owned_objects_.end();
+    --reconstructable_it;
+
+    RAY_CHECK(reconstructable_owned_objects_index_.emplace(object_id, reconstructable_it)
+                  .second);
+
+    UpdateOwnedObjectCounters(object_id,
+                              reference,
+                              /*decrement=*/false);
+
+    RAY_LOG(INFO).WithField(object_id) << "Promoted borrowed object to owned "
+                                          "recovery return";
+
+    PRINT_REF_COUNT(it);
+
+    return true;
+  }
 
   void AddDynamicReturn(const ObjectID &object_id, const ObjectID &generator_id) override
       ABSL_LOCKS_EXCLUDED(mutex_);

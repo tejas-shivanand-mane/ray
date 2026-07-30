@@ -194,6 +194,20 @@ class ReferenceCounterInterface {
       const std::optional<NodeID> &pinned_at_node_id = std::optional<NodeID>(),
       const std::optional<std::string> &tensor_transport = std::nullopt) = 0;
 
+  /// Register a deterministic return for succession replay.
+  ///
+  /// If the return is already borrowed locally, promote the existing
+  /// reference to an owned pending return while preserving its current
+  /// local and borrower reference counts. If it does not exist locally,
+  /// create it as an owned return without adding a frontend local ref.
+  virtual bool AddOrPromoteOwnedObjectForRecovery(const ObjectID &,
+                                                  const rpc::Address &,
+                                                  const std::string &,
+                                                  LineageReconstructionEligibility,
+                                                  const std::optional<std::string> &) {
+    return false;
+  }
+
   /// Add an owned object that was dynamically created. These are objects that
   /// were created by a task that we called, but that we own.
   ///

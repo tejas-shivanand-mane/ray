@@ -1,3 +1,5 @@
+import os
+import signal
 import time
 from pathlib import Path
 
@@ -85,31 +87,21 @@ def run_failure_case(failure_mode: str) -> None:
         },
     )
 
-    # Logical ObjectRef owner.
     cluster.add_node(
         num_cpus=1,
         resources={"owner_node": 1},
     )
 
-    # Runs produce() and initially stores the physical object.
     producer_node = cluster.add_node(
         num_cpus=1,
         resources={"producer_node": 1},
     )
 
-    # Rank-1 holder.
-    holder_a_node = cluster.add_node(
-        num_cpus=1,
-        resources={"holder_a_node": 1},
-    )
-
-    # Rank-2 holder.
     cluster.add_node(
         num_cpus=1,
-        resources={"holder_b_node": 1},
+        resources={"rank2_node": 1},
     )
 
-    # Recovery requester.
     cluster.add_node(
         num_cpus=1,
         resources={"borrower_node": 1},
@@ -119,19 +111,19 @@ def run_failure_case(failure_mode: str) -> None:
 
     @ray.remote(max_retries=2)
     def produce():
-        # Force the output into the plasma object store.
-        return b"x" * PAYLOAD_SIZE
+        # The executor of this normal task automatically becomes
+        # the first recovery holder.
+        return b"x" * PAYLOAD_SIZE, os.getpid()
 
     @ray.remote(max_restarts=0)
     class Owner:
         def create(self):
-            ref = produce.options(
+            payload_ref, pid_ref = produce.options(
                 resources={"producer_node": 0.01},
+                num_returns=2,
             ).remote()
 
-            # Keep the ObjectRef nested so Ray does not
-            # resolve and fetch the value.
-            return [ref]
+            return [payload_ref, pid_ref]
 
     @ray.remote(max_restarts=0)
     class Holder:
@@ -140,8 +132,6 @@ def run_failure_case(failure_mode: str) -> None:
             return True
 
         def export(self):
-            # Re-serialize the reference after receiving
-            # the committed frozen manifest.
             return [self.ref]
 
     @ray.remote(max_restarts=0)
@@ -158,51 +148,67 @@ def run_failure_case(failure_mode: str) -> None:
             resources={"owner_node": 0.01},
         ).remote()
 
-        nested = ray.get(owner.create.remote())
-        produced_ref = nested[0]
-
-        # Let produce() finish without fetching produced_ref.
-        time.sleep(3)
-
-        holder_a = Holder.options(
-            resources={"holder_a_node": 0.01},
-        ).remote()
-
-        holder_b = Holder.options(
-            resources={"holder_b_node": 0.01},
-        ).remote()
-
-        borrower = Borrower.options(
-            resources={"borrower_node": 0.01},
-        ).remote()
-
-        # Holder A reports first and should become rank 1.
-        assert ray.get(
-            holder_a.hold.remote([produced_ref])
+        nested = ray.get(
+            owner.create.remote()
         )
 
-        time.sleep(3)
+        payload_ref = nested[0]
+        producer_pid_ref = nested[1]
 
-        # Holder B reports second and should become rank 2.
-        assert ray.get(
-            holder_b.hold.remote([produced_ref])
+        producer_pid = ray.get(
+            producer_pid_ref
         )
+
+        assert producer_pid > 0
 
         session_dirs = {
             Path(node.get_session_dir_path())
             for node in cluster.list_all_nodes()
         }
 
-        # Wait until the frozen list contains:
-        # owner, rank 1, and rank 2.
-        formed = wait_for_log_lines(
+        # The produce-task executor should become rank 1.
+        rank1_formed = wait_for_log_lines(
+            session_dirs,
+            "after witness publication with 2 total members",
+            timeout=20,
+        )
+
+        if not rank1_formed:
+            print("Rank-1 formation logs:")
+
+            print_matching_logs(
+                session_dirs,
+                [
+                    "Stored provisional recovery holder",
+                    "Committed recovery succession manifest",
+                    "Failed to commit recovery manifest",
+                ],
+            )
+
+            raise AssertionError(
+                "The producer worker did not become rank 1."
+            )
+
+        rank2_holder = Holder.options(
+            resources={"rank2_node": 0.01},
+        ).remote()
+
+        # This actor receives the reference after the producer has
+        # already become rank 1, so it should become rank 2.
+        assert ray.get(
+            rank2_holder.hold.remote(
+                [payload_ref]
+            )
+        )
+
+        frozen = wait_for_log_lines(
             session_dirs,
             "after witness publication with 3 total members",
             timeout=20,
         )
 
-        if not formed:
-            print("Manifest-formation logs:")
+        if not frozen:
+            print("Frozen-manifest logs:")
 
             print_matching_logs(
                 session_dirs,
@@ -216,65 +222,83 @@ def run_failure_case(failure_mode: str) -> None:
 
             raise AssertionError(
                 "The succession list did not freeze with "
-                "the owner, rank 1, and rank 2."
+                "the owner, producer rank 1, and holder rank 2."
             )
 
-        print(f"{failure_mode} case manifest formation:")
+        print(
+            f"{failure_mode} case manifest formation:"
+        )
 
-        for line in formed:
+        for line in frozen:
             print(f"  {line}")
 
-        # Allow the committed manifest to reach rank 2.
+        # Allow the frozen manifest to reach rank 2.
         time.sleep(2)
 
-        # Serialize the reference from rank 2 so the borrower
-        # receives the complete frozen manifest.
+        # Re-serialize from the confirmed rank-2 worker.
         fresh_nested = ray.get(
-            holder_b.export.remote()
+            rank2_holder.export.remote()
         )
         fresh_ref = fresh_nested[0]
 
+        borrower = Borrower.options(
+            resources={"borrower_node": 0.01},
+        ).remote()
+
         assert ray.get(
-            borrower.hold.remote([fresh_ref])
+            borrower.hold.remote(
+                [fresh_ref]
+            )
         )
 
-        # Allow the borrower to resolve the reference and cache
-        # recovery metadata while the owner is alive.
         time.sleep(5)
 
-        # Fail rank 1 while keeping rank 2 alive.
         if failure_mode == "worker":
+            # Kill only the rank-1 producer worker. The producer
+            # node and its plasma object remain alive at this point.
+            os.kill(
+                producer_pid,
+                signal.SIGKILL,
+            )
+
+            # Allow the worker-failure notification to reach
+            # the borrower before recovery begins.
+            time.sleep(5)
+
+            # Lose the owner and physical object immediately
+            # afterward.
             ray.kill(
-                holder_a,
+                owner,
                 no_restart=True,
             )
 
-        elif failure_mode == "node":
             cluster.remove_node(
-                holder_a_node,
+                producer_node,
+                allow_graceful=True,
+            )
+
+        elif failure_mode == "node":
+            # The producer node is rank 1 and also holds the
+            # physical object. Kill the owner and immediately
+            # remove that node.
+            ray.kill(
+                owner,
+                no_restart=True,
+            )
+
+            cluster.remove_node(
+                producer_node,
                 allow_graceful=False,
             )
+
+            # Allow the node-failure notification to reach
+            # the borrower.
+            time.sleep(5)
 
         else:
             raise ValueError(
                 f"Unknown failure mode: {failure_mode}"
             )
-
-        # Allow the definitive rank-1 failure notification
-        # to reach the borrower.
-        time.sleep(5)
-
-        # Match the Phase 5 failure sequence. Do not wait
-        # between owner death and loss of the physical object.
-        ray.kill(
-            owner,
-            no_restart=True,
-        )
-
-        cluster.remove_node(
-            producer_node,
-            allow_graceful=True,
-        )
 
         result = ray.get(
             borrower.read.remote(),
@@ -307,28 +331,37 @@ def run_failure_case(failure_mode: str) -> None:
             print_matching_logs(
                 session_dirs,
                 [
+                    "OWNER_DIED observed",
+                    "OWNER_DIED intercepted",
                     "Attempting to recover",
-                    "known-dead recovery holder",
+                    "Skipping known-dead",
                     "Recovery succession",
-                    "recovery holder",
-                    "OWNER_DIED",
-                    "OwnerDiedError",
+                    "Failed to delete local OWNER_DIED",
                 ],
             )
 
         assert skipped, (
-            f"{failure_mode}: rank 1 was not skipped "
-            "using the failure cache."
+            f"{failure_mode}: rank 1 was not skipped."
         )
 
         assert replayed, (
-            f"{failure_mode}: rank 2 did not accept "
-            "the task replay."
+            f"{failure_mode}: rank 2 did not replay "
+            "the original task."
         )
 
         assert accepted, (
-            f"{failure_mode}: the borrower did not accept "
+            f"{failure_mode}: the requester did not accept "
             "recovery through rank 2."
+        )
+
+        rank2_skipped = find_log_lines(
+            session_dirs,
+            "Skipping known-dead recovery holder rank 2",
+        )
+
+        assert not rank2_skipped, (
+            f"{failure_mode}: the live rank-2 holder was "
+            "incorrectly marked failed."
         )
 
         print(
