@@ -1721,11 +1721,9 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
           // Retry only the object fetch. Do not initiate another recovery
           // succession attempt.
           while (true) {
-            const int64_t elapsed_ms =
-                clock_.SteadyNowMillis() - start_time;
+            const int64_t elapsed_ms = clock_.SteadyNowMillis() - start_time;
 
-            if (timeout_ms >= 0 &&
-                elapsed_ms >= timeout_ms) {
+            if (timeout_ms >= 0 && elapsed_ms >= timeout_ms) {
               return Status::TimedOut(
                   "Get timed out while waiting for the "
                   "recovery succession replay.");
@@ -1739,18 +1737,15 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
             const int64_t fetch_timeout_ms =
                 timeout_ms < 0
                     ? kRecoveryFetchPollMs
-                    : std::min<int64_t>(
-                          kRecoveryFetchPollMs,
-                          timeout_ms - elapsed_ms);
+                    : std::min<int64_t>(kRecoveryFetchPollMs, timeout_ms - elapsed_ms);
 
             results.assign(ids.size(), nullptr);
 
             const Status fetch_status =
-                GetObjectsInternal(
-                    ids,
-                    fetch_timeout_ms,
-                    results,
-                    /*allow_recovery_succession=*/false);
+                GetObjectsInternal(ids,
+                                   fetch_timeout_ms,
+                                   results,
+                                   /*allow_recovery_succession=*/false);
 
             if (!fetch_status.ok()) {
               if (fetch_status.IsTimedOut()) {
@@ -1792,7 +1787,6 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
             if (stale_owner_died_ids.empty()) {
               return Status::OK();
             }
-
 
             // Release stale result buffers before deleting the corresponding
             // local store entries.
