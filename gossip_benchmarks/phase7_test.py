@@ -3,9 +3,6 @@ from pathlib import Path
 
 import ray
 from ray.cluster_utils import Cluster
-from ray.util.scheduling_strategies import (
-    NodeAffinitySchedulingStrategy,
-)
 
 
 PAYLOAD_SIZE = 2 * 1024 * 1024
@@ -28,19 +25,48 @@ def find_log_lines(
                 continue
 
             try:
-                content = path.read_text(
-                    errors="replace"
-                )
+                content = path.read_text(errors="replace")
             except OSError:
                 continue
 
             for line in content.splitlines():
                 if text in line:
-                    matches.append(
-                        f"{path.name}: {line}"
-                    )
+                    matches.append(f"{path.name}: {line}")
 
     return matches
+
+
+def wait_for_log_lines(
+    session_dirs: set[Path],
+    text: str,
+    timeout: float = 20,
+) -> list[str]:
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        matches = find_log_lines(session_dirs, text)
+
+        if matches:
+            return matches
+
+        time.sleep(0.25)
+
+    return []
+
+
+def print_matching_logs(
+    session_dirs: set[Path],
+    texts: list[str],
+) -> None:
+    printed = set()
+
+    for text in texts:
+        for line in find_log_lines(session_dirs, text):
+            if line in printed:
+                continue
+
+            printed.add(line)
+            print(f"  {line}")
 
 
 def run_failure_case(failure_mode: str) -> None:
@@ -56,9 +82,15 @@ def run_failure_case(failure_mode: str) -> None:
         },
     )
 
-    owner_node = cluster.add_node(
-        num_cpus=2,
+    # The logical owner and physical producer must be separate.
+    cluster.add_node(
+        num_cpus=1,
         resources={"owner_node": 1},
+    )
+
+    producer_node = cluster.add_node(
+        num_cpus=1,
+        resources={"producer_node": 1},
     )
 
     holder_a_node = cluster.add_node(
@@ -80,25 +112,18 @@ def run_failure_case(failure_mode: str) -> None:
 
     @ray.remote(max_retries=2)
     def produce():
-        # Force the output into the plasma object store.
+        # Force the return value into the plasma object store.
         return b"x" * PAYLOAD_SIZE
 
     @ray.remote(max_restarts=0)
     class Owner:
-        def __init__(self, node_id: str):
-            self.node_id = node_id
-
         def create(self):
             ref = produce.options(
-                scheduling_strategy=(
-                    NodeAffinitySchedulingStrategy(
-                        node_id=self.node_id,
-                        soft=True,
-                    )
-                ),
+                resources={"producer_node": 0.01},
             ).remote()
 
-            # Keep the ref nested so its value is not fetched.
+            # Keep the ObjectRef nested so Ray does not resolve
+            # and fetch its value while returning from this call.
             return [ref]
 
     @ray.remote(max_restarts=0)
@@ -108,7 +133,7 @@ def run_failure_case(failure_mode: str) -> None:
             return True
 
         def export(self):
-            # Re-serialize the ref after this holder has
+            # Re-serialize the reference after this worker has
             # received the committed frozen manifest.
             return [self.ref]
 
@@ -124,12 +149,12 @@ def run_failure_case(failure_mode: str) -> None:
     try:
         owner = Owner.options(
             resources={"owner_node": 0.01},
-        ).remote(owner_node.node_id)
+        ).remote()
 
         nested = ray.get(owner.create.remote())
         produced_ref = nested[0]
 
-        # Let the producing task finish without fetching it.
+        # Let produce() finish without fetching produced_ref.
         time.sleep(3)
 
         holder_a = Holder.options(
@@ -144,23 +169,58 @@ def run_failure_case(failure_mode: str) -> None:
             resources={"borrower_node": 0.01},
         ).remote()
 
+        # Holder A should report first and occupy rank 1.
         assert ray.get(
             holder_a.hold.remote([produced_ref])
         )
 
-        # Ensure holder A occupies rank 1 before B reports.
         time.sleep(3)
 
+        # Holder B should then occupy rank 2.
         assert ray.get(
             holder_b.hold.remote([produced_ref])
         )
 
-        # Allow rank-2 installation, witness publication,
-        # and committed-manifest propagation.
-        time.sleep(5)
+        session_dirs = {
+            Path(node.get_session_dir_path())
+            for node in cluster.list_all_nodes()
+        }
 
-        # Obtain a ref serialized by rank 2, which should
-        # carry the complete frozen manifest.
+        # Wait until the owner has committed the frozen manifest:
+        # [owner, rank 1, rank 2].
+        formed = wait_for_log_lines(
+            session_dirs,
+            "after witness publication with 3 total members",
+            timeout=20,
+        )
+
+        if not formed:
+            print("Manifest-formation logs:")
+            print_matching_logs(
+                session_dirs,
+                [
+                    "Stored provisional recovery holder",
+                    "Committed recovery succession manifest",
+                    "Applied committed recovery succession manifest",
+                    "Failed to commit recovery manifest",
+                ],
+            )
+
+            raise AssertionError(
+                "The succession list did not freeze with "
+                "the owner, rank 1, and rank 2."
+            )
+
+        print(f"{failure_mode} case manifest formation:")
+
+        for line in formed:
+            print(f"  {line}")
+
+        # Allow the committed-manifest RPC to reach rank 2.
+        time.sleep(2)
+
+        # Ask rank 2 to serialize the reference. This should carry
+        # the complete frozen manifest rather than an earlier partial one.
         fresh_nested = ray.get(
             holder_b.export.remote()
         )
@@ -170,37 +230,45 @@ def run_failure_case(failure_mode: str) -> None:
             borrower.hold.remote([fresh_ref])
         )
 
-        time.sleep(2)
+        # Allow the borrower to resolve the owner status and cache
+        # the recovery metadata while the owner is still alive.
+        time.sleep(5)
 
-        session_dirs = {
-            Path(node.get_session_dir_path())
-            for node in cluster.list_all_nodes()
-        }
-
+        # Fail rank 1 while preserving rank 2.
         if failure_mode == "worker":
             ray.kill(holder_a, no_restart=True)
+
         elif failure_mode == "node":
             cluster.remove_node(
                 holder_a_node,
                 allow_graceful=False,
             )
+
         else:
             raise ValueError(
                 f"Unknown failure mode: {failure_mode}"
             )
 
-        # Allow the borrower to receive the definitive
-        # worker/node failure notification.
+        # Allow the GCS worker/node failure notification to reach
+        # the borrower before recovery begins.
         time.sleep(5)
 
-        # This destroys both the original owner and the
-        # only physical plasma copy.
+        # Kill only the logical owner worker. The physical value
+        # remains available on producer_node for now.
+        ray.kill(owner, no_restart=True)
+
+        # Allow owner-death notification to propagate before
+        # removing the physical object.
+        time.sleep(3)
+
+        # Lose the sole physical object copy. This should enter
+        # Ray's ordinary lost-object recovery path.
         cluster.remove_node(
-            owner_node,
-            allow_graceful=False,
+            producer_node,
+            allow_graceful=True,
         )
 
-        time.sleep(5)
+        time.sleep(3)
 
         result = ray.get(
             borrower.read.remote(),
@@ -209,43 +277,55 @@ def run_failure_case(failure_mode: str) -> None:
 
         assert len(result) == PAYLOAD_SIZE
 
-        time.sleep(2)
-
-        skipped = find_log_lines(
+        skipped = wait_for_log_lines(
             session_dirs,
             "Skipping known-dead recovery holder rank 1",
+            timeout=10,
         )
 
-        accepted = find_log_lines(
+        accepted = wait_for_log_lines(
             session_dirs,
             "Recovery succession accepted by holder rank 2",
+            timeout=10,
         )
 
-        if not skipped or not accepted:
-            recovery_logs = find_log_lines(
+        replayed = wait_for_log_lines(
+            session_dirs,
+            "Recovery succession replay accepted for return",
+            timeout=10,
+        )
+
+        if not skipped or not accepted or not replayed:
+            print("Recovery-related logs:")
+
+            print_matching_logs(
                 session_dirs,
-                "recovery holder",
+                [
+                    "Attempting to recover",
+                    "known-dead recovery holder",
+                    "Recovery succession",
+                    "recovery holder",
+                    "OWNER_DIED",
+                    "OwnerDiedError",
+                ],
             )
-
-            print("Recovery-holder logs:")
-
-            for line in recovery_logs:
-                print(f"  {line}")
 
         assert skipped, (
             f"{failure_mode}: rank 1 was not skipped "
             "using the failure cache."
         )
 
-        assert accepted, (
-            f"{failure_mode}: rank 2 did not accept "
-            "the recovery request."
+        assert replayed, (
+            f"{failure_mode}: rank 2 did not initiate "
+            "the recovery replay."
         )
 
-        print(
-            f"Phase 7 {failure_mode}-failure "
-            "succession passed."
+        assert accepted, (
+            f"{failure_mode}: the borrower did not accept "
+            "the recovery result from rank 2."
         )
+
+        print(f"Phase 7 {failure_mode}-failure succession passed.")
 
     finally:
         ray.shutdown()
