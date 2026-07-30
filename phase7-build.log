@@ -13,17 +13,17 @@ Obtaining file:///home/tejas/Downloads/ray/python
   !!
     dist.fetch_build_eggs(dist.setup_requires)
   running egg_info
-  creating /tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info
-  writing /tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info/PKG-INFO
-  writing dependency_links to /tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info/dependency_links.txt
-  writing entry points to /tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info/entry_points.txt
-  writing requirements to /tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info/requires.txt
-  writing top-level names to /tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info/top_level.txt
-  writing manifest file '/tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info/SOURCES.txt'
-  reading manifest file '/tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info/SOURCES.txt'
+  creating /tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info
+  writing /tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info/SOURCES.txt'
   reading manifest template 'MANIFEST.in'
   adding license file 'LICENSE.txt'
-  writing manifest file '/tmp/pip-pip-egg-info-9w9l9gv3/ray.egg-info/SOURCES.txt'
+  writing manifest file '/tmp/pip-pip-egg-info-rcnxyrfb/ray.egg-info/SOURCES.txt'
   Preparing metadata (setup.py): finished with status 'done'
 Requirement already satisfied: click>=7.0 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (8.4.2)
 Requirement already satisfied: filelock in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (3.29.7)
@@ -128,17 +128,78 @@ Installing collected packages: ray
     Analyzing: 3 targets (0 packages loaded, 0 targets configured)
 
     DEBUG: /home/tejas/Downloads/ray/bazel/ray.bzl:175:10: [<generated file external/jemalloc/libjemalloc/lib/libjemalloc.so>]
-    INFO: Analyzed 3 targets (3 packages loaded, 1737 targets configured).
-    [9,610 / 10,168] Executing genrule @@local_config_python//_python3:_python3_include; 0s processwrapper-sandbox ... (3 actions, 2 running)
-    [11,875 / 11,918] Compiling src/ray/core_worker/reference_counter.cc; 1s processwrapper-sandbox ... (17 actions, 15 running)
-    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_status.c:
+    INFO: Analyzed 3 targets (3 packages loaded, 1786 targets configured).
+    [11,910 / 11,918] [Scann] Compiling src/ray/thirdparty/setproctitle/spt_setup.c
+    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_strlcpy.c:
     cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
-    [11,876 / 11,918] Compiling src/ray/core_worker/reference_counter.cc; 2s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,877 / 11,918] Compiling src/ray/core_worker/task_submission/actor_task_submitter.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
-    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_setup.c:
-    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
-    [11,879 / 11,918] Compiling src/ray/core_worker/task_submission/actor_task_submitter.cc; 12s processwrapper-sandbox ... (17 actions, 15 running)
     INFO: From Compiling src/ray/thirdparty/setproctitle/spt_debug.c:
     cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
-    [11,880 / 11,918] Compiling src/ray/core_worker/task_submission/actor_task_submitter.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,880 / 11,918] Compiling src/ray/core_worker/task_submission/actor_task_submitter.cc; 22s processwrapper-sandbox ... (17 actions, 16 running)
+    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_status.c:
+    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
+    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_setup.c:
+    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
+    [11,915 / 11,918] Compiling python/ray/_raylet.cpp; 1s processwrapper-sandbox
+    [11,915 / 11,918] Compiling python/ray/_raylet.cpp; 10s processwrapper-sandbox
+    [11,915 / 11,918] Compiling python/ray/_raylet.cpp; 40s processwrapper-sandbox
+    [11,916 / 11,918] [Prepa] Linking python/ray/_raylet.so
+    [11,916 / 11,918] Linking python/ray/_raylet.so; 1s processwrapper-sandbox
+    [11,917 / 11,918] [Prepa] PackageZip ray_pkg.zip
+    [11,917 / 11,918] PackageZip ray_pkg.zip; 1s processwrapper-sandbox
+    INFO: From PackageZip ray_pkg.zip:
+    /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/44/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+      ts = datetime.datetime.utcfromtimestamp(ts)
+    INFO: Found 3 targets...
+    INFO: Elapsed time: 65.497s, Critical Path: 64.54s
+    INFO: 10 processes: 1 internal, 9 processwrapper-sandbox.
+    INFO: Build completed successfully, 10 total actions
+    Computing main repo mapping:
+    Loading:
+    Loading: 0 packages loaded
+    Analyzing: target //:gen_ray_pkg (0 packages loaded, 0 targets configured)
+    Analyzing: target //:gen_ray_pkg (0 packages loaded, 0 targets configured)
+
+    INFO: Analyzed target //:gen_ray_pkg (0 packages loaded, 0 targets configured).
+    INFO: Found 1 target...
+    Target //:gen_ray_pkg up-to-date:
+      bazel-bin/gen_ray_pkg
+    INFO: Elapsed time: 0.282s, Critical Path: 0.01s
+    INFO: 1 process: 1 internal.
+    INFO: Build completed successfully, 1 total action
+    INFO: Running command line: bazel-bin/gen_ray_pkg
+    Computing main repo mapping:
+    Loading:
+    Loading: 0 packages loaded
+    Analyzing: target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured)
+    Analyzing: target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured)
+
+    INFO: Analyzed target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured).
+    INFO: Found 1 target...
+    Target //cpp:gen_ray_cpp_pkg up-to-date:
+      bazel-bin/cpp/gen_ray_cpp_pkg
+    INFO: Elapsed time: 0.251s, Critical Path: 0.00s
+    INFO: 1 process: 1 internal.
+    INFO: Build completed successfully, 1 total action
+    INFO: Running command line: bazel-bin/cpp/gen_ray_cpp_pkg
+    Computing main repo mapping:
+    Loading:
+    Loading: 0 packages loaded
+    Analyzing: target //:gen_redis_pkg (0 packages loaded, 0 targets configured)
+    Analyzing: target //:gen_redis_pkg (0 packages loaded, 0 targets configured)
+
+    INFO: Analyzed target //:gen_redis_pkg (0 packages loaded, 6 targets configured).
+    INFO: Found 1 target...
+    Target //:gen_redis_pkg up-to-date:
+      bazel-bin/gen_redis_pkg
+    INFO: Elapsed time: 0.197s, Critical Path: 0.00s
+    INFO: 1 process: 1 internal.
+    INFO: Build completed successfully, 1 total action
+    INFO: Running command line: bazel-bin/gen_redis_pkg
+    # of files copied to build/lib.linux-x86_64-cpython-313: 385
+    Creating /home/tejas/anaconda3/lib/python3.13/site-packages/ray.egg-link (link to .)
+    Adding ray 3.0.0.dev0 to easy-install.pth file
+    Installing ray script to /home/tejas/anaconda3/bin
+    Installing serve script to /home/tejas/anaconda3/bin
+    Installing tune script to /home/tejas/anaconda3/bin
+
+    Installed /home/tejas/Downloads/ray/python
+Successfully installed ray-3.0.0.dev0
