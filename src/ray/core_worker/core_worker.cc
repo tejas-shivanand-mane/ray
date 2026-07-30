@@ -1675,6 +1675,47 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
           result_map[object_id] = std::make_shared<RayObject>(rpc::ErrorType::OWNER_DIED);
         }
       } else {
+        // FreeObjects is asynchronous. Do not start the replay until
+        // the stale local OWNER_DIED object is actually absent from
+        // the local plasma store. The replay produces the same
+        // deterministic ObjectID, so deletion after replay starts
+        // could delete the reconstructed result.
+        while (true) {
+          bool stale_object_present = false;
+
+          for (const ObjectID &object_id : plasma_owner_died_objects) {
+            bool contains = false;
+
+            RAY_RETURN_NOT_OK(
+                plasma_store_provider_->Contains(object_id, &contains));
+
+            if (contains) {
+              stale_object_present = true;
+              break;
+            }
+          }
+
+          if (!stale_object_present) {
+            break;
+          }
+
+          const int64_t elapsed_ms =
+              clock_.SteadyNowMillis() - start_time;
+
+          if (timeout_ms >= 0 && elapsed_ms >= timeout_ms) {
+            return Status::TimedOut(
+                "Timed out removing stale local OWNER_DIED object "
+                "before recovery succession replay.");
+          }
+
+          std::this_thread::sleep_for(
+              std::chrono::milliseconds(10));
+        }
+
+        RAY_LOG(INFO)
+            << "Confirmed stale local OWNER_DIED object removed "
+               "before recovery replay";
+
         bool all_recoveries_accepted = true;
 
         for (const ObjectID &object_id : recoverable_owner_died_objects) {
@@ -1713,26 +1754,20 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
         }
 
         if (all_recoveries_accepted) {
-          const int64_t elapsed_ms =
-              clock_.SteadyNowMillis() - start_time;
+          const int64_t elapsed_ms = clock_.SteadyNowMillis() - start_time;
 
           const int64_t remaining_timeout_ms =
-              timeout_ms < 0
-                  ? timeout_ms
-                  : std::max<int64_t>(
-                        0,
-                        timeout_ms - elapsed_ms);
+              timeout_ms < 0 ? timeout_ms : std::max<int64_t>(0, timeout_ms - elapsed_ms);
 
           results.assign(ids.size(), nullptr);
 
           // The stale local OWNER_DIED object was fully removed before
           // replay was requested. Keep one pull active until the acting
           // holder produces the replacement object.
-          return GetObjectsInternal(
-              ids,
-              remaining_timeout_ms,
-              results,
-              /*allow_recovery_succession=*/false);
+          return GetObjectsInternal(ids,
+                                    remaining_timeout_ms,
+                                    results,
+                                    /*allow_recovery_succession=*/false);
         }
 
         // Recovery succession was unavailable or rejected. Return
