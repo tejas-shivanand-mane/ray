@@ -34,6 +34,7 @@
 #include <google/protobuf/util/json_util.h>
 
 #include <cstdint>
+#include <thread>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/strings/str_cat.h"
@@ -1712,19 +1713,107 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
         }
 
         if (all_recoveries_accepted) {
-          const int64_t elapsed_ms = clock_.SteadyNowMillis() - start_time;
+          // RECOVERED means that the acting holder accepted and queued
+          // the replay. The replacement value may not have been produced
+          // yet. A stale local OWNER_DIED object can therefore race with
+          // the replayed output.
+          //
+          // Retry only the object fetch. Do not initiate another recovery
+          // succession attempt.
+          while (true) {
+            const int64_t elapsed_ms = clock_.SteadyNowMillis() - start_time;
 
-          const int64_t remaining_timeout_ms =
-              timeout_ms < 0 ? timeout_ms : std::max<int64_t>(0, timeout_ms - elapsed_ms);
+            const int64_t remaining_timeout_ms =
+                timeout_ms < 0 ? timeout_ms
+                               : std::max<int64_t>(0, timeout_ms - elapsed_ms);
 
-          results.assign(ids.size(), nullptr);
+            results.assign(ids.size(), nullptr);
 
-          // The stale local error object is gone. Wait for the
-          // replayed task to produce the original ObjectID.
-          return GetObjectsInternal(ids,
-                                    remaining_timeout_ms,
-                                    results,
-                                    /*allow_recovery_succession=*/false);
+            RAY_RETURN_NOT_OK(GetObjectsInternal(ids,
+                                                 remaining_timeout_ms,
+                                                 results,
+                                                 /*allow_recovery_succession=*/false));
+
+            absl::flat_hash_set<ObjectID> stale_owner_died_ids;
+
+            absl::flat_hash_set<ObjectID> stale_plasma_owner_died_ids;
+
+            std::vector<ObjectID> stale_memory_owner_died_ids;
+
+            for (size_t i = 0; i < ids.size(); ++i) {
+              if (!plasma_owner_died_objects.contains(ids[i]) || results[i] == nullptr) {
+                continue;
+              }
+
+              rpc::ErrorType error_type;
+
+              if (!results[i]->IsException(&error_type) ||
+                  error_type != rpc::ErrorType::OWNER_DIED) {
+                continue;
+              }
+
+              stale_owner_died_ids.insert(ids[i]);
+
+              if (plasma_object_ids.contains(ids[i])) {
+                stale_plasma_owner_died_ids.insert(ids[i]);
+              } else {
+                stale_memory_owner_died_ids.push_back(ids[i]);
+              }
+            }
+
+            // The replayed value, or a different final error, was
+            // retrieved successfully.
+            if (stale_owner_died_ids.empty()) {
+              return Status::OK();
+            }
+
+            // Preserve normal timeout behavior. The current results still
+            // contain OWNER_DIED and will be returned to the caller.
+            if (timeout_ms >= 0 && clock_.SteadyNowMillis() - start_time >= timeout_ms) {
+              return Status::OK();
+            }
+
+            // Release stale result buffers before deleting the corresponding
+            // local store entries.
+            for (size_t i = 0; i < ids.size(); ++i) {
+              if (stale_owner_died_ids.contains(ids[i])) {
+                results[i].reset();
+              }
+            }
+
+            if (!stale_memory_owner_died_ids.empty()) {
+              memory_store_->Delete(stale_memory_owner_died_ids);
+            }
+
+            if (!stale_plasma_owner_died_ids.empty()) {
+              const Status retry_delete_status =
+                  plasma_store_provider_->Delete(stale_plasma_owner_died_ids,
+                                                 /*local_only=*/true);
+
+              if (!retry_delete_status.ok()) {
+                RAY_LOG(WARNING) << "Failed to clear stale OWNER_DIED "
+                                    "objects while waiting for recovery "
+                                    "replay: "
+                                 << retry_delete_status;
+
+                for (size_t i = 0; i < ids.size(); ++i) {
+                  if (stale_owner_died_ids.contains(ids[i])) {
+                    results[i] = std::make_shared<RayObject>(rpc::ErrorType::OWNER_DIED);
+                  }
+                }
+
+                return Status::OK();
+              }
+            }
+
+            RAY_LOG(INFO) << "Cleared stale OWNER_DIED object after "
+                             "recovery acceptance; waiting for replayed "
+                             "output";
+
+            // Avoid busy-spinning while the acting holder executes
+            // the replay.
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          }
         }
 
         // Recovery succession was unavailable or rejected. Return
