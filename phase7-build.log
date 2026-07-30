@@ -22,46 +22,46 @@ Obtaining file:///home/tejas/Downloads/ray/python
   Collecting cython>=3.0.12
     Obtaining dependency information for cython>=3.0.12 from https://files.pythonhosted.org/packages/df/9b/b4ff8cdff357ba0f41791e044a2a95898d0768b20e9247823decf5eabb5e/cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata
     Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.6 kB)
-  Collecting pip
-    Obtaining dependency information for pip from https://files.pythonhosted.org/packages/62/36/a3aed958d60531cb442b7ab4596cda7b3621cfb916f8ae1d6769795c7dc1/pip-26.2-py3-none-any.whl.metadata
-    Using cached pip-26.2-py3-none-any.whl.metadata (4.6 kB)
   Collecting wheel
     Obtaining dependency information for wheel from https://files.pythonhosted.org/packages/87/1b/9e33c09813d65e248f7f773119148a612516a4bea93e9c6f545f78455b7c/wheel-0.47.0-py3-none-any.whl.metadata
     Using cached wheel-0.47.0-py3-none-any.whl.metadata (2.3 kB)
+  Collecting pip
+    Obtaining dependency information for pip from https://files.pythonhosted.org/packages/62/36/a3aed958d60531cb442b7ab4596cda7b3621cfb916f8ae1d6769795c7dc1/pip-26.2-py3-none-any.whl.metadata
+    Using cached pip-26.2-py3-none-any.whl.metadata (4.6 kB)
   Collecting packaging>=24.0 (from wheel)
     Obtaining dependency information for packaging>=24.0 from https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl.metadata
     Using cached packaging-26.2-py3-none-any.whl.metadata (3.5 kB)
   Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.5 MB)
-  Using cached pip-26.2-py3-none-any.whl (1.8 MB)
   Using cached wheel-0.47.0-py3-none-any.whl (32 kB)
+  Using cached pip-26.2-py3-none-any.whl (1.8 MB)
   Using cached packaging-26.2-py3-none-any.whl (100 kB)
   Installing collected packages: pip, packaging, cython, wheel
-    Creating /tmp/pip-build-env-2xxpcsw_/normal/bin
-    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/pip to 775
-    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/pip3 to 775
-    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/pip3.10 to 775
-    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/cygdb to 775
-    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/cython to 775
-    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/cythonize to 775
-    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/wheel to 775
+    Creating /tmp/pip-build-env-33j_w9nf/normal/bin
+    changing mode of /tmp/pip-build-env-33j_w9nf/normal/bin/pip to 775
+    changing mode of /tmp/pip-build-env-33j_w9nf/normal/bin/pip3 to 775
+    changing mode of /tmp/pip-build-env-33j_w9nf/normal/bin/pip3.10 to 775
+    changing mode of /tmp/pip-build-env-33j_w9nf/normal/bin/cygdb to 775
+    changing mode of /tmp/pip-build-env-33j_w9nf/normal/bin/cython to 775
+    changing mode of /tmp/pip-build-env-33j_w9nf/normal/bin/cythonize to 775
+    changing mode of /tmp/pip-build-env-33j_w9nf/normal/bin/wheel to 775
 
   Successfully installed cython-3.2.9 packaging-26.2 pip-26.2 wheel-0.47.0
   Installing backend dependencies: finished with status 'done'
   Preparing editable metadata (pyproject.toml): started
   Running command Preparing editable metadata (pyproject.toml)
   running dist_info
-  creating /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info
-  writing /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/PKG-INFO
-  writing dependency_links to /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/dependency_links.txt
-  writing entry points to /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/entry_points.txt
-  writing requirements to /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/requires.txt
-  writing top-level names to /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/top_level.txt
-  writing manifest file '/tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/SOURCES.txt'
-  reading manifest file '/tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/SOURCES.txt'
+  creating /tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info
+  writing /tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info/SOURCES.txt'
   reading manifest template 'MANIFEST.in'
   adding license file 'LICENSE.txt'
-  writing manifest file '/tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/SOURCES.txt'
-  creating '/tmp/pip-modern-metadata-ykncb2u6/ray-3.0.0.dev0.dist-info'
+  writing manifest file '/tmp/pip-modern-metadata-q0cpp_0p/ray.egg-info/SOURCES.txt'
+  creating '/tmp/pip-modern-metadata-q0cpp_0p/ray-3.0.0.dev0.dist-info'
   Preparing editable metadata (pyproject.toml): finished with status 'done'
 Requirement already satisfied: click>=7.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (8.3.1)
 Requirement already satisfied: filelock in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (3.25.2)
@@ -84,19 +84,19 @@ Building wheels for collected packages: ray
   Building editable for ray (pyproject.toml): started
   Running command Building editable for ray (pyproject.toml)
   running editable_wheel
-  creating /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info
-  writing /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/PKG-INFO
-  writing dependency_links to /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/dependency_links.txt
-  writing entry points to /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/entry_points.txt
-  writing requirements to /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/requires.txt
-  writing top-level names to /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/top_level.txt
-  writing manifest file '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/SOURCES.txt'
-  reading manifest file '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/SOURCES.txt'
+  creating /tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info
+  writing /tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info/SOURCES.txt'
   reading manifest template 'MANIFEST.in'
   adding license file 'LICENSE.txt'
-  writing manifest file '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/SOURCES.txt'
-  creating '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray-3.0.0.dev0.dist-info'
-  creating /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray-3.0.0.dev0.dist-info/WHEEL
+  writing manifest file '/tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray.egg-info/SOURCES.txt'
+  creating '/tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray-3.0.0.dev0.dist-info'
+  creating /tmp/pip-ephem-wheel-cache-sukvlonp/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmp97qiuojk/.tmp-dk2999k4/ray-3.0.0.dev0.dist-info/WHEEL
   running build_py
   running build_ext
   WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama-0.4.6.dist-info already exists. Specify --upgrade to force replacement.
@@ -128,317 +128,506 @@ Building wheels for collected packages: ray
   WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/typing_extensions-4.16.0.dist-info already exists. Specify --upgrade to force replacement.
   WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/typing_extensions.py already exists. Specify --upgrade to force replacement.
   WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/bin already exists. Specify --upgrade to force replacement.
-  INFO: Invocation ID: 9cdd24f7-2d8e-4e4f-a8bd-e385367c9866
+  INFO: Invocation ID: a1c112ce-ffe5-49b6-8a03-127479bffe96
   Computing main repo mapping:
   Loading:
   Loading: 0 packages loaded
   Analyzing: 3 targets (0 packages loaded, 0 targets configured)
   Analyzing: 3 targets (0 packages loaded, 0 targets configured)
 
-  INFO: Analyzed 3 targets (1 packages loaded, 205 targets configured).
-  [11,892 / 11,918] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 0s disk-cache, processwrapper-sandbox ... (16 actions, 4 running)
-  [11,892 / 11,918] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 4 running)
-  [11,892 / 11,918] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 4 running)
-  [11,892 / 11,918] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 18s disk-cache, processwrapper-sandbox ... (16 actions, 5 running)
-  [11,895 / 11,918] Compiling src/ray/core_worker/core_worker.cc; 19s disk-cache, processwrapper-sandbox ... (13 actions, 4 running)
-  [11,895 / 11,918] Compiling src/ray/core_worker/core_worker.cc; 29s disk-cache, processwrapper-sandbox ... (13 actions, 4 running)
-  [11,895 / 11,918] Compiling src/ray/core_worker/core_worker.cc; 32s disk-cache, processwrapper-sandbox ... (13 actions, 5 running)
-  [11,896 / 11,918] [Sched] Compiling src/ray/core_worker/core_worker_shutdown_executor.cc; 33s ... (12 actions, 4 running)
-  [11,896 / 11,918] [Sched] Compiling src/ray/core_worker/core_worker_shutdown_executor.cc; 37s ... (12 actions, 5 running)
-  [11,898 / 11,918] [Sched] Compiling src/ray/core_worker/core_worker_shutdown_executor.cc; 38s ... (10 actions, 4 running)
-  [11,899 / 11,918] [Sched] Compiling cpp/src/ray/runtime/object/object_store.cc; 39s ... (9 actions, 4 running)
-  [11,899 / 11,918] [Sched] Compiling cpp/src/ray/runtime/object/object_store.cc; 50s ... (9 actions, 4 running)
-  [11,900 / 11,918] [Sched] Compiling cpp/src/ray/runtime/object/object_store.cc; 52s ... (8 actions, 4 running)
-  [11,900 / 11,918] [Sched] Compiling cpp/src/ray/runtime/task/local_mode_task_submitter.cc; 56s ... (8 actions, 5 running)
-  [11,901 / 11,918] [Sched] Compiling src/ray/internal/internal.cc; 57s ... (7 actions, 5 running)
-  [11,902 / 11,918] [Sched] Compiling python/ray/_raylet.cpp; 58s ... (6 actions, 5 running)
-  [11,903 / 11,918] [Sched] Compiling python/ray/_raylet.cpp; 59s ... (5 actions, 4 running)
-  [11,903 / 11,918] [Sched] Compiling python/ray/_raylet.cpp; 68s ... (5 actions, 4 running)
-  [11,903 / 11,918] Compiling src/ray/core_worker/core_worker_process.cc; 23s disk-cache, processwrapper-sandbox ... (5 actions running)
-  [11,904 / 11,918] Compiling src/ray/core_worker/core_worker_process.cc; 25s disk-cache, processwrapper-sandbox ... (4 actions running)
-  [11,908 / 11,918] Compiling src/ray/core_worker/core_worker_process.cc; 27s disk-cache, processwrapper-sandbox ... (2 actions running)
-  [11,910 / 11,918] Compiling python/ray/_raylet.cpp; 4s disk-cache, processwrapper-sandbox ... (2 actions running)
-  [11,911 / 11,918] Compiling python/ray/_raylet.cpp; 6s disk-cache, processwrapper-sandbox ... (2 actions, 1 running)
-  INFO: From PackageZip cpp/ray_cpp_pkg.zip:
-  /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/78/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
-    ts = datetime.datetime.utcfromtimestamp(ts)
-  [11,914 / 11,917] Compiling python/ray/_raylet.cpp; 8s disk-cache, processwrapper-sandbox
-  [11,914 / 11,917] Compiling python/ray/_raylet.cpp; 18s disk-cache, processwrapper-sandbox
-  [11,914 / 11,917] Compiling python/ray/_raylet.cpp; 48s disk-cache, processwrapper-sandbox
-  [11,915 / 11,917] [Prepa] Linking python/ray/_raylet.so
-  [11,915 / 11,917] Linking python/ray/_raylet.so; 1s disk-cache, processwrapper-sandbox
-  [11,916 / 11,917] [Prepa] PackageZip ray_pkg.zip
-  [11,916 / 11,917] PackageZip ray_pkg.zip; 1s disk-cache, processwrapper-sandbox
-  INFO: From PackageZip ray_pkg.zip:
-  /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/80/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
-    ts = datetime.datetime.utcfromtimestamp(ts)
-  INFO: Found 3 targets...
-  INFO: Elapsed time: 135.838s, Critical Path: 134.51s
-  INFO: 25 processes: 3 internal, 22 processwrapper-sandbox.
-  INFO: Build completed successfully, 25 total actions
-  INFO: Invocation ID: 6766e4af-91d8-4fa3-b045-844b8ad59bb4
-  Computing main repo mapping:
-  Loading:
-  Loading: 0 packages loaded
-  Analyzing: target //:gen_ray_pkg (0 packages loaded, 0 targets configured)
-  Analyzing: target //:gen_ray_pkg (0 packages loaded, 0 targets configured)
+  INFO: Analyzed 3 targets (1 packages loaded, 2 targets configured).
+  [11,909 / 11,918] Compiling src/ray/core_worker/core_worker.cc; 1s disk-cache, processwrapper-sandbox
+  [11,909 / 11,918] Compiling src/ray/core_worker/core_worker.cc; 11s disk-cache, processwrapper-sandbox
+  ERROR: /home/tejas/Downloads/ray/src/ray/core_worker/BUILD.bazel:3:15: Compiling src/ray/core_worker/core_worker.cc failed: (Exit 1): gcc failed: error executing CppCompile command (from target //src/ray/core_worker:core_worker_lib)
+    (cd /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/81/execroot/io_ray && \
+    exec env - \
+      PATH=/bin:/usr/bin:/usr/local/bin \
+      PWD=/proc/self/cwd \
+    /usr/bin/gcc -U_FORTIFY_SOURCE -fstack-protector -Wall -Wunused-but-set-parameter -Wno-free-nonheap-object -fno-omit-frame-pointer -g0 -O2 '-D_FORTIFY_SOURCE=1' -DNDEBUG -ffunction-sections -fdata-sections '-std=c++14' -MD -MF bazel-out/k8-opt/bin/src/ray/core_worker/_objs/core_worker_lib/core_worker.pic.d '-frandom-seed=bazel-out/k8-opt/bin/src/ray/core_worker/_objs/core_worker_lib/core_worker.pic.o' -fPIC -DBOOST_NO_CXX98_FUNCTION_BASE -DCARES_STATICLIB -DHAVE_ABSEIL '-DOPENTELEMETRY_STL_VERSION=(__cplusplus/100)' '-DOPENTELEMETRY_ABI_VERSION_NO=1' -DENABLE_OTLP_GRPC_SSL_MTLS_PREVIEW -DBOOST_ASIO_SEPARATE_COMPILATION -DBOOST_BEAST_SEPARATE_COMPILATION -DBOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF -DBOOST_FILESYSTEM_HAS_POSIX_AT_APIS -iquote . -iquote bazel-out/k8-opt/bin -iquote external/com_google_protobuf -iquote bazel-out/k8-opt/bin/external/com_google_protobuf -iquote external/com_google_absl -iquote bazel-out/k8-opt/bin/external/com_google_absl -iquote external/utf8_range -iquote bazel-out/k8-opt/bin/external/utf8_range -iquote external/zlib -iquote bazel-out/k8-opt/bin/external/zlib -iquote external/com_github_spdlog -iquote bazel-out/k8-opt/bin/external/com_github_spdlog -iquote external/com_google_googletest -iquote bazel-out/k8-opt/bin/external/com_google_googletest -iquote external/msgpack -iquote bazel-out/k8-opt/bin/external/msgpack -iquote external/boost -iquote bazel-out/k8-opt/bin/external/boost -iquote external/io_opencensus_cpp -iquote bazel-out/k8-opt/bin/external/io_opencensus_cpp -iquote external/nlohmann_json -iquote bazel-out/k8-opt/bin/external/nlohmann_json -iquote external/com_github_grpc_grpc -iquote bazel-out/k8-opt/bin/external/com_github_grpc_grpc -iquote external/com_google_googleapis -iquote bazel-out/k8-opt/bin/external/com_google_googleapis -iquote external/upb -iquote bazel-out/k8-opt/bin/external/upb -iquote external/com_github_cares_cares -iquote bazel-out/k8-opt/bin/external/com_github_cares_cares -iquote external/boringssl -iquote bazel-out/k8-opt/bin/external/boringssl -iquote external/com_github_cncf_udpa -iquote bazel-out/k8-opt/bin/external/com_github_cncf_udpa -iquote external/com_envoyproxy_protoc_gen_validate -iquote bazel-out/k8-opt/bin/external/com_envoyproxy_protoc_gen_validate -iquote external/com_googlesource_code_re2 -iquote bazel-out/k8-opt/bin/external/com_googlesource_code_re2 -iquote external/envoy_api -iquote bazel-out/k8-opt/bin/external/envoy_api -iquote external/opencensus_proto -iquote bazel-out/k8-opt/bin/external/opencensus_proto -iquote external/io_opentelemetry_cpp -iquote bazel-out/k8-opt/bin/external/io_opentelemetry_cpp -iquote external/com_github_opentelemetry_proto -iquote bazel-out/k8-opt/bin/external/com_github_opentelemetry_proto -iquote external/com_github_jupp0r_prometheus_cpp -iquote bazel-out/k8-opt/bin/external/com_github_jupp0r_prometheus_cpp -iquote external/civetweb -iquote bazel-out/k8-opt/bin/external/civetweb -iquote external/com_github_madler_zlib -iquote bazel-out/k8-opt/bin/external/com_github_madler_zlib -iquote external/com_github_google_flatbuffers -iquote bazel-out/k8-opt/bin/external/com_github_google_flatbuffers -iquote external/io_opencensus_proto -iquote bazel-out/k8-opt/bin/external/io_opencensus_proto -iquote external/com_github_gflags_gflags -iquote bazel-out/k8-opt/bin/external/com_github_gflags_gflags -iquote external/com_github_redis_hiredis -iquote bazel-out/k8-opt/bin/external/com_github_redis_hiredis -iquote external/com_github_facebook_zstd -iquote bazel-out/k8-opt/bin/external/com_github_facebook_zstd -iquote external/net_zlib_zlib -iquote bazel-out/k8-opt/bin/external/net_zlib_zlib -iquote external/org_bzip_bzip2 -iquote bazel-out/k8-opt/bin/external/org_bzip_bzip2 -iquote external/org_lzma_lzma -iquote bazel-out/k8-opt/bin/external/org_lzma_lzma -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/core_worker_lib -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/common -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/id -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/constants -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/protobuf_nowkt -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/protobuf_lite -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/arena -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/arena_align -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/stubs/_virtual_includes/lite -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/port_def -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/arena_allocation_policy -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/arena_config -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/arena_cleanup -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/string_block -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/varint_shuffle -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/io/_virtual_includes/io -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/io/_virtual_includes/io_win32 -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/io/_virtual_includes/gzip_stream -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/stubs/_virtual_includes/stubs -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/io/_virtual_includes/printer -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/io/_virtual_includes/zero_copy_sink -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/io/_virtual_includes/tokenizer -Ibazel-out/k8-opt/bin/src/ray/thirdparty/_virtual_includes/sha256 -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/logging -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/macros -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/thread_utils -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/thread_checker -Ibazel-out/k8-opt/bin/external/com_github_spdlog/_virtual_includes/spdlog -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/random -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/visibility -Ibazel-out/k8-opt/bin/external/msgpack/_virtual_includes/msgpack -Ibazel-out/k8-opt/bin/external/msgpack/_virtual_includes/_msgpack -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/ray_object -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/buffer -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/status -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/macros -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/source_location -Ibazel-out/k8-opt/bin/src/ray/thirdparty/_virtual_includes/aligned_alloc -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/task_common -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/event_stats -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/metrics -Ibazel-out/k8-opt/bin/src/ray/stats/_virtual_includes/percentile_metric -Ibazel-out/k8-opt/bin/src/ray/stats/_virtual_includes/percentile_tracker -Ibazel-out/k8-opt/bin/src/ray/stats/_virtual_includes/bucket_histogram -Ibazel-out/k8-opt/bin/src/ray/stats/_virtual_includes/quadratic_bucket_scheme -Ibazel-out/k8-opt/bin/src/ray/stats/_virtual_includes/stats_metric -Ibazel-out/k8-opt/bin/src/ray/stats/_virtual_includes/tag_defs -Ibazel-out/k8-opt/bin/src/ray/observability/_virtual_includes/metric_interface -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/ray_config -Ibazel-out/k8-opt/bin/src/ray/common/monitors/_virtual_includes/cpu_monitor_utils -Ibazel-out/k8-opt/bin/src/ray/observability/_virtual_includes/open_telemetry_metric_recorder -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/common -Ibazel-out/k8-opt/bin/src/ray/rpc/authentication/_virtual_includes/authentication_mode -Ibazel-out/k8-opt/bin/src/ray/rpc/authentication/_virtual_includes/authentication_token_loader -Ibazel-out/k8-opt/bin/src/ray/rpc/authentication/_virtual_includes/authentication_token -Ibazel-out/k8-opt/bin/external/com_google_googleapis -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src -Ibazel-out/k8-opt/bin/external/com_github_grpc_grpc -Ibazel-out/k8-opt/bin/external/com_github_cncf_udpa -Ibazel-out/k8-opt/bin/external/com_envoyproxy_protoc_gen_validate -Ibazel-out/k8-opt/bin/external/envoy_api -Ibazel-out/k8-opt/bin/external/opencensus_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/_virtual_includes/protobuf -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/protobuf -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/any_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/api_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/source_context_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/type_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/duration_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/empty_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/field_mask_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/struct_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/timestamp_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/wrappers_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/compiler/_virtual_includes/importer -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/util/_virtual_includes/delimited_message_util -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/util/_virtual_includes/differencer -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/util/_virtual_includes/field_mask_util -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/util/_virtual_includes/json_util -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/json -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/parser -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/descriptor_traits -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/lexer -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/message_path -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/zero_copy_buffered_stream -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/untyped_message -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/util/_virtual_includes/type_resolver_util -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/descriptor_legacy -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/unparser -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/json/_virtual_includes/writer -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/util/_virtual_includes/time_util -Ibazel-out/k8-opt/bin/src/ray/rpc/authentication/_virtual_includes/k8s_constants -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/api/_virtual_includes/api -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/exporters/otlp/_virtual_includes/otlp_grpc_metric_exporter -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/exporters/otlp/_virtual_includes/otlp_recordable -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/sdk/src/logs/_virtual_includes/logs -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/sdk/_virtual_includes/headers -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/sdk/src/resource/_virtual_includes/resource -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/sdk/src/trace/_virtual_includes/trace -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/sdk/src/common/_virtual_includes/random -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/sdk/src/common/platform/_virtual_includes/fork -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/exporters/otlp/_virtual_includes/otlp_grpc_client -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/ext/_virtual_includes/headers -Ibazel-out/k8-opt/bin/external/io_opentelemetry_cpp/sdk/src/metrics/_virtual_includes/metrics -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/size_literals -Ibazel-out/k8-opt/bin/external/com_github_jupp0r_prometheus_cpp/pull/_virtual_includes/pull -Ibazel-out/k8-opt/bin/external/com_github_jupp0r_prometheus_cpp/core/_virtual_includes/core -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/time -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/function_descriptor -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/grpc_util -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/type_traits -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/runtime_env -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/fallback_strategy -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/label_selector -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/resource_set -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/fixed_point -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/scheduling_ids -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/scheduling_class_util -Ibazel-out/k8-opt/bin/src/ray/flatbuffers/_virtual_includes/node_manager_generated -Ibazel-out/k8-opt/bin/external/com_github_google_flatbuffers/_virtual_includes/runtime_cc -Ibazel-out/k8-opt/bin/external/com_github_google_flatbuffers/_virtual_includes/flatbuffers -Ibazel-out/k8-opt/bin/external/com_github_google_flatbuffers/src/_virtual_includes/flatbuffers -Ibazel-out/k8-opt/bin/external/com_github_google_flatbuffers/src/_virtual_includes/code_generators -Ibazel-out/k8-opt/bin/external/com_github_google_flatbuffers/src/_virtual_includes/generate_fbs -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/clock -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/container_util -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/process -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/cmd_line_utils -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/string_utils -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/status_or -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/compat -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/filesystem -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/process_interface -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/process_utils -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/core_worker_context -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/core_worker_options -Ibazel-out/k8-opt/bin/src/ray/gcs_rpc_client/_virtual_includes/gcs_client -Ibazel-out/k8-opt/bin/src/ray/gcs_rpc_client/_virtual_includes/accessor_factory_interface -Ibazel-out/k8-opt/bin/src/ray/gcs_rpc_client/_virtual_includes/actor_accessor_interface -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/placement_group -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/bundle_spec -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/cluster_resource_data -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/resource_instance_set -Ibazel-out/k8-opt/bin/src/ray/common/scheduling/_virtual_includes/placement_group_util -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/rpc_callback_types -Ibazel-out/k8-opt/bin/src/ray/gcs_rpc_client/_virtual_includes/gcs_client_context -Ibazel-out/k8-opt/bin/src/ray/gcs_rpc_client/_virtual_includes/rpc_client -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/retryable_grpc_client -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/grpc_client -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/client_call -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/metrics -Ibazel-out/k8-opt/bin/src/ray/asio/_virtual_includes/asio_chaos -Ibazel-out/k8-opt/bin/src/ray/asio/_virtual_includes/instrumented_io_context -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/rpc_chaos -Ibazel-out/k8-opt/bin/src/ray/rpc/authentication/_virtual_includes/token_auth_client_interceptor -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/network_util -Ibazel-out/k8-opt/bin/external/com_github_gflags_gflags/_virtual_includes/gflags -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/exponential_backoff -Ibazel-out/k8-opt/bin/src/ray/pubsub/_virtual_includes/gcs_subscriber -Ibazel-out/k8-opt/bin/src/ray/pubsub/_virtual_includes/subscriber_interface -Ibazel-out/k8-opt/bin/src/ray/gcs_rpc_client/_virtual_includes/gcs_client_defaults -Ibazel-out/k8-opt/bin/src/ray/gcs_rpc_client/_virtual_includes/actor_accessor_implementation -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/protobuf_utils -Ibazel-out/k8-opt/bin/src/ray/gcs/store_client/_virtual_includes/redis_store_client -Ibazel-out/k8-opt/bin/src/ray/gcs/store_client/_virtual_includes/store_client -Ibazel-out/k8-opt/bin/src/ray/asio/_virtual_includes/io_service_pool -Ibazel-out/k8-opt/bin/src/ray/gcs/postable/_virtual_includes/postable -Ibazel-out/k8-opt/bin/src/ray/gcs/postable/_virtual_includes/function_traits -Ibazel-out/k8-opt/bin/external/com_github_redis_hiredis/_virtual_includes/hiredis -Ibazel-out/k8-opt/bin/src/ray/stats/_virtual_includes/stats_lib -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/metrics_agent_client -Ibazel-out/k8-opt/bin/src/ray/pubsub/_virtual_includes/subscriber -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/sequencer -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/experimental_mutable_object_manager -Ibazel-out/k8-opt/bin/src/ray/object_manager/_virtual_includes/object_manager_common -Ibazel-out/k8-opt/bin/src/ray/object_manager/plasma/_virtual_includes/plasma_client -Ibazel-out/k8-opt/bin/src/ray/object_manager/plasma/_virtual_includes/fling -Ibazel-out/k8-opt/bin/src/ray/object_manager/plasma/_virtual_includes/object_manager_plasma_common -Ibazel-out/k8-opt/bin/src/ray/object_manager/plasma/_virtual_includes/plasma_generated -Ibazel-out/k8-opt/bin/src/ray/object_manager/plasma/_virtual_includes/plasma_connection_protocol -Ibazel-out/k8-opt/bin/src/ray/raylet_ipc_client/_virtual_includes/client_connection -Ibazel-out/k8-opt/bin/src/ray/object_manager/plasma/_virtual_includes/plasma_malloc -Ibazel-out/k8-opt/bin/src/ray/thirdparty/_virtual_includes/dlmalloc -Ibazel-out/k8-opt/bin/src/ray/object_manager/plasma/_virtual_includes/plasma_shared_memory -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/experimental_mutable_object_provider -Ibazel-out/k8-opt/bin/src/ray/raylet_rpc_client/_virtual_includes/raylet_client_interface -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/future_resolver -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/memory_store -Ibazel-out/k8-opt/bin/src/ray/raylet_ipc_client/_virtual_includes/raylet_ipc_client_interface -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/utils -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/reference_counter_interface -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/lease_policy -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/lease -Ibazel-out/k8-opt/bin/src/ray/pubsub/_virtual_includes/publisher_interface -Ibazel-out/k8-opt/bin/src/ray/core_worker_rpc_client/_virtual_includes/core_worker_client_pool -Ibazel-out/k8-opt/bin/src/ray/core_worker_rpc_client/_virtual_includes/core_worker_client_interface -Ibazel-out/k8-opt/bin/src/ray/raylet_rpc_client/_virtual_includes/raylet_client_pool -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/generator_waiter -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/grpc_service -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/grpc_server -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/server_call -Ibazel-out/k8-opt/bin/src/ray/rpc/authentication/_virtual_includes/authentication_token_validator -Ibazel-out/k8-opt/bin/src/ray/rpc/authentication/_virtual_includes/k8s_util -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/compiler/_virtual_includes/plugin_proto -Ibazel-out/k8-opt/bin/external/com_google_protobuf/src/google/protobuf/_virtual_includes/descriptor_proto -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/metrics -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/object_recovery_manager -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/task_manager -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/task_event_buffer -Ibazel-out/k8-opt/bin/src/ray/asio/_virtual_includes/periodical_runner -Ibazel-out/k8-opt/bin/src/ray/asio/_virtual_includes/periodical_runner_interface -Ibazel-out/k8-opt/bin/src/ray/rpc/_virtual_includes/event_aggregator_client -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/counter_map -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/mutex_protected -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/event -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/graceful_shutdown -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/task_manager_interface -Ibazel-out/k8-opt/bin/src/ray/core_worker/actor_management/_virtual_includes/actor_manager -Ibazel-out/k8-opt/bin/src/ray/core_worker/actor_management/_virtual_includes/actor_creator -Ibazel-out/k8-opt/bin/src/ray/core_worker/actor_management/_virtual_includes/actor_handle -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_submission/_virtual_includes/actor_task_submitter -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_submission/_virtual_includes/actor_submit_queue -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_submission/_virtual_includes/dependency_resolver -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_submission/_virtual_includes/out_of_order_actor_submit_queue -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_submission/_virtual_includes/sequential_actor_submit_queue -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_submission/_virtual_includes/task_submission_util -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/plasma_store_provider -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/profile_event -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/recovery_succession_manager -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/reference_counter -Ibazel-out/k8-opt/bin/src/ray/core_worker/_virtual_includes/shutdown_coordinator -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/task_receiver -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/common -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/concurrency_group_manager -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/fiber -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/thread_pool -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/normal_task_execution_queue -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/ordered_actor_task_execution_queue -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/actor_task_execution_queue_interface -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_execution/_virtual_includes/unordered_actor_task_execution_queue -Ibazel-out/k8-opt/bin/src/ray/core_worker/task_submission/_virtual_includes/normal_task_submitter -Ibazel-out/k8-opt/bin/src/ray/core_worker_rpc_client/_virtual_includes/core_worker_client -Ibazel-out/k8-opt/bin/src/ray/pubsub/_virtual_includes/posting_publisher -Ibazel-out/k8-opt/bin/src/ray/pubsub/_virtual_includes/publisher -Ibazel-out/k8-opt/bin/src/ray/raylet_ipc_client/_virtual_includes/raylet_ipc_client -Ibazel-out/k8-opt/bin/src/ray/common/_virtual_includes/flatbuf_utils -Ibazel-out/k8-opt/bin/src/ray/raylet_rpc_client/_virtual_includes/raylet_client_lib -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/env -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/path_utils -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/shared_lru -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/map_utils -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/stream_redirection -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/pipe_logger -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/spdlog_fd_sink -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/spdlog_newliner_sink -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/stream_redirection_options -Ibazel-out/k8-opt/bin/external/org_lzma_lzma/_virtual_includes/lzma -Ibazel-out/k8-opt/bin/src/ray/util/_virtual_includes/scoped_dup2_wrapper -Ibazel-out/k8-opt/bin/src/ray/util/internal/_virtual_includes/stream_redirection_handle -isystem external/zlib -isystem bazel-out/k8-opt/bin/external/zlib -isystem external/com_github_spdlog/include -isystem bazel-out/k8-opt/bin/external/com_github_spdlog/include -isystem external/com_google_googletest/googletest/include -isystem bazel-out/k8-opt/bin/external/com_google_googletest/googletest/include -isystem external/msgpack/include -isystem bazel-out/k8-opt/bin/external/msgpack/include -isystem external/boost -isystem bazel-out/k8-opt/bin/external/boost -isystem external/nlohmann_json/single_include -isystem bazel-out/k8-opt/bin/external/nlohmann_json/single_include -isystem external/com_github_grpc_grpc/api/include -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/api/include -isystem external/com_github_grpc_grpc/include -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/include -isystem external/com_github_grpc_grpc/src/core/ext/upb-generated -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/src/core/ext/upb-generated -isystem external/com_github_grpc_grpc/src/core/ext/upbdefs-generated -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/src/core/ext/upbdefs-generated -isystem external/com_github_grpc_grpc/src/core/api/include -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/src/core/api/include -isystem external/com_github_grpc_grpc/src/core/include -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/src/core/include -isystem external/com_github_grpc_grpc/src/core/src/core/ext/upb-generated -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/src/core/src/core/ext/upb-generated -isystem external/com_github_grpc_grpc/src/core/src/core/ext/upbdefs-generated -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/src/core/src/core/ext/upbdefs-generated -isystem external/com_github_cares_cares/include -isystem bazel-out/k8-opt/bin/external/com_github_cares_cares/include -isystem external/com_github_cares_cares -isystem bazel-out/k8-opt/bin/external/com_github_cares_cares -isystem external/boringssl/src/include -isystem bazel-out/k8-opt/bin/external/boringssl/src/include -isystem external/com_github_grpc_grpc/third_party/address_sorting/include -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/third_party/address_sorting/include -isystem external/com_github_grpc_grpc/third_party/xxhash -isystem bazel-out/k8-opt/bin/external/com_github_grpc_grpc/third_party/xxhash -isystem external/civetweb/include -isystem bazel-out/k8-opt/bin/external/civetweb/include -isystem external/com_github_madler_zlib -isystem bazel-out/k8-opt/bin/external/com_github_madler_zlib -isystem external/boost/libs/math/include_private -isystem bazel-out/k8-opt/bin/external/boost/libs/math/include_private -isystem external/com_github_redis_hiredis -isystem bazel-out/k8-opt/bin/external/com_github_redis_hiredis -isystem external/com_github_facebook_zstd/lib -isystem bazel-out/k8-opt/bin/external/com_github_facebook_zstd/lib -isystem external/net_zlib_zlib -isystem bazel-out/k8-opt/bin/external/net_zlib_zlib -isystem external/org_bzip_bzip2 -isystem bazel-out/k8-opt/bin/external/org_bzip_bzip2 -fPIC '-std=c++17' -DBAZEL_OPT -Wunused-result -Wconversion-null -Wno-misleading-indentation -Wimplicit-fallthrough -Wshadow -Werror -fno-canonical-system-headers -Wno-builtin-macro-redefined '-D__DATE__="redacted"' '-D__TIMESTAMP__="redacted"' '-D__TIME__="redacted"' -c src/ray/core_worker/core_worker.cc -o bazel-out/k8-opt/bin/src/ray/core_worker/_objs/core_worker_lib/core_worker.pic.o)
+  # Configuration: bdc7673096e52e1422a2f438a0b910409658dccb9f17763bcbb56529ddae4d6c
+  # Execution platform: @@internal_platforms_do_not_use//host:host
 
-  INFO: Analyzed target //:gen_ray_pkg (0 packages loaded, 0 targets configured).
-  INFO: Found 1 target...
-  Target //:gen_ray_pkg up-to-date:
-    bazel-bin/gen_ray_pkg
-  INFO: Elapsed time: 0.219s, Critical Path: 0.01s
-  INFO: 1 process: 1 internal.
-  INFO: Build completed successfully, 1 total action
-  INFO: Running command line: bazel-bin/gen_ray_pkg
-  INFO: Invocation ID: cadd4fcf-ca4a-4bcf-a868-8151402ecd4d
-  Computing main repo mapping:
-  Loading:
-  Loading: 0 packages loaded
-  Analyzing: target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured)
-  Analyzing: target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured)
+  Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+  src/ray/core_worker/core_worker.cc: In member function 'ray::Status ray::core::CoreWorker::GetObjectsInternal(const std::vector<ray::ObjectID>&, int64_t, std::vector<std::shared_ptr<ray::RayObject> >&, bool)':
+  src/ray/core_worker/core_worker.cc:1571:8: error: redeclaration of 'bool got_exception'
+   1571 |   bool got_exception = false;
+        |        ^~~~~~~~~~~~~
+  src/ray/core_worker/core_worker.cc:1564:8: note: 'bool got_exception' previously declared here
+   1564 |   bool got_exception = false;
+        |        ^~~~~~~~~~~~~
+  src/ray/core_worker/core_worker.cc:1584:15: error: declaration of 'it' shadows a previous local [-Werror=shadow]
+   1584 |     for (auto it = result_map.begin(); it != result_map.end();) {
+        |               ^~
+  src/ray/core_worker/core_worker.cc:1580:13: note: shadowed declaration is here
+   1580 |   for (auto it = result_map.begin(); it != result_map.end();) {
+        |             ^~
+  src/ray/core_worker/core_worker.cc:1731:32: error: qualified-id in declaration before '(' token
+   1731 |   Status CoreWorker::GetIfLocal(const std::vector<ObjectID> &ids,
+        |                                ^
+  src/ray/core_worker/core_worker.cc:1748:30: error: qualified-id in declaration before '(' token
+   1748 |   Status CoreWorker::Contains(
+        |                              ^
+  src/ray/core_worker/core_worker.cc:1763:26: error: qualified-id in declaration before '(' token
+   1763 |   Status CoreWorker::Wait(const std::vector<ObjectID> &ids,
+        |                          ^
+  src/ray/core_worker/core_worker.cc:1877:28: error: qualified-id in declaration before '(' token
+   1877 |   Status CoreWorker::Delete(const std::vector<ObjectID> &object_ids, bool local_only) {
+        |                            ^
+  src/ray/core_worker/core_worker.cc:1919:42: error: qualified-id in declaration before '(' token
+   1919 |   Status CoreWorker::GetLocationFromOwner(
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:2020:35: error: qualified-id in declaration before '(' token
+   2020 |   void CoreWorker::TriggerGlobalGC() {
+        |                                   ^
+  src/ray/core_worker/core_worker.cc:2029:36: error: qualified-id in declaration before '(' token
+   2029 |   Status CoreWorker::GetPlasmaUsage(std::string & output) {
+        |                                    ^
+  src/ray/core_worker/core_worker.cc:2037:33: error: qualified-id in declaration before '(' token
+   2037 |   TaskID CoreWorker::GetCallerId() const {
+        |                                 ^
+  src/ray/core_worker/core_worker.cc:2049:31: error: qualified-id in declaration before '(' token
+   2049 |   Status CoreWorker::PushError(const JobID &job_id,
+        |                               ^
+  src/ray/core_worker/core_worker.cc:2056:38: error: qualified-id in declaration before '(' token
+   2056 |   json CoreWorker::OverrideRuntimeEnv(const json &child,
+        |                                      ^
+  src/ray/core_worker/core_worker.cc:2078:85: error: qualified-id in declaration before '(' token
+   2078 |   std::shared_ptr<rpc::RuntimeEnvInfo> CoreWorker::OverrideTaskOrActorRuntimeEnvInfo(
+        |                                                                                     ^
+  src/ray/core_worker/core_worker.cc:2087:89: error: qualified-id in declaration before '(' token
+   2087 |   std::shared_ptr<rpc::RuntimeEnvInfo> CoreWorker::OverrideTaskOrActorRuntimeEnvInfoImpl(
+        |                                                                                         ^
+  src/ray/core_worker/core_worker.cc:2149:39: error: qualified-id in declaration before '(' token
+   2149 |   void CoreWorker::BuildCommonTaskSpec(
+        |                                       ^
+  src/ray/core_worker/core_worker.cc:2238:35: error: qualified-id in declaration before '(' token
+   2238 |   void CoreWorker::PrestartWorkers(const std::string &serialized_runtime_env_info,
+        |                                   ^
+  src/ray/core_worker/core_worker.cc:2256:59: error: qualified-id in declaration before '(' token
+   2256 |   std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
+        |                                                           ^
+  src/ray/core_worker/core_worker.cc:2355:33: error: qualified-id in declaration before '(' token
+   2355 |   Status CoreWorker::CreateActor(const RayFunction &function,
+        |                                 ^
+  src/ray/core_worker/core_worker.cc:2578:42: error: qualified-id in declaration before '(' token
+   2578 |   Status CoreWorker::CreatePlacementGroup(
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:2623:42: error: qualified-id in declaration before '(' token
+   2623 |   Status CoreWorker::RemovePlacementGroup(const PlacementGroupID &placement_group_id) {
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:2638:45: error: qualified-id in declaration before '(' token
+   2638 |   Status CoreWorker::WaitPlacementGroupReady(const PlacementGroupID &placement_group_id,
+        |                                             ^
+  src/ray/core_worker/core_worker.cc:2651:52: error: qualified-id in declaration before '(' token
+   2651 |   ObjectID CoreWorker::AsyncWaitPlacementGroupReady(
+        |                                                    ^
+  src/ray/core_worker/core_worker.cc:2710:37: error: qualified-id in declaration before '(' token
+   2710 |   Status CoreWorker::SubmitActorTask(
+        |                                     ^
+  src/ray/core_worker/core_worker.cc:2810:32: error: qualified-id in declaration before '(' token
+   2810 |   Status CoreWorker::CancelTask(
+        |                                ^
+  src/ray/core_worker/core_worker.cc:2853:34: error: qualified-id in declaration before '(' token
+   2853 |   bool CoreWorker::IsTaskCanceled(const TaskID &task_id) const {
+        |                                  ^
+  src/ray/core_worker/core_worker.cc:2860:54: error: qualified-id in declaration before '(' token
+   2860 |   bool CoreWorker::AddObjectOutOfScopeOrFreedCallback(
+        |                                                      ^
+  src/ray/core_worker/core_worker.cc:2870:54: error: qualified-id in declaration before '(' token
+   2870 |   bool CoreWorker::AddObjectOutOfScopeOrFreedCallback(
+        |                                                      ^
+  src/ray/core_worker/core_worker.cc:2881:42: error: qualified-id in declaration before '(' token
+   2881 |   Status CoreWorker::CheckObjectOwnedByUs(const ObjectID &object_id) const {
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:2892:54: error: qualified-id in declaration before '(' token
+   2892 |   bool CoreWorker::ShouldInterruptTaskForCancellation() const {
+        |                                                      ^
+  src/ray/core_worker/core_worker.cc:2903:36: error: qualified-id in declaration before '(' token
+   2903 |   Status CoreWorker::CancelChildren(const TaskID &task_id, bool force_kill) {
+        |                                    ^
+  src/ray/core_worker/core_worker.cc:2943:31: error: qualified-id in declaration before '(' token
+   2943 |   Status CoreWorker::KillActor(
+        |                               ^
+  src/ray/core_worker/core_worker.cc:2976:46: error: qualified-id in declaration before '(' token
+   2976 |   void CoreWorker::RemoveActorHandleReference(const ActorID &actor_id) {
+        |                                              ^
+  src/ray/core_worker/core_worker.cc:2981:80: error: qualified-id in declaration before '(' token
+   2981 |   std::optional<rpc::ActorTableData::ActorState> CoreWorker::GetLocalActorState(
+        |                                                                                ^
+  src/ray/core_worker/core_worker.cc:2986:56: error: qualified-id in declaration before '(' token
+   2986 |   ActorID CoreWorker::DeserializeAndRegisterActorHandle(const std::string &serialized,
+        |                                                        ^
+  src/ray/core_worker/core_worker.cc:2997:42: error: qualified-id in declaration before '(' token
+   2997 |   Status CoreWorker::SerializeActorHandle(
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:3005:64: error: qualified-id in declaration before '(' token
+   3005 |   std::shared_ptr<const ActorHandle> CoreWorker::GetActorHandle(const ActorID &actor_id)
+        |                                                                ^
+  src/ray/core_worker/core_worker.cc:3010:88: error: qualified-id in declaration before '(' token
+   3010 |   std::pair<std::shared_ptr<const ActorHandle>, Status> CoreWorker::GetNamedActorHandle(
+        |                                                                                        ^
+  src/ray/core_worker/core_worker.cc:3022:30: error: qualified-id in declaration before '(' token
+   3022 |   CoreWorker::ListNamedActors(bool all_namespaces) {
+        |                              ^
+  src/ray/core_worker/core_worker.cc:3039:39: error: qualified-id in declaration before '(' token
+   3039 |   std::string CoreWorker::GetActorName() const {
+        |                                       ^
+  src/ray/core_worker/core_worker.cc:3044:49: error: qualified-id in declaration before '(' token
+   3044 |   ResourceMappingType CoreWorker::GetResourceIDs() const {
+        |                                                 ^
+  src/ray/core_worker/core_worker.cc:3049:71: error: qualified-id in declaration before '(' token
+   3049 |   std::unique_ptr<worker::ProfileEvent> CoreWorker::CreateProfileEvent(
+        |                                                                       ^
+  src/ray/core_worker/core_worker.cc:3058:40: error: qualified-id in declaration before '(' token
+   3058 |   void CoreWorker::RunTaskExecutionLoop() {
+        |                                        ^
+  src/ray/core_worker/core_worker.cc:3091:42: error: qualified-id in declaration before '(' token
+   3091 |   Status CoreWorker::AllocateReturnObject(
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:3141:33: error: qualified-id in declaration before '(' token
+   3141 |   Status CoreWorker::ExecuteTask(
+        |                                 ^
+  src/ray/core_worker/core_worker.cc:3407:38: error: qualified-id in declaration before '(' token
+   3407 |   Status CoreWorker::SealReturnObject(const ObjectID &return_id,
+        |                                      ^
+  src/ray/core_worker/core_worker.cc:3429:43: error: qualified-id in declaration before '(' token
+   3429 |   void CoreWorker::AsyncDelObjectRefStream(const ObjectID &generator_id) {
+        |                                           ^
+  src/ray/core_worker/core_worker.cc:3442:49: error: qualified-id in declaration before '(' token
+   3442 |   void CoreWorker::TryDelPendingObjectRefStreams() {
+        |                                                 ^
+  src/ray/core_worker/core_worker.cc:3459:44: error: qualified-id in declaration before '(' token
+   3459 |   Status CoreWorker::TryReadObjectRefStream(const ObjectID &generator_id,
+        |                                            ^
+  src/ray/core_worker/core_worker.cc:3469:45: error: qualified-id in declaration before '(' token
+   3469 |   Status CoreWorker::TryReadObjectRefStreamN(const ObjectID &generator_id,
+        |                                             ^
+  src/ray/core_worker/core_worker.cc:3474:48: error: qualified-id in declaration before '(' token
+   3474 |   bool CoreWorker::StreamingGeneratorIsFinished(const ObjectID &generator_id) const {
+        |                                                ^
+  src/ray/core_worker/core_worker.cc:3478:72: error: qualified-id in declaration before '(' token
+   3478 |   std::pair<rpc::ObjectReference, bool> CoreWorker::PeekObjectRefStream(
+        |                                                                        ^
+  src/ray/core_worker/core_worker.cc:3487:86: error: qualified-id in declaration before '(' token
+   3487 |   std::vector<std::pair<rpc::ObjectReference, bool>> CoreWorker::PeekObjectRefStreamN(
+        |                                                                                      ^
+  src/ray/core_worker/core_worker.cc:3502:42: error: qualified-id in declaration before '(' token
+   3502 |   ObjectID CoreWorker::PeekObjectIdStream(const ObjectID &generator_id) {
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:3506:43: error: qualified-id in declaration before '(' token
+   3506 |   bool CoreWorker::PinExistingReturnObject(const ObjectID &return_id,
+        |                                           ^
+  src/ray/core_worker/core_worker.cc:3568:47: error: qualified-id in declaration before '(' token
+   3568 |   ObjectID CoreWorker::AllocateDynamicReturnId(
+        |                                               ^
+  src/ray/core_worker/core_worker.cc:3578:48: error: qualified-id in declaration before '(' token
+   3578 |   Status CoreWorker::ReportGeneratorItemReturns(
+        |                                                ^
+  src/ray/core_worker/core_worker.cc:3670:54: error: qualified-id in declaration before '(' token
+   3670 |   void CoreWorker::RegisterGeneratorBackpressureState(
+        |                                                      ^
+  src/ray/core_worker/core_worker.cc:3688:57: error: qualified-id in declaration before '(' token
+   3688 |   void CoreWorker::MarkGeneratorBackpressureTaskFinished(const ObjectID &generator_id) {
+        |                                                         ^
+  src/ray/core_worker/core_worker.cc:3717:53: error: qualified-id in declaration before '(' token
+   3717 |   bool CoreWorker::TeardownGeneratorBackpressureTask(const ObjectID &generator_id) {
+        |                                                     ^
+  src/ray/core_worker/core_worker.cc:3734:62: error: qualified-id in declaration before '(' token
+   3734 |   void CoreWorker::SetAsyncGeneratorBackpressureUnblockNotify(
+        |                                                              ^
+  src/ray/core_worker/core_worker.cc:3740:64: error: qualified-id in declaration before '(' token
+   3740 |   void CoreWorker::ClearAsyncGeneratorBackpressureUnblockNotify(
+        |                                                                ^
+  src/ray/core_worker/core_worker.cc:3746:59: error: qualified-id in declaration before '(' token
+   3746 |   void CoreWorker::NotifyAsyncGeneratorBackpressureUnblock(const ObjectID &generator_id,
+        |                                                           ^
+  src/ray/core_worker/core_worker.cc:3768:52: error: qualified-id in declaration before '(' token
+   3768 |   void CoreWorker::HandleReportGeneratorItemReturns(
+        |                                                    ^
+  src/ray/core_worker/core_worker.cc:3814:61: error: qualified-id in declaration before '(' token
+   3814 |   void CoreWorker::HandleUpdateGeneratorBackpressureConsumed(
+        |                                                             ^
+  src/ray/core_worker/core_worker.cc:3873:46: error: qualified-id in declaration before '(' token
+   3873 |   Status CoreWorker::GetAndPinArgsForExecutor(
+        |                                              ^
+  src/ray/core_worker/core_worker.cc:3967:34: error: qualified-id in declaration before '(' token
+   3967 |   void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
+        |                                  ^
+  src/ray/core_worker/core_worker.cc:4081:50: error: qualified-id in declaration before '(' token
+   4081 |   void CoreWorker::HandleActorCallArgWaitComplete(
+        |                                                  ^
+  src/ray/core_worker/core_worker.cc:4106:48: error: qualified-id in declaration before '(' token
+   4106 |   void CoreWorker::HandleRayletNotifyGCSRestart(
+        |                                                ^
+  src/ray/core_worker/core_worker.cc:4115:41: error: qualified-id in declaration before '(' token
+   4115 |   void CoreWorker::HandleGetObjectStatus(rpc::GetObjectStatusRequest request,
+        |                                         ^
+  src/ray/core_worker/core_worker.cc:4162:40: error: qualified-id in declaration before '(' token
+   4162 |   void CoreWorker::PopulateObjectStatus(const ObjectID &object_id,
+        |                                        ^
+  src/ray/core_worker/core_worker.cc:4211:49: error: qualified-id in declaration before '(' token
+   4211 |   void CoreWorker::HandleReportRecoveryCandidate(
+        |                                                 ^
+  src/ray/core_worker/core_worker.cc:4388:47: error: qualified-id in declaration before '(' token
+   4388 |   void CoreWorker::HandleInstallRecoveryHolder(
+        |                                               ^
+  src/ray/core_worker/core_worker.cc:4415:48: error: qualified-id in declaration before '(' token
+   4415 |   void CoreWorker::HandleCommitRecoveryManifest(
+        |                                                ^
+  src/ray/core_worker/core_worker.cc:4436:43: error: qualified-id in declaration before '(' token
+   4436 |   void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
+        |                                           ^
+  src/ray/core_worker/core_worker.cc:4517:41: error: qualified-id in declaration before '(' token
+   4517 |   void CoreWorker::RecoverBorrowedObject(const ObjectID &object_id,
+        |                                         ^
+  src/ray/core_worker/core_worker.cc:4541:38: error: qualified-id in declaration before '(' token
+   4541 |   void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
+        |                                      ^
+  src/ray/core_worker/core_worker.cc:4685:48: error: qualified-id in declaration before '(' token
+   4685 |   void CoreWorker::HandleApplyRecoveryTombstone(
+        |                                                ^
+  src/ray/core_worker/core_worker.cc:4709:44: error: qualified-id in declaration before '(' token
+   4709 |   void CoreWorker::PublishRecoveryTombstone(rpc::RecoveryManifest tombstone) {
+        |                                            ^
+  src/ray/core_worker/core_worker.cc:4768:55: error: qualified-id in declaration before '(' token
+   4768 |   void CoreWorker::PropagateRecoveryTombstoneToHolders(
+        |                                                       ^
+  src/ray/core_worker/core_worker.cc:4799:48: error: qualified-id in declaration before '(' token
+   4799 |   void CoreWorker::HandleWaitForActorRefDeleted(
+        |                                                ^
+  src/ray/core_worker/core_worker.cc:4838:74: error: qualified-id in declaration before '(' token
+   4838 |   StatusSet<StatusT::InvalidArgument> CoreWorker::ProcessSubscribeMessage(
+        |                                                                          ^
+  src/ray/core_worker/core_worker.cc:4866:43: error: qualified-id in declaration before '(' token
+   4866 |   void CoreWorker::HandlePubsubLongPolling(rpc::PubsubLongPollingRequest request,
+        |                                           ^
+  src/ray/core_worker/core_worker.cc:4877:44: error: qualified-id in declaration before '(' token
+   4877 |   void CoreWorker::HandlePubsubCommandBatch(rpc::PubsubCommandBatchRequest request,
+        |                                            ^
+  src/ray/core_worker/core_worker.cc:4915:51: error: qualified-id in declaration before '(' token
+   4915 |   void CoreWorker::HandleUpdateObjectLocationBatch(
+        |                                                   ^
+  src/ray/core_worker/core_worker.cc:4962:49: error: qualified-id in declaration before '(' token
+   4962 |   void CoreWorker::AddSpilledObjectLocationOwner(
+        |                                                 ^
+  src/ray/core_worker/core_worker.cc:4993:42: error: qualified-id in declaration before '(' token
+   4993 |   void CoreWorker::AddObjectLocationOwner(const ObjectID &object_id,
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:5024:45: error: qualified-id in declaration before '(' token
+   5024 |   void CoreWorker::RemoveObjectLocationOwner(const ObjectID &object_id,
+        |                                             ^
+  src/ray/core_worker/core_worker.cc:5032:51: error: qualified-id in declaration before '(' token
+   5032 |   void CoreWorker::ProcessSubscribeObjectLocations(
+        |                                                   ^
+  src/ray/core_worker/core_worker.cc:5051:56: error: qualified-id in declaration before '(' token
+   5051 |   CoreWorker::GetLocalOngoingLineageReconstructionTasks() const {
+        |                                                        ^
+  src/ray/core_worker/core_worker.cc:5055:45: error: qualified-id in declaration before '(' token
+   5055 |   Status CoreWorker::GetLocalObjectLocations(
+        |                                             ^
+  src/ray/core_worker/core_worker.cc:5070:49: error: qualified-id in declaration before '(' token
+   5070 |   void CoreWorker::HandleGetObjectLocationsOwner(
+        |                                                 ^
+  src/ray/core_worker/core_worker.cc:5086:49: error: qualified-id in declaration before '(' token
+   5086 |   void CoreWorker::ProcessSubscribeForRefRemoved(
+        |                                                 ^
+  src/ray/core_worker/core_worker.cc:5106:50: error: qualified-id in declaration before '(' token
+   5106 |   void CoreWorker::HandleRequestOwnerToCancelTask(
+        |                                                  ^
+  src/ray/core_worker/core_worker.cc:5116:36: error: qualified-id in declaration before '(' token
+   5116 |   void CoreWorker::HandleCancelTask(rpc::CancelTaskRequest request,
+        |                                    ^
+  src/ray/core_worker/core_worker.cc:5172:40: error: qualified-id in declaration before '(' token
+   5172 |   void CoreWorker::CancelTaskOnExecutor(TaskID task_id,
+        |                                        ^
+  src/ray/core_worker/core_worker.cc:5214:45: error: qualified-id in declaration before '(' token
+   5214 |   void CoreWorker::CancelActorTaskOnExecutor(WorkerID caller_worker_id,
+        |                                             ^
+  src/ray/core_worker/core_worker.cc:5283:35: error: qualified-id in declaration before '(' token
+   5283 |   void CoreWorker::HandleKillActor(rpc::KillActorRequest request,
+        |                                   ^
+  src/ray/core_worker/core_worker.cc:5317:53: error: qualified-id in declaration before '(' token
+   5317 |   void CoreWorker::HandleRegisterMutableObjectReader(
+        |                                                     ^
+  src/ray/core_worker/core_worker.cc:5332:51: error: qualified-id in declaration before '(' token
+   5332 |   int64_t CoreWorker::GetLocalMemoryStoreBytesUsed() const {
+        |                                                   ^
+  src/ray/core_worker/core_worker.cc:5337:44: error: qualified-id in declaration before '(' token
+   5337 |   void CoreWorker::HandleGetCoreWorkerStats(rpc::GetCoreWorkerStatsRequest request,
+        |                                            ^
+  src/ray/core_worker/core_worker.cc:5393:33: error: qualified-id in declaration before '(' token
+   5393 |   void CoreWorker::HandleLocalGC(rpc::LocalGCRequest request,
+        |                                 ^
+  src/ray/core_worker/core_worker.cc:5405:39: error: qualified-id in declaration before '(' token
+   5405 |   void CoreWorker::HandleDeleteObjects(rpc::DeleteObjectsRequest request,
+        |                                       ^
+  src/ray/core_worker/core_worker.cc:5416:32: error: qualified-id in declaration before '(' token
+   5416 |   Status CoreWorker::DeleteImpl(const std::vector<ObjectID> &object_ids,
+        |                                ^
+  src/ray/core_worker/core_worker.cc:5439:38: error: qualified-id in declaration before '(' token
+   5439 |   void CoreWorker::HandleSpillObjects(rpc::SpillObjectsRequest request,
+        |                                      ^
+  src/ray/core_worker/core_worker.cc:5456:47: error: qualified-id in declaration before '(' token
+   5456 |   void CoreWorker::HandleRestoreSpilledObjects(
+        |                                               ^
+  src/ray/core_worker/core_worker.cc:5487:46: error: qualified-id in declaration before '(' token
+   5487 |   void CoreWorker::HandleDeleteSpilledObjects(
+        |                                              ^
+  src/ray/core_worker/core_worker.cc:5508:30: error: qualified-id in declaration before '(' token
+   5508 |   void CoreWorker::HandleExit(rpc::ExitRequest request,
+        |                              ^
+  src/ray/core_worker/core_worker.cc:5560:41: error: qualified-id in declaration before '(' token
+   5560 |   void CoreWorker::HandleNumPendingTasks(rpc::NumPendingTasksRequest request,
+        |                                         ^
+  src/ray/core_worker/core_worker.cc:5568:37: error: qualified-id in declaration before '(' token
+   5568 |   void CoreWorker::YieldCurrentFiber(FiberEvent & event) {
+        |                                     ^
+  src/ray/core_worker/core_worker.cc:5574:28: error: qualified-id in declaration before '(' token
+   5574 |   void CoreWorker::GetAsync(const ObjectID &object_id,
+        |                            ^
+  src/ray/core_worker/core_worker.cc:5600:34: error: qualified-id in declaration before '(' token
+   5600 |   void CoreWorker::PlasmaCallback(const SetResultCallback &success,
+        |                                  ^
+  src/ray/core_worker/core_worker.cc:5639:43: error: qualified-id in declaration before '(' token
+   5639 |   void CoreWorker::HandlePlasmaObjectReady(rpc::PlasmaObjectReadyRequest request,
+        |                                           ^
+  src/ray/core_worker/core_worker.cc:5659:30: error: qualified-id in declaration before '(' token
+   5659 |   void CoreWorker::SetActorId(const ActorID &actor_id) {
+        |                              ^
+  src/ray/core_worker/core_worker.cc:5665:42: error: qualified-id in declaration before '(' token
+   5665 |   rpc::JobConfig CoreWorker::GetJobConfig() const {
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:5669:29: error: qualified-id in declaration before '(' token
+   5669 |   bool CoreWorker::IsExiting() const { return shutdown_coordinator_->ShouldEarlyExit(); }
+        |                             ^
+  src/ray/core_worker/core_worker.cc:5671:26: error: qualified-id in declaration before '(' token
+   5671 |   bool CoreWorker::IsIdle(size_t num_objects_with_references,
+        |                          ^
+  src/ray/core_worker/core_worker.cc:5678:26: error: qualified-id in declaration before '(' token
+   5678 |   bool CoreWorker::IsIdle() const {
+        |                          ^
+  src/ray/core_worker/core_worker.cc:5685:44: error: qualified-id in declaration before '(' token
+   5685 |   Status CoreWorker::WaitForActorRegistered(const std::vector<ObjectID> &ids) {
+        |                                            ^
+  src/ray/core_worker/core_worker.cc:5729:56: error: qualified-id in declaration before '(' token
+   5729 |   std::vector<ObjectID> CoreWorker::GetCurrentReturnIds(int num_returns,
+        |                                                        ^
+  src/ray/core_worker/core_worker.cc:5752:38: error: qualified-id in declaration before '(' token
+   5752 |   void CoreWorker::RecordTaskLogStart(const TaskID &task_id,
+        |                                      ^
+  src/ray/core_worker/core_worker.cc:5777:36: error: qualified-id in declaration before '(' token
+   5777 |   void CoreWorker::RecordTaskLogEnd(const TaskID &task_id,
+        |                                    ^
+  src/ray/core_worker/core_worker.cc:5798:46: error: qualified-id in declaration before '(' token
+   5798 |   void CoreWorker::UpdateTaskIsDebuggerPaused(const TaskID &task_id,
+        |                                              ^
+  src/ray/core_worker/core_worker.cc:5816:34: error: qualified-id in declaration before '(' token
+   5816 |   void CoreWorker::AsyncRetryTask(TaskSpecification & spec, uint32_t delay_ms) {
+        |                                  ^
+  src/ray/core_worker/core_worker.cc:5825:72: error: qualified-id in declaration before '(' token
+   5825 |   std::shared_ptr<RayletClientInterface> CoreWorker::GetRayletRpcClient(
+        |                                                                        ^
+  src/ray/core_worker/core_worker.cc:5840:42: error: qualified-id in declaration before '(' token
+   5840 |   void CoreWorker::FreeObjectOnNodesAsync(const ObjectID &object_id,
+        |                                          ^
+  src/ray/core_worker/core_worker.cc:5854:64: error: qualified-id in declaration before '(' token
+   5854 |   std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(const TaskID &task_id)
+        |                                                                ^
+  src/ray/core_worker/core_worker.cc:5923:45: error: qualified-id in declaration before '(' token
+   5923 |   void CoreWorker::PopulateRecoveryWitnesses(rpc::RecoveryManifest * manifest) const {
+        |                                             ^
+  src/ray/core_worker/core_worker.cc:5941:54: error: qualified-id in declaration before '(' token
+   5941 |   void CoreWorker::PublishRecoveryManifestToWitnesses(
+        |                                                      ^
+  src/ray/core_worker/core_worker.cc:6010:55: error: qualified-id in declaration before '(' token
+   6010 |   void CoreWorker::LookupRecoveryManifestFromWitnesses(
+        |                                                       ^
+  src/ray/core_worker/core_worker.cc: At global scope:
+  src/ray/core_worker/core_worker.cc:6072:2: error: expected '}' at end of input
+   6072 | }  // namespace ray::core
+        |  ^
+  src/ray/core_worker/core_worker.cc:58:21: note: to match this '{'
+     58 | namespace ray::core {
+        |                     ^
+  src/ray/core_worker/core_worker.cc: In member function 'ray::Status ray::core::CoreWorker::GetObjectsInternal(const std::vector<ray::ObjectID>&, int64_t, std::vector<std::shared_ptr<ray::RayObject> >&, bool)':
+  src/ray/core_worker/core_worker.cc:6072:1: error: control reaches end of non-void function [-Werror=return-type]
+   6072 | }  // namespace ray::core
+        | ^
+  src/ray/core_worker/core_worker.cc: At global scope:
+  src/ray/core_worker/core_worker.cc:170:5: error: 'int ray::core::{anonymous}::CompareRecoveryManifestVersions(const ray::rpc::RecoveryManifest&, const ray::rpc::RecoveryManifest&)' defined but not used [-Werror=unused-function]
+    170 | int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/ray/core_worker/core_worker.cc:153:10: error: 'uint64_t ray::core::{anonymous}::StableWitnessScore(const ray::TaskID&, const ray::NodeID&)' defined but not used [-Werror=unused-function]
+    153 | uint64_t StableWitnessScore(const TaskID &task_id, const NodeID &node_id) {
+        |          ^~~~~~~~~~~~~~~~~~
+  src/ray/core_worker/core_worker.cc:116:31: error: 'std::optional<ray::core::ObjectLocation> ray::core::{anonymous}::TryGetLocalObjectLocation(ray::core::ReferenceCounterInterface&, const ray::ObjectID&)' defined but not used [-Werror=unused-function]
+    116 | std::optional<ObjectLocation> TryGetLocalObjectLocation(
+        |                               ^~~~~~~~~~~~~~~~~~~~~~~~~
+  cc1plus: all warnings being treated as errors
+  INFO: Elapsed time: 13.912s, Critical Path: 13.57s
+  INFO: 2 processes: 2 internal.
+  ERROR: Build did NOT complete successfully
+  Traceback (most recent call last):
+    File "/home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 389, in <module>
+      main()
+    File "/home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 373, in main
+      json_out["return_val"] = hook(**hook_input["kwargs"])
+    File "/home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 303, in build_editable
+      return hook(wheel_directory, config_settings, metadata_directory)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/build_meta.py", line 474, in build_editable
+      return self._build_with_temp_dir(
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/build_meta.py", line 410, in _build_with_temp_dir
+      self.run_setup()
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/build_meta.py", line 520, in run_setup
+      super().run_setup(setup_script=setup_script)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/build_meta.py", line 317, in run_setup
+      exec(code, locals())
+    File "<string>", line 819, in <module>
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/__init__.py", line 117, in setup
+      return distutils.core.setup(**attrs)  # type: ignore[return-value]
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/_distutils/core.py", line 186, in setup
+      return run_commands(dist)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/_distutils/core.py", line 202, in run_commands
+      dist.run_commands()
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 1001, in run_commands
+      self.run_command(cmd)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/dist.py", line 1107, in run_command
+      super().run_command(command)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 1020, in run_command
+      cmd_obj.run()
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/command/editable_wheel.py", line 140, in run
+      self._create_wheel_file(bdist_wheel)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/command/editable_wheel.py", line 350, in _create_wheel_file
+      files, mapping = self._run_build_commands(dist_name, unpacked, lib, tmp)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/command/editable_wheel.py", line 273, in _run_build_commands
+      self._run_build_subcommands()
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/command/editable_wheel.py", line 300, in _run_build_subcommands
+      self.run_command(name)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/_distutils/cmd.py", line 341, in run_command
+      self.distribution.run_command(command)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/dist.py", line 1107, in run_command
+      super().run_command(command)
+    File "/tmp/pip-build-env-33j_w9nf/overlay/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 1020, in run_command
+      cmd_obj.run()
+    File "<string>", line 775, in run
+    File "<string>", line 730, in pip_run
+    File "<string>", line 676, in build
+    File "/home/tejas/anaconda3/envs/ray-dev/lib/python3.10/subprocess.py", line 369, in check_call
+      raise CalledProcessError(retcode, cmd)
+  subprocess.CalledProcessError: Command '['/home/tejas/bin/bazel', 'build', '--verbose_failures', '--local_resources=cpu=4', '--local_resources=memory=HOST_RAM*.35', '--disk_cache=/home/tejas/bazel-cache', '--', '//:gen_ray_pkg', '//cpp:gen_ray_cpp_pkg', '//:gen_redis_pkg']' returned non-zero exit status 1.
+  error: subprocess-exited-with-error
+  
+  × Building editable for ray (pyproject.toml) did not run successfully.
+  │ exit code: 1
+  ╰─> No available output.
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+  full command: /home/tejas/anaconda3/envs/ray-dev/bin/python /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py build_editable /tmp/tmpcg0y95wb
+  cwd: /home/tejas/Downloads/ray/python
+  Building editable for ray (pyproject.toml): finished with status 'error'
+  ERROR: Failed building editable for ray
+Failed to build ray
+error: failed-wheel-build-for-install
 
-  INFO: Analyzed target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured).
-  INFO: Found 1 target...
-  Target //cpp:gen_ray_cpp_pkg up-to-date:
-    bazel-bin/cpp/gen_ray_cpp_pkg
-  INFO: Elapsed time: 0.240s, Critical Path: 0.00s
-  INFO: 1 process: 1 internal.
-  INFO: Build completed successfully, 1 total action
-  INFO: Running command line: bazel-bin/cpp/gen_ray_cpp_pkg
-  INFO: Invocation ID: 965e15d7-ad69-4b36-b50b-150e157f6136
-  Computing main repo mapping:
-  Loading:
-  Loading: 0 packages loaded
-  Analyzing: target //:gen_redis_pkg (0 packages loaded, 0 targets configured)
-  Analyzing: target //:gen_redis_pkg (0 packages loaded, 0 targets configured)
-
-  INFO: Analyzed target //:gen_redis_pkg (0 packages loaded, 0 targets configured).
-  INFO: Found 1 target...
-  Target //:gen_redis_pkg up-to-date:
-    bazel-bin/gen_redis_pkg
-  INFO: Elapsed time: 0.258s, Critical Path: 0.00s
-  INFO: 1 process: 1 internal.
-  INFO: Build completed successfully, 1 total action
-  INFO: Running command line: bazel-bin/gen_redis_pkg
-  # of files copied to /tmp/tmpxi_2lorz.build-lib: 385
-  running egg_info
-  creating /tmp/tmpb7818esj.build-temp/ray.egg-info
-  writing /tmp/tmpb7818esj.build-temp/ray.egg-info/PKG-INFO
-  writing dependency_links to /tmp/tmpb7818esj.build-temp/ray.egg-info/dependency_links.txt
-  writing entry points to /tmp/tmpb7818esj.build-temp/ray.egg-info/entry_points.txt
-  writing requirements to /tmp/tmpb7818esj.build-temp/ray.egg-info/requires.txt
-  writing top-level names to /tmp/tmpb7818esj.build-temp/ray.egg-info/top_level.txt
-  writing manifest file '/tmp/tmpb7818esj.build-temp/ray.egg-info/SOURCES.txt'
-  reading manifest file '/tmp/tmpb7818esj.build-temp/ray.egg-info/SOURCES.txt'
-  reading manifest template 'MANIFEST.in'
-  adding license file 'LICENSE.txt'
-  writing manifest file '/tmp/tmpb7818esj.build-temp/ray.egg-info/SOURCES.txt'
-  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.attr' is absent from the `packages` configuration.
-  !!
-
-          ********************************************************************************
-          ############################
-          # Package would be ignored #
-          ############################
-          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.attr' as an importable package[^1],
-          but it is absent from setuptools' `packages` configuration.
-
-          This leads to an ambiguous overall configuration. If you want to distribute this
-          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.attr' is explicitly added
-          to the `packages` configuration field.
-
-          Alternatively, you can also rely on setuptools' discovery methods
-          (for example by using `find_namespace_packages(...)`/`find_namespace:`
-          instead of `find_packages(...)`/`find:`).
-
-          You can read more about "package discovery" on setuptools documentation page:
-
-          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
-
-          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.attr' to be distributed and are
-          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.attr' via
-          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
-          you can try to use `exclude_package_data`, or `include-package-data=False` in
-          combination with a more fine grained `package-data` configuration.
-
-          You can read more about "package data files" on setuptools documentation page:
-
-          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
-
-
-          [^1]: For Python, any directory (with suitable naming) can be imported,
-                even if it does not contain any `.py` files.
-                On the other hand, currently there is no concept of package data
-                directory, all directories are treated like packages.
-          ********************************************************************************
-
-  !!
-    check.warn(importable)
-  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.attrs' is absent from the `packages` configuration.
-  !!
-
-          ********************************************************************************
-          ############################
-          # Package would be ignored #
-          ############################
-          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.attrs' as an importable package[^1],
-          but it is absent from setuptools' `packages` configuration.
-
-          This leads to an ambiguous overall configuration. If you want to distribute this
-          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.attrs' is explicitly added
-          to the `packages` configuration field.
-
-          Alternatively, you can also rely on setuptools' discovery methods
-          (for example by using `find_namespace_packages(...)`/`find_namespace:`
-          instead of `find_packages(...)`/`find:`).
-
-          You can read more about "package discovery" on setuptools documentation page:
-
-          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
-
-          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.attrs' to be distributed and are
-          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.attrs' via
-          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
-          you can try to use `exclude_package_data`, or `include-package-data=False` in
-          combination with a more fine grained `package-data` configuration.
-
-          You can read more about "package data files" on setuptools documentation page:
-
-          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
-
-
-          [^1]: For Python, any directory (with suitable naming) can be imported,
-                even if it does not contain any `.py` files.
-                On the other hand, currently there is no concept of package data
-                directory, all directories are treated like packages.
-          ********************************************************************************
-
-  !!
-    check.warn(importable)
-  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' is absent from the `packages` configuration.
-  !!
-
-          ********************************************************************************
-          ############################
-          # Package would be ignored #
-          ############################
-          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' as an importable package[^1],
-          but it is absent from setuptools' `packages` configuration.
-
-          This leads to an ambiguous overall configuration. If you want to distribute this
-          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' is explicitly added
-          to the `packages` configuration field.
-
-          Alternatively, you can also rely on setuptools' discovery methods
-          (for example by using `find_namespace_packages(...)`/`find_namespace:`
-          instead of `find_packages(...)`/`find:`).
-
-          You can read more about "package discovery" on setuptools documentation page:
-
-          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
-
-          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' to be distributed and are
-          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' via
-          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
-          you can try to use `exclude_package_data`, or `include-package-data=False` in
-          combination with a more fine grained `package-data` configuration.
-
-          You can read more about "package data files" on setuptools documentation page:
-
-          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
-
-
-          [^1]: For Python, any directory (with suitable naming) can be imported,
-                even if it does not contain any `.py` files.
-                On the other hand, currently there is no concept of package data
-                directory, all directories are treated like packages.
-          ********************************************************************************
-
-  !!
-    check.warn(importable)
-  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray.includes' is absent from the `packages` configuration.
-  !!
-
-          ********************************************************************************
-          ############################
-          # Package would be ignored #
-          ############################
-          Python recognizes 'ray.includes' as an importable package[^1],
-          but it is absent from setuptools' `packages` configuration.
-
-          This leads to an ambiguous overall configuration. If you want to distribute this
-          package, please make sure that 'ray.includes' is explicitly added
-          to the `packages` configuration field.
-
-          Alternatively, you can also rely on setuptools' discovery methods
-          (for example by using `find_namespace_packages(...)`/`find_namespace:`
-          instead of `find_packages(...)`/`find:`).
-
-          You can read more about "package discovery" on setuptools documentation page:
-
-          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
-
-          If you don't want 'ray.includes' to be distributed and are
-          already explicitly excluding 'ray.includes' via
-          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
-          you can try to use `exclude_package_data`, or `include-package-data=False` in
-          combination with a more fine grained `package-data` configuration.
-
-          You can read more about "package data files" on setuptools documentation page:
-
-          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
-
-
-          [^1]: For Python, any directory (with suitable naming) can be imported,
-                even if it does not contain any `.py` files.
-                On the other hand, currently there is no concept of package data
-                directory, all directories are treated like packages.
-          ********************************************************************************
-
-  !!
-    check.warn(importable)
-  Editable install will be performed using a meta path finder.
-
-  Options like `package-data`, `include/exclude-package-data` or
-  `packages.find.exclude/include` may have no effect.
-
-  adding '__editable___ray_3_0_0_dev0_finder.py'
-  adding '__editable__.ray-3.0.0.dev0.pth'
-  creating '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl' and adding '/tmp/tmp1i8t85w0ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl' to it
-  adding 'ray-3.0.0.dev0.dist-info/licenses/LICENSE.txt'
-  adding 'ray-3.0.0.dev0.dist-info/METADATA'
-  adding 'ray-3.0.0.dev0.dist-info/WHEEL'
-  adding 'ray-3.0.0.dev0.dist-info/entry_points.txt'
-  adding 'ray-3.0.0.dev0.dist-info/top_level.txt'
-  adding 'ray-3.0.0.dev0.dist-info/RECORD'
-  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/editable_wheel.py:352: InformationOnly: Editable installation.
-  !!
-
-          ********************************************************************************
-          Please be careful with folders in your working directory with the same
-          name as your package as they may take precedence during imports.
-          ********************************************************************************
-
-  !!
-    with strategy, WheelFile(wheel_path, "w") as wheel_obj:
-  Building editable for ray (pyproject.toml): finished with status 'done'
-  Created wheel for ray: filename=ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl size=8061 sha256=78bfd8a15dfa87325ea0e96c686aab60344e62a63b28bbc56143355c9516e0b7
-  Stored in directory: /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa
-Successfully built ray
-Installing collected packages: ray
-  Attempting uninstall: ray
-    Found existing installation: ray 3.0.0.dev0
-    Uninstalling ray-3.0.0.dev0:
-      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/ray
-      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/serve
-      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/tune
-      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__editable__.ray-3.0.0.dev0.pth
-      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__editable___ray_3_0_0_dev0_finder.py
-      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__pycache__/__editable___ray_3_0_0_dev0_finder.cpython-310.pyc
-      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/ray-3.0.0.dev0.dist-info/
-      Successfully uninstalled ray-3.0.0.dev0
-  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/ray to 775
-  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/serve to 775
-  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/tune to 775
-Successfully installed ray-3.0.0.dev0
+× Failed to build installable wheels for some pyproject.toml based projects
+╰─> ray
