@@ -280,9 +280,17 @@ void ObjectManager::MarkObjectFailed(const ObjectID &object_id,
       meta.length(),
       &data,
       plasma::flatbuf::ObjectSource::ErrorStoredByRaylet);
-  if (status.ok()) {
-    status = buffer_pool_store_client_->Seal(object_id);
-  }
+    if (status.ok()) {
+      status = buffer_pool_store_client_->Seal(object_id);
+    }
+
+    // Seal() releases the extra reference taken to keep the object
+    // alive until sealing completes. Release the remaining creator
+    // reference so that a later FreeObjects request can delete the
+    // terminal error object.
+    if (status.ok()) {
+      status = buffer_pool_store_client_->Release(object_id);
+    }
   if (!status.ok() && !status.IsObjectExists()) {
     std::ostringstream stream;
     stream << "A plasma error (" << status.ToString()
