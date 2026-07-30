@@ -7,6 +7,10 @@ import ray
 from ray.cluster_utils import Cluster
 
 
+from ray.util.scheduling_strategies import (
+    NodeAffinitySchedulingStrategy,
+)
+
 PAYLOAD_SIZE = 2 * 1024 * 1024
 
 
@@ -97,6 +101,10 @@ def run_failure_case(failure_mode: str) -> None:
         resources={"producer_node": 1},
     )
 
+    producer_node_id = producer_node.node_id
+
+
+
     cluster.add_node(
         num_cpus=1,
         resources={"rank2_node": 1},
@@ -117,9 +125,15 @@ def run_failure_case(failure_mode: str) -> None:
 
     @ray.remote(max_restarts=0)
     class Owner:
+        def __init__(self, producer_node_id):
+            self.producer_node_id = producer_node_id
+
         def create(self):
             payload_ref, pid_ref = produce.options(
-                resources={"producer_node": 0.01},
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=self.producer_node_id,
+                    soft=True,
+                ),
                 num_returns=2,
             ).remote()
 
@@ -144,10 +158,11 @@ def run_failure_case(failure_mode: str) -> None:
             return ray.get(self.ref)
 
     try:
+
         owner = Owner.options(
             resources={"owner_node": 0.01},
-        ).remote()
-
+        ).remote(producer_node_id)
+        
         nested = ray.get(
             owner.create.remote()
         )
