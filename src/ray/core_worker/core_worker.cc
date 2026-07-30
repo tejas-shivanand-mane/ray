@@ -506,7 +506,7 @@ CoreWorker::CoreWorker(
                     },
                     "CoreWorker.PublishRecoveryTombstone");
               });
-              
+
           if (future_resolver_ != nullptr) {
             std::weak_ptr<RecoverySuccessionManager> weak_recovery_manager =
                 recovery_succession_manager_;
@@ -4678,20 +4678,48 @@ void CoreWorker::PublishRecoveryTombstone(
   const TaskID task_id =
       TaskID::FromBinary(tombstone.task_id());
 
+  // Keep a separate copy for the asynchronous callback.
+  // Do not move the same object that is passed as the RPC manifest.
+  rpc::RecoveryManifest callback_tombstone;
+  callback_tombstone.CopyFrom(tombstone);
+
   PublishRecoveryManifestToWitnesses(
       tombstone,
       [this,
        task_id,
-       tombstone = std::move(tombstone)](
+       tombstone = std::move(callback_tombstone)](
           bool stored,
           std::optional<rpc::RecoveryManifest>
               newer_manifest) mutable {
         if (!stored) {
+          RAY_LOG(WARNING).WithField(task_id)
+              << "Failed to publish recovery succession "
+              << "tombstone to witnesses";
+
+          if (newer_manifest.has_value()) {
+            RAY_LOG(WARNING).WithField(task_id)
+                << "Witness returned newer recovery manifest: "
+                << "generation="
+                << newer_manifest->version().generation()
+                << ", coordinator_rank="
+                << newer_manifest->version()
+                       .coordinator_rank()
+                << ", tombstoned="
+                << newer_manifest->tombstoned();
+          }
+
           if (newer_manifest.has_value() &&
               newer_manifest->tombstoned()) {
-            recovery_succession_manager_
-                ->ApplyRecoveryTombstone(
-                    newer_manifest.value());
+            const bool applied_newer =
+                recovery_succession_manager_
+                    ->ApplyRecoveryTombstone(
+                        newer_manifest.value());
+
+            if (applied_newer) {
+              RAY_LOG(INFO).WithField(task_id)
+                  << "Applied newer recovery succession "
+                  << "tombstone returned by witness";
+            }
           }
 
           recovery_tombstones_in_flight_.erase(
@@ -4705,6 +4733,10 @@ void CoreWorker::PublishRecoveryTombstone(
                     tombstone);
 
         if (!applied) {
+          RAY_LOG(WARNING).WithField(task_id)
+              << "Witness stored recovery tombstone, "
+              << "but local tombstone application failed";
+
           recovery_tombstones_in_flight_.erase(
               task_id);
           return;

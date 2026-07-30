@@ -7,6 +7,9 @@ from ray.cluster_utils import Cluster
 from ray._private.internal_api import global_gc
 
 
+PAYLOAD_SIZE = 2 * 1024 * 1024
+
+
 def find_log_lines(
     session_dirs: set[Path],
     text: str,
@@ -30,7 +33,9 @@ def find_log_lines(
 
             for line in content.splitlines():
                 if text in line:
-                    matches.append(f"{path.name}: {line}")
+                    matches.append(
+                        f"{path.name}: {line}"
+                    )
 
     return matches
 
@@ -68,17 +73,16 @@ ray.init(address=cluster.address)
 
 @ray.remote(max_retries=2)
 def produce():
-    return 42
+    # Force the task return into the plasma object store.
+    return b"x" * PAYLOAD_SIZE
 
 
-# max_retries=0 prevents these tasks from retaining produced_ref
-# inside their reconstructable lineage.
 @ray.remote(
     resources={"holder_a_node": 0.01},
     max_retries=0,
 )
 def holder_a(wrapped_ref):
-    return ray.get(wrapped_ref[0])
+    return len(ray.get(wrapped_ref[0]))
 
 
 @ray.remote(
@@ -86,7 +90,7 @@ def holder_a(wrapped_ref):
     max_retries=0,
 )
 def holder_b(wrapped_ref):
-    return ray.get(wrapped_ref[0])
+    return len(ray.get(wrapped_ref[0]))
 
 
 try:
@@ -94,18 +98,22 @@ try:
         resources={"producer_node": 0.01},
     ).remote()
 
-    assert ray.get(produced_ref) == 42
+    assert len(ray.get(produced_ref)) == PAYLOAD_SIZE
 
-    holder_a_result = holder_a.remote([produced_ref])
-    holder_b_result = holder_b.remote([produced_ref])
+    holder_a_result = holder_a.remote(
+        [produced_ref]
+    )
 
-    assert ray.get(holder_a_result) == 42
-    assert ray.get(holder_b_result) == 42
+    holder_b_result = holder_b.remote(
+        [produced_ref]
+    )
 
-    # Allow candidate reports, holder admission, and witness publication.
+    assert ray.get(holder_a_result) == PAYLOAD_SIZE
+    assert ray.get(holder_b_result) == PAYLOAD_SIZE
+
+    # Allow holder admission and witness publication.
     time.sleep(5)
 
-    # Release the holder-task outputs first so their task lineages can be removed.
     del holder_a_result
     del holder_b_result
 
@@ -114,7 +122,6 @@ try:
 
     time.sleep(3)
 
-    # Now release the actual recoverable object.
     del produced_ref
 
     gc.collect()
@@ -125,13 +132,19 @@ try:
     gc.collect()
     global_gc()
 
-    # Allow distributed reference deletion and periodic cleanup.
-    time.sleep(12)
+    # Allow reference deletion, callback execution,
+    # witness publication, and holder propagation.
+    time.sleep(15)
 
     session_dirs = {
         Path(node.get_session_dir_path())
         for node in cluster.list_all_nodes()
     }
+
+    lineage_released = find_log_lines(
+        session_dirs,
+        "Task lineage released; publishing recovery tombstone",
+    )
 
     published = find_log_lines(
         session_dirs,
@@ -143,25 +156,36 @@ try:
         "Applied recovery succession tombstone",
     )
 
-    cleanup_scans = find_log_lines(
+    tombstone_logs = find_log_lines(
         session_dirs,
-        "Phase 6 cleanup scan",
+        "tombstone",
     )
 
-    if cleanup_scans:
-        print("Cleanup scans:")
+    if lineage_released:
+        print("Lineage-release callback:")
 
-        for line in cleanup_scans:
+        for line in lineage_released:
             print(f"  {line}")
 
     if not published:
+        print("All tombstone-related logs:")
+
+        for line in tombstone_logs:
+            print(f"  {line}")
+
         raise AssertionError(
-            "No owner-side tombstone publication was found."
+            "The lineage-release callback did not result "
+            "in successful tombstone publication."
         )
 
     if not applied:
+        print("All tombstone-related logs:")
+
+        for line in tombstone_logs:
+            print(f"  {line}")
+
         raise AssertionError(
-            "No holder applied the tombstone."
+            "No committed holder applied the tombstone."
         )
 
     print("Tombstone publication:")
