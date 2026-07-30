@@ -1,307 +1,444 @@
-Using pip 25.1 from /home/tejas/anaconda3/lib/python3.13/site-packages/pip (python 3.13)
+Using pip 26.0.1 from /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip (python 3.10)
 Obtaining file:///home/tejas/Downloads/ray/python
-  Preparing metadata (setup.py): started
-  Running command python setup.py egg_info
-  /home/tejas/anaconda3/lib/python3.13/site-packages/setuptools/__init__.py:85: _DeprecatedInstaller: setuptools.installer and fetch_build_eggs are deprecated.
-  !!
+  Installing build dependencies: started
+  Running command installing build dependencies
+  Using pip 26.0.1 from /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip (python 3.10)
+  Collecting setuptools>=40.8.0
+    Obtaining dependency information for setuptools>=40.8.0 from https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl.metadata
+    Using cached setuptools-83.0.0-py3-none-any.whl.metadata (6.6 kB)
+  Using cached setuptools-83.0.0-py3-none-any.whl (1.0 MB)
+  Installing collected packages: setuptools
+  Successfully installed setuptools-83.0.0
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Running command Checking if build backend supports build_editable
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Running command Getting requirements to build editable
+  Getting requirements to build editable: finished with status 'done'
+  Installing backend dependencies: started
+  Running command installing backend dependencies
+  Using pip 26.0.1 from /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/pip (python 3.10)
+  Collecting cython>=3.0.12
+    Obtaining dependency information for cython>=3.0.12 from https://files.pythonhosted.org/packages/df/9b/b4ff8cdff357ba0f41791e044a2a95898d0768b20e9247823decf5eabb5e/cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata
+    Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.6 kB)
+  Collecting pip
+    Obtaining dependency information for pip from https://files.pythonhosted.org/packages/62/36/a3aed958d60531cb442b7ab4596cda7b3621cfb916f8ae1d6769795c7dc1/pip-26.2-py3-none-any.whl.metadata
+    Using cached pip-26.2-py3-none-any.whl.metadata (4.6 kB)
+  Collecting wheel
+    Obtaining dependency information for wheel from https://files.pythonhosted.org/packages/87/1b/9e33c09813d65e248f7f773119148a612516a4bea93e9c6f545f78455b7c/wheel-0.47.0-py3-none-any.whl.metadata
+    Using cached wheel-0.47.0-py3-none-any.whl.metadata (2.3 kB)
+  Collecting packaging>=24.0 (from wheel)
+    Obtaining dependency information for packaging>=24.0 from https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl.metadata
+    Using cached packaging-26.2-py3-none-any.whl.metadata (3.5 kB)
+  Using cached cython-3.2.9-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.5 MB)
+  Using cached pip-26.2-py3-none-any.whl (1.8 MB)
+  Using cached wheel-0.47.0-py3-none-any.whl (32 kB)
+  Using cached packaging-26.2-py3-none-any.whl (100 kB)
+  Installing collected packages: pip, packaging, cython, wheel
+    Creating /tmp/pip-build-env-2xxpcsw_/normal/bin
+    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/pip to 775
+    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/pip3 to 775
+    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/pip3.10 to 775
+    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/cygdb to 775
+    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/cython to 775
+    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/cythonize to 775
+    changing mode of /tmp/pip-build-env-2xxpcsw_/normal/bin/wheel to 775
 
-          ********************************************************************************
-          Requirements should be satisfied by a PEP 517 installer.
-          If you are using pip, you can try `pip install --use-pep517`.
-          ********************************************************************************
-
-  !!
-    dist.fetch_build_eggs(dist.setup_requires)
-  running egg_info
-  creating /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info
-  writing /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/PKG-INFO
-  writing dependency_links to /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/dependency_links.txt
-  writing entry points to /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/entry_points.txt
-  writing requirements to /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/requires.txt
-  writing top-level names to /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/top_level.txt
-  writing manifest file '/tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/SOURCES.txt'
-  reading manifest file '/tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/SOURCES.txt'
+  Successfully installed cython-3.2.9 packaging-26.2 pip-26.2 wheel-0.47.0
+  Installing backend dependencies: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Running command Preparing editable metadata (pyproject.toml)
+  running dist_info
+  creating /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info
+  writing /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/SOURCES.txt'
   reading manifest template 'MANIFEST.in'
   adding license file 'LICENSE.txt'
-  writing manifest file '/tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/SOURCES.txt'
-  Preparing metadata (setup.py): finished with status 'done'
-Requirement already satisfied: click>=7.0 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (8.4.2)
-Requirement already satisfied: filelock in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (3.29.7)
-Requirement already satisfied: jsonschema in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (4.23.0)
-Requirement already satisfied: msgpack<2.0.0,>=1.0.0 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (1.0.3)
-Requirement already satisfied: packaging>=24.2 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (24.2)
-Requirement already satisfied: protobuf>=3.20.3 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (5.29.3)
-Requirement already satisfied: pyyaml in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (6.0.3)
-Requirement already satisfied: requests in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (2.32.3)
-Requirement already satisfied: attrs>=22.2.0 in /home/tejas/anaconda3/lib/python3.13/site-packages (from jsonschema->ray==3.0.0.dev0) (24.3.0)
-Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /home/tejas/anaconda3/lib/python3.13/site-packages (from jsonschema->ray==3.0.0.dev0) (2023.7.1)
-Requirement already satisfied: referencing>=0.28.4 in /home/tejas/anaconda3/lib/python3.13/site-packages (from jsonschema->ray==3.0.0.dev0) (0.30.2)
-Requirement already satisfied: rpds-py>=0.7.1 in /home/tejas/anaconda3/lib/python3.13/site-packages (from jsonschema->ray==3.0.0.dev0) (0.22.3)
-Requirement already satisfied: charset-normalizer<4,>=2 in /home/tejas/anaconda3/lib/python3.13/site-packages (from requests->ray==3.0.0.dev0) (3.3.2)
-Requirement already satisfied: idna<4,>=2.5 in /home/tejas/anaconda3/lib/python3.13/site-packages (from requests->ray==3.0.0.dev0) (3.7)
-Requirement already satisfied: urllib3<3,>=1.21.1 in /home/tejas/anaconda3/lib/python3.13/site-packages (from requests->ray==3.0.0.dev0) (2.3.0)
-Requirement already satisfied: certifi>=2017.4.17 in /home/tejas/anaconda3/lib/python3.13/site-packages (from requests->ray==3.0.0.dev0) (2025.4.26)
+  writing manifest file '/tmp/pip-modern-metadata-ykncb2u6/ray.egg-info/SOURCES.txt'
+  creating '/tmp/pip-modern-metadata-ykncb2u6/ray-3.0.0.dev0.dist-info'
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: click>=7.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (8.3.1)
+Requirement already satisfied: filelock in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (3.25.2)
+Requirement already satisfied: jsonschema in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (4.26.0)
+Requirement already satisfied: msgpack<2.0.0,>=1.0.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (1.1.2)
+Requirement already satisfied: packaging>=24.2 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (26.0)
+Requirement already satisfied: protobuf>=3.20.3 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (6.33.6)
+Requirement already satisfied: pyyaml in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (6.0.3)
+Requirement already satisfied: requests in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from ray==3.0.0.dev0) (2.32.5)
+Requirement already satisfied: attrs>=22.2.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from jsonschema->ray==3.0.0.dev0) (26.1.0)
+Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from jsonschema->ray==3.0.0.dev0) (2025.9.1)
+Requirement already satisfied: referencing>=0.28.4 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from jsonschema->ray==3.0.0.dev0) (0.37.0)
+Requirement already satisfied: rpds-py>=0.25.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from jsonschema->ray==3.0.0.dev0) (0.30.0)
+Requirement already satisfied: typing-extensions>=4.4.0 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from referencing>=0.28.4->jsonschema->ray==3.0.0.dev0) (4.15.0)
+Requirement already satisfied: charset_normalizer<4,>=2 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from requests->ray==3.0.0.dev0) (3.4.6)
+Requirement already satisfied: idna<4,>=2.5 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from requests->ray==3.0.0.dev0) (3.11)
+Requirement already satisfied: urllib3<3,>=1.21.1 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from requests->ray==3.0.0.dev0) (2.6.3)
+Requirement already satisfied: certifi>=2017.4.17 in /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages (from requests->ray==3.0.0.dev0) (2026.2.25)
+Building wheels for collected packages: ray
+  Building editable for ray (pyproject.toml): started
+  Running command Building editable for ray (pyproject.toml)
+  running editable_wheel
+  creating /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info
+  writing /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/SOURCES.txt'
+  reading manifest template 'MANIFEST.in'
+  adding license file 'LICENSE.txt'
+  writing manifest file '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray.egg-info/SOURCES.txt'
+  creating '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray-3.0.0.dev0.dist-info'
+  creating /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray-3.0.0.dev0.dist-info/WHEEL
+  running build_py
+  running build_ext
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama-0.4.6.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/psutil-7.2.2.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/psutil already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohttp-3.14.3.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohttp already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/yarl-1.24.5.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/yarl already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiosignal-1.4.0.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiosignal already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/multidict-6.7.1.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/multidict already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohappyeyeballs-2.7.1.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohappyeyeballs already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/async_timeout-5.0.1.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/async_timeout already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attrs-26.1.0.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attrs already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attr already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/frozenlist-1.8.0.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/frozenlist already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/idna-3.18.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/idna already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/propcache-0.5.2.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/propcache already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/__pycache__ already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/typing_extensions-4.16.0.dist-info already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/typing_extensions.py already exists. Specify --upgrade to force replacement.
+  WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/bin already exists. Specify --upgrade to force replacement.
+  INFO: Invocation ID: 9cdd24f7-2d8e-4e4f-a8bd-e385367c9866
+  Computing main repo mapping:
+  Loading:
+  Loading: 0 packages loaded
+  Analyzing: 3 targets (0 packages loaded, 0 targets configured)
+  Analyzing: 3 targets (0 packages loaded, 0 targets configured)
+
+  INFO: Analyzed 3 targets (1 packages loaded, 205 targets configured).
+  [11,892 / 11,918] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 0s disk-cache, processwrapper-sandbox ... (16 actions, 4 running)
+  [11,892 / 11,918] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 2s disk-cache, processwrapper-sandbox ... (16 actions, 4 running)
+  [11,892 / 11,918] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 11s disk-cache, processwrapper-sandbox ... (16 actions, 4 running)
+  [11,892 / 11,918] Compiling cpp/src/ray/runtime/task/native_task_submitter.cc; 18s disk-cache, processwrapper-sandbox ... (16 actions, 5 running)
+  [11,895 / 11,918] Compiling src/ray/core_worker/core_worker.cc; 19s disk-cache, processwrapper-sandbox ... (13 actions, 4 running)
+  [11,895 / 11,918] Compiling src/ray/core_worker/core_worker.cc; 29s disk-cache, processwrapper-sandbox ... (13 actions, 4 running)
+  [11,895 / 11,918] Compiling src/ray/core_worker/core_worker.cc; 32s disk-cache, processwrapper-sandbox ... (13 actions, 5 running)
+  [11,896 / 11,918] [Sched] Compiling src/ray/core_worker/core_worker_shutdown_executor.cc; 33s ... (12 actions, 4 running)
+  [11,896 / 11,918] [Sched] Compiling src/ray/core_worker/core_worker_shutdown_executor.cc; 37s ... (12 actions, 5 running)
+  [11,898 / 11,918] [Sched] Compiling src/ray/core_worker/core_worker_shutdown_executor.cc; 38s ... (10 actions, 4 running)
+  [11,899 / 11,918] [Sched] Compiling cpp/src/ray/runtime/object/object_store.cc; 39s ... (9 actions, 4 running)
+  [11,899 / 11,918] [Sched] Compiling cpp/src/ray/runtime/object/object_store.cc; 50s ... (9 actions, 4 running)
+  [11,900 / 11,918] [Sched] Compiling cpp/src/ray/runtime/object/object_store.cc; 52s ... (8 actions, 4 running)
+  [11,900 / 11,918] [Sched] Compiling cpp/src/ray/runtime/task/local_mode_task_submitter.cc; 56s ... (8 actions, 5 running)
+  [11,901 / 11,918] [Sched] Compiling src/ray/internal/internal.cc; 57s ... (7 actions, 5 running)
+  [11,902 / 11,918] [Sched] Compiling python/ray/_raylet.cpp; 58s ... (6 actions, 5 running)
+  [11,903 / 11,918] [Sched] Compiling python/ray/_raylet.cpp; 59s ... (5 actions, 4 running)
+  [11,903 / 11,918] [Sched] Compiling python/ray/_raylet.cpp; 68s ... (5 actions, 4 running)
+  [11,903 / 11,918] Compiling src/ray/core_worker/core_worker_process.cc; 23s disk-cache, processwrapper-sandbox ... (5 actions running)
+  [11,904 / 11,918] Compiling src/ray/core_worker/core_worker_process.cc; 25s disk-cache, processwrapper-sandbox ... (4 actions running)
+  [11,908 / 11,918] Compiling src/ray/core_worker/core_worker_process.cc; 27s disk-cache, processwrapper-sandbox ... (2 actions running)
+  [11,910 / 11,918] Compiling python/ray/_raylet.cpp; 4s disk-cache, processwrapper-sandbox ... (2 actions running)
+  [11,911 / 11,918] Compiling python/ray/_raylet.cpp; 6s disk-cache, processwrapper-sandbox ... (2 actions, 1 running)
+  INFO: From PackageZip cpp/ray_cpp_pkg.zip:
+  /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/78/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    ts = datetime.datetime.utcfromtimestamp(ts)
+  [11,914 / 11,917] Compiling python/ray/_raylet.cpp; 8s disk-cache, processwrapper-sandbox
+  [11,914 / 11,917] Compiling python/ray/_raylet.cpp; 18s disk-cache, processwrapper-sandbox
+  [11,914 / 11,917] Compiling python/ray/_raylet.cpp; 48s disk-cache, processwrapper-sandbox
+  [11,915 / 11,917] [Prepa] Linking python/ray/_raylet.so
+  [11,915 / 11,917] Linking python/ray/_raylet.so; 1s disk-cache, processwrapper-sandbox
+  [11,916 / 11,917] [Prepa] PackageZip ray_pkg.zip
+  [11,916 / 11,917] PackageZip ray_pkg.zip; 1s disk-cache, processwrapper-sandbox
+  INFO: From PackageZip ray_pkg.zip:
+  /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/80/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    ts = datetime.datetime.utcfromtimestamp(ts)
+  INFO: Found 3 targets...
+  INFO: Elapsed time: 135.838s, Critical Path: 134.51s
+  INFO: 25 processes: 3 internal, 22 processwrapper-sandbox.
+  INFO: Build completed successfully, 25 total actions
+  INFO: Invocation ID: 6766e4af-91d8-4fa3-b045-844b8ad59bb4
+  Computing main repo mapping:
+  Loading:
+  Loading: 0 packages loaded
+  Analyzing: target //:gen_ray_pkg (0 packages loaded, 0 targets configured)
+  Analyzing: target //:gen_ray_pkg (0 packages loaded, 0 targets configured)
+
+  INFO: Analyzed target //:gen_ray_pkg (0 packages loaded, 0 targets configured).
+  INFO: Found 1 target...
+  Target //:gen_ray_pkg up-to-date:
+    bazel-bin/gen_ray_pkg
+  INFO: Elapsed time: 0.219s, Critical Path: 0.01s
+  INFO: 1 process: 1 internal.
+  INFO: Build completed successfully, 1 total action
+  INFO: Running command line: bazel-bin/gen_ray_pkg
+  INFO: Invocation ID: cadd4fcf-ca4a-4bcf-a868-8151402ecd4d
+  Computing main repo mapping:
+  Loading:
+  Loading: 0 packages loaded
+  Analyzing: target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured)
+  Analyzing: target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured)
+
+  INFO: Analyzed target //cpp:gen_ray_cpp_pkg (0 packages loaded, 0 targets configured).
+  INFO: Found 1 target...
+  Target //cpp:gen_ray_cpp_pkg up-to-date:
+    bazel-bin/cpp/gen_ray_cpp_pkg
+  INFO: Elapsed time: 0.240s, Critical Path: 0.00s
+  INFO: 1 process: 1 internal.
+  INFO: Build completed successfully, 1 total action
+  INFO: Running command line: bazel-bin/cpp/gen_ray_cpp_pkg
+  INFO: Invocation ID: 965e15d7-ad69-4b36-b50b-150e157f6136
+  Computing main repo mapping:
+  Loading:
+  Loading: 0 packages loaded
+  Analyzing: target //:gen_redis_pkg (0 packages loaded, 0 targets configured)
+  Analyzing: target //:gen_redis_pkg (0 packages loaded, 0 targets configured)
+
+  INFO: Analyzed target //:gen_redis_pkg (0 packages loaded, 0 targets configured).
+  INFO: Found 1 target...
+  Target //:gen_redis_pkg up-to-date:
+    bazel-bin/gen_redis_pkg
+  INFO: Elapsed time: 0.258s, Critical Path: 0.00s
+  INFO: 1 process: 1 internal.
+  INFO: Build completed successfully, 1 total action
+  INFO: Running command line: bazel-bin/gen_redis_pkg
+  # of files copied to /tmp/tmpxi_2lorz.build-lib: 385
+  running egg_info
+  creating /tmp/tmpb7818esj.build-temp/ray.egg-info
+  writing /tmp/tmpb7818esj.build-temp/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/tmpb7818esj.build-temp/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/tmpb7818esj.build-temp/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/tmpb7818esj.build-temp/ray.egg-info/requires.txt
+  writing top-level names to /tmp/tmpb7818esj.build-temp/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/tmpb7818esj.build-temp/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/tmpb7818esj.build-temp/ray.egg-info/SOURCES.txt'
+  reading manifest template 'MANIFEST.in'
+  adding license file 'LICENSE.txt'
+  writing manifest file '/tmp/tmpb7818esj.build-temp/ray.egg-info/SOURCES.txt'
+  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.attr' is absent from the `packages` configuration.
+  !!
+
+          ********************************************************************************
+          ############################
+          # Package would be ignored #
+          ############################
+          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.attr' as an importable package[^1],
+          but it is absent from setuptools' `packages` configuration.
+
+          This leads to an ambiguous overall configuration. If you want to distribute this
+          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.attr' is explicitly added
+          to the `packages` configuration field.
+
+          Alternatively, you can also rely on setuptools' discovery methods
+          (for example by using `find_namespace_packages(...)`/`find_namespace:`
+          instead of `find_packages(...)`/`find:`).
+
+          You can read more about "package discovery" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+
+          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.attr' to be distributed and are
+          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.attr' via
+          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+          you can try to use `exclude_package_data`, or `include-package-data=False` in
+          combination with a more fine grained `package-data` configuration.
+
+          You can read more about "package data files" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+
+
+          [^1]: For Python, any directory (with suitable naming) can be imported,
+                even if it does not contain any `.py` files.
+                On the other hand, currently there is no concept of package data
+                directory, all directories are treated like packages.
+          ********************************************************************************
+
+  !!
+    check.warn(importable)
+  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.attrs' is absent from the `packages` configuration.
+  !!
+
+          ********************************************************************************
+          ############################
+          # Package would be ignored #
+          ############################
+          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.attrs' as an importable package[^1],
+          but it is absent from setuptools' `packages` configuration.
+
+          This leads to an ambiguous overall configuration. If you want to distribute this
+          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.attrs' is explicitly added
+          to the `packages` configuration field.
+
+          Alternatively, you can also rely on setuptools' discovery methods
+          (for example by using `find_namespace_packages(...)`/`find_namespace:`
+          instead of `find_packages(...)`/`find:`).
+
+          You can read more about "package discovery" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+
+          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.attrs' to be distributed and are
+          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.attrs' via
+          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+          you can try to use `exclude_package_data`, or `include-package-data=False` in
+          combination with a more fine grained `package-data` configuration.
+
+          You can read more about "package data files" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+
+
+          [^1]: For Python, any directory (with suitable naming) can be imported,
+                even if it does not contain any `.py` files.
+                On the other hand, currently there is no concept of package data
+                directory, all directories are treated like packages.
+          ********************************************************************************
+
+  !!
+    check.warn(importable)
+  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' is absent from the `packages` configuration.
+  !!
+
+          ********************************************************************************
+          ############################
+          # Package would be ignored #
+          ############################
+          Python recognizes 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' as an importable package[^1],
+          but it is absent from setuptools' `packages` configuration.
+
+          This leads to an ambiguous overall configuration. If you want to distribute this
+          package, please make sure that 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' is explicitly added
+          to the `packages` configuration field.
+
+          Alternatively, you can also rely on setuptools' discovery methods
+          (for example by using `find_namespace_packages(...)`/`find_namespace:`
+          instead of `find_packages(...)`/`find:`).
+
+          You can read more about "package discovery" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+
+          If you don't want 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' to be distributed and are
+          already explicitly excluding 'ray._private.runtime_env.agent.thirdparty_files.frozenlist' via
+          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+          you can try to use `exclude_package_data`, or `include-package-data=False` in
+          combination with a more fine grained `package-data` configuration.
+
+          You can read more about "package data files" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+
+
+          [^1]: For Python, any directory (with suitable naming) can be imported,
+                even if it does not contain any `.py` files.
+                On the other hand, currently there is no concept of package data
+                directory, all directories are treated like packages.
+          ********************************************************************************
+
+  !!
+    check.warn(importable)
+  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'ray.includes' is absent from the `packages` configuration.
+  !!
+
+          ********************************************************************************
+          ############################
+          # Package would be ignored #
+          ############################
+          Python recognizes 'ray.includes' as an importable package[^1],
+          but it is absent from setuptools' `packages` configuration.
+
+          This leads to an ambiguous overall configuration. If you want to distribute this
+          package, please make sure that 'ray.includes' is explicitly added
+          to the `packages` configuration field.
+
+          Alternatively, you can also rely on setuptools' discovery methods
+          (for example by using `find_namespace_packages(...)`/`find_namespace:`
+          instead of `find_packages(...)`/`find:`).
+
+          You can read more about "package discovery" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+
+          If you don't want 'ray.includes' to be distributed and are
+          already explicitly excluding 'ray.includes' via
+          `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+          you can try to use `exclude_package_data`, or `include-package-data=False` in
+          combination with a more fine grained `package-data` configuration.
+
+          You can read more about "package data files" on setuptools documentation page:
+
+          - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+
+
+          [^1]: For Python, any directory (with suitable naming) can be imported,
+                even if it does not contain any `.py` files.
+                On the other hand, currently there is no concept of package data
+                directory, all directories are treated like packages.
+          ********************************************************************************
+
+  !!
+    check.warn(importable)
+  Editable install will be performed using a meta path finder.
+
+  Options like `package-data`, `include/exclude-package-data` or
+  `packages.find.exclude/include` may have no effect.
+
+  adding '__editable___ray_3_0_0_dev0_finder.py'
+  adding '__editable__.ray-3.0.0.dev0.pth'
+  creating '/tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa/tmptdlifthu/.tmp-q5_90rkb/ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl' and adding '/tmp/tmp1i8t85w0ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl' to it
+  adding 'ray-3.0.0.dev0.dist-info/licenses/LICENSE.txt'
+  adding 'ray-3.0.0.dev0.dist-info/METADATA'
+  adding 'ray-3.0.0.dev0.dist-info/WHEEL'
+  adding 'ray-3.0.0.dev0.dist-info/entry_points.txt'
+  adding 'ray-3.0.0.dev0.dist-info/top_level.txt'
+  adding 'ray-3.0.0.dev0.dist-info/RECORD'
+  /tmp/pip-build-env-2xxpcsw_/overlay/lib/python3.10/site-packages/setuptools/command/editable_wheel.py:352: InformationOnly: Editable installation.
+  !!
+
+          ********************************************************************************
+          Please be careful with folders in your working directory with the same
+          name as your package as they may take precedence during imports.
+          ********************************************************************************
+
+  !!
+    with strategy, WheelFile(wheel_path, "w") as wheel_obj:
+  Building editable for ray (pyproject.toml): finished with status 'done'
+  Created wheel for ray: filename=ray-3.0.0.dev0-0.editable-cp310-cp310-linux_x86_64.whl size=8061 sha256=78bfd8a15dfa87325ea0e96c686aab60344e62a63b28bbc56143355c9516e0b7
+  Stored in directory: /tmp/pip-ephem-wheel-cache-fq6dprip/wheels/c4/60/66/af8693fa32323a47bdf28baa15987f7d1064a5934d4b8e97fa
+Successfully built ray
 Installing collected packages: ray
-  DEPRECATION: Legacy editable install of ray==3.0.0.dev0 from file:///home/tejas/Downloads/ray/python (setup.py develop) is deprecated. pip 25.3 will enforce this behaviour change. A possible replacement is to add a pyproject.toml or enable --use-pep517, and use setuptools >= 64. If the resulting installation is not behaving as expected, try using --config-settings editable_mode=compat. Please consult the setuptools documentation for more information. Discussion can be found at https://github.com/pypa/pip/issues/11457
-  Running setup.py develop for ray
-    Running command python setup.py develop
-    /home/tejas/anaconda3/lib/python3.13/site-packages/setuptools/__init__.py:85: _DeprecatedInstaller: setuptools.installer and fetch_build_eggs are deprecated.
-    !!
-
-            ********************************************************************************
-            Requirements should be satisfied by a PEP 517 installer.
-            If you are using pip, you can try `pip install --use-pep517`.
-            ********************************************************************************
-
-    !!
-      dist.fetch_build_eggs(dist.setup_requires)
-    running develop
-    /home/tejas/anaconda3/lib/python3.13/site-packages/setuptools/command/develop.py:42: EasyInstallDeprecationWarning: easy_install command is deprecated.
-    !!
-
-            ********************************************************************************
-            Please avoid running ``setup.py`` and ``easy_install``.
-            Instead, use pypa/build, pypa/installer or other
-            standards-based tools.
-
-            See https://github.com/pypa/setuptools/issues/917 for details.
-            ********************************************************************************
-
-    !!
-      easy_install.initialize_options(self)
-    /home/tejas/anaconda3/lib/python3.13/site-packages/setuptools/_distutils/cmd.py:66: SetuptoolsDeprecationWarning: setup.py install is deprecated.
-    !!
-
-            ********************************************************************************
-            Please avoid running ``setup.py`` directly.
-            Instead, use pypa/build, pypa/installer or other
-            standards-based tools.
-
-            See https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html for details.
-            ********************************************************************************
-
-    !!
-      self.initialize_options()
-    running egg_info
-    creating ray.egg-info
-    writing ray.egg-info/PKG-INFO
-    writing dependency_links to ray.egg-info/dependency_links.txt
-    writing entry points to ray.egg-info/entry_points.txt
-    writing requirements to ray.egg-info/requires.txt
-    writing top-level names to ray.egg-info/top_level.txt
-    writing manifest file 'ray.egg-info/SOURCES.txt'
-    reading manifest file 'ray.egg-info/SOURCES.txt'
-    reading manifest template 'MANIFEST.in'
-    adding license file 'LICENSE.txt'
-    writing manifest file 'ray.egg-info/SOURCES.txt'
-    running build_ext
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama-0.4.6.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/psutil-7.2.2.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/psutil already exists. Specify --upgrade to force replacement.
-    ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
-    marker-pdf 1.10.2 requires regex<2025.0.0,>=2024.4.28, but you have regex 2026.7.10 which is incompatible.
-    marker-pdf 1.10.2 requires transformers<5.0.0,>=4.45.2, but you have transformers 5.13.1 which is incompatible.
-    streamlit 1.45.1 requires pandas<3,>=1.4.0, but you have pandas 3.0.3 which is incompatible.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohttp-3.14.3.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohttp already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiosignal-1.4.0.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiosignal already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/yarl-1.24.5.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/yarl already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohappyeyeballs-2.7.1.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohappyeyeballs already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attrs-26.1.0.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attrs already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attr already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/frozenlist-1.8.0.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/frozenlist already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/idna-3.18.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/idna already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/multidict-6.7.1.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/multidict already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/propcache-0.5.2.dist-info already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/propcache already exists. Specify --upgrade to force replacement.
-    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/bin already exists. Specify --upgrade to force replacement.
-    Computing main repo mapping:
-    Loading:
-    Loading: 0 packages loaded
-    Analyzing: 3 targets (0 packages loaded, 0 targets configured)
-    Analyzing: 3 targets (0 packages loaded, 0 targets configured)
-
-    DEBUG: /home/tejas/Downloads/ray/bazel/ray.bzl:175:10: [<generated file external/jemalloc/libjemalloc/lib/libjemalloc.so>]
-    INFO: Analyzed 3 targets (3 packages loaded, 1786 targets configured).
-    INFO: From Generating proto_library //src/ray/protobuf/public:events_task_definition_event_proto:
-    src/ray/protobuf/public/events_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
-    INFO: From Generating proto_library //src/ray/protobuf/public:events_actor_task_definition_event_proto:
-    src/ray/protobuf/public/events_actor_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
-    [10,843 / 11,918] Executing genrule @@local_config_python//_python3:_python3_include; 0s processwrapper-sandbox ... (13 actions, 12 running)
-    INFO: From Generating Descriptor Set proto_library //src/ray/protobuf/public:events_actor_task_definition_event_proto:
-    src/ray/protobuf/public/events_actor_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
-    INFO: From Generating Descriptor Set proto_library //src/ray/protobuf/public:events_task_definition_event_proto:
-    src/ray/protobuf/public/events_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
-    [11,188 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 1s processwrapper-sandbox ... (16 actions, 15 running)
-    INFO: From PackageZip core_py_proto.zip:
-    /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/167/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
-      ts = datetime.datetime.utcfromtimestamp(ts)
-    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_status.c:
-    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
-    [11,195 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 2s processwrapper-sandbox ... (17 actions, 15 running)
-    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_setup.c:
-    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
-    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_debug.c:
-    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
-    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_strlcpy.c:
-    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
-    [11,206 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 3s processwrapper-sandbox ... (16 actions running)
-    [11,212 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 4s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,225 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 6s processwrapper-sandbox ... (17 actions, 15 running)
-    [11,230 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 7s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,233 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 8s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,253 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 9s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,257 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 10s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,258 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,267 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,281 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 14s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,286 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,294 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,298 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 18s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,312 / 11,918] Compiling src/ray/protobuf/gcs.pb.cc; 15s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,318 / 11,918] Compiling src/ray/gcs/gcs_health_check_manager.cc; 8s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,325 / 11,918] Compiling src/ray/gcs/gcs_health_check_manager.cc; 9s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,334 / 11,918] Compiling src/ray/rpc/grpc_server.cc; 8s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,337 / 11,918] Compiling src/ray/protobuf/autoscaler.pb.cc; 9s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,345 / 11,918] Compiling src/ray/protobuf/gcs_service.pb.cc; 8s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,351 / 11,918] Compiling src/ray/protobuf/gcs_service.pb.cc; 9s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,358 / 11,918] Compiling src/ray/protobuf/gcs_service.pb.cc; 10s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,363 / 11,918] Compiling src/ray/protobuf/gcs_service.pb.cc; 12s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,368 / 11,918] Compiling src/ray/util/event.cc; 13s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,374 / 11,918] Compiling src/ray/util/event.cc; 14s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,380 / 11,918] Compiling src/ray/util/event.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,384 / 11,918] Compiling src/ray/util/event.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,391 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 16s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,394 / 11,918] Compiling src/ray/raylet/runtime_env_agent_client.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,399 / 11,918] Compiling src/ray/raylet/runtime_env_agent_client.cc; 18s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,404 / 11,918] Compiling src/ray/raylet/runtime_env_agent_client.cc; 20s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,412 / 11,918] Compiling src/ray/util/event.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,414 / 11,918] Compiling src/ray/util/event.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,418 / 11,918] Compiling src/ray/util/event.cc; 13s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,423 / 11,918] Compiling src/ray/util/event.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,424 / 11,918] Compiling src/ray/util/event.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,434 / 11,918] Compiling src/ray/raylet_ipc_client/client_connection.cc; 9s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,445 / 11,918] Compiling src/ray/protobuf/node_manager.grpc.pb.cc; 8s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,446 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 9s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,449 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 10s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,456 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,457 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,461 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,468 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,470 / 11,918] Compiling src/ray/gcs/store_client/rocksdb_store_client.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,475 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 12s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,479 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,486 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 14s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,488 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,496 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,501 / 11,918] Compiling src/ray/gcs/gcs_table_storage.cc; 9s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,504 / 11,918] Compiling src/ray/gcs/gcs_table_storage.cc; 10s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,510 / 11,918] Compiling src/ray/gcs/gcs_placement_group.cc; 9s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,513 / 11,918] Compiling src/ray/protobuf/gcs_service.grpc.pb.cc; 10s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,522 / 11,918] Compiling src/ray/gcs/store_client/rocksdb_store_client.cc; 10s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,524 / 11,918] Compiling src/ray/gcs/store_client/rocksdb_store_client.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,529 / 11,918] Compiling src/ray/observability/python_event_interface.cc; 10s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,536 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 10s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,539 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,542 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,546 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,547 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,553 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,557 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,562 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,563 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,570 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,573 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 18s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,576 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 20s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,581 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 21s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,583 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 22s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,589 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 22s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,593 / 11,918] Compiling src/ray/pubsub/python_gcs_subscriber.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,600 / 11,918] Compiling src/ray/pubsub/python_gcs_subscriber.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,607 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 16s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,617 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,623 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,625 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,629 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 15s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,635 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 17s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,638 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 19s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,649 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 20s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,650 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 22s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,653 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 23s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,655 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 24s processwrapper-sandbox ... (17 actions, 15 running)
-    [11,655 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 26s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,658 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 27s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,665 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 29s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,669 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 30s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,675 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 31s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,678 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 32s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,680 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 34s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,683 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 36s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,684 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 37s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,689 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 38s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,691 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 40s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,695 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 42s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,703 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 43s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,707 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 34s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,708 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 35s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,711 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 37s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,713 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 39s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,715 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 40s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,718 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 41s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,723 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 43s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,730 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 44s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,734 / 11,918] Compiling src/ray/core_worker_rpc_client/core_worker_client.cc; 18s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,735 / 11,918] Compiling src/ray/core_worker_rpc_client/core_worker_client.cc; 20s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,740 / 11,918] Compiling src/ray/object_manager/plasma/store.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,742 / 11,918] Compiling src/ray/object_manager/plasma/store.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,743 / 11,918] Compiling src/ray/object_manager/plasma/store.cc; 18s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,746 / 11,918] Compiling src/ray/gcs/gcs_task_manager.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,750 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,753 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 12s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,755 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,757 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 16s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,761 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 17s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,766 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 18s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,767 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 20s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,771 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 21s processwrapper-sandbox ... (16 actions running)
-    [11,772 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 22s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,775 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 24s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,777 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 28s processwrapper-sandbox ... (15 actions, 14 running)
-    [11,781 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 30s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,785 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 31s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,786 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 33s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,787 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 35s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,789 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 36s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,791 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 37s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,792 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 41s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,794 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 43s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,794 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 107s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,797 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 109s processwrapper-sandbox ... (14 actions, 13 running)
-    [11,804 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 81s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,805 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 83s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,806 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 89s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,807 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 90s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,809 / 11,918] Compiling src/ray/gcs/gcs_placement_group_scheduler.cc; 90s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,814 / 11,918] Compiling src/ray/gcs/gcs_placement_group_manager.cc; 90s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,817 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 86s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,818 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 88s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,819 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 90s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,821 / 11,918] Compiling src/ray/gcs/gcs_placement_group_manager.cc; 90s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,824 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 86s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,825 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 87s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,826 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 91s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,828 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 92s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,833 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 93s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,835 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 95s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,836 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 99s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,837 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 100s processwrapper-sandbox ... (17 actions, 16 running)
-    [11,838 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 102s processwrapper-sandbox ... (16 actions, 15 running)
-    [11,839 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 103s processwrapper-sandbox ... (17 actions, 16 running)
+  Attempting uninstall: ray
+    Found existing installation: ray 3.0.0.dev0
+    Uninstalling ray-3.0.0.dev0:
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/ray
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/serve
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/bin/tune
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__editable__.ray-3.0.0.dev0.pth
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__editable___ray_3_0_0_dev0_finder.py
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/__pycache__/__editable___ray_3_0_0_dev0_finder.cpython-310.pyc
+      Removing file or directory /home/tejas/anaconda3/envs/ray-dev/lib/python3.10/site-packages/ray-3.0.0.dev0.dist-info/
+      Successfully uninstalled ray-3.0.0.dev0
+  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/ray to 775
+  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/serve to 775
+  changing mode of /home/tejas/anaconda3/envs/ray-dev/bin/tune to 775
+Successfully installed ray-3.0.0.dev0

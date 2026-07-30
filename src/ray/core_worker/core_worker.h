@@ -1935,6 +1935,11 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                     const int64_t timeout_ms,
                     std::vector<std::shared_ptr<RayObject>> &results);
 
+  Status GetObjectsInternal(const std::vector<ObjectID> &ids,
+                            const int64_t timeout_ms,
+                            std::vector<std::shared_ptr<RayObject>> &results,
+                            bool allow_recovery_succession);
+
   /// Helper to compute idleness from precomputed counters.
   ///
   /// We consider the worker to be idle if it doesn't have object references and it

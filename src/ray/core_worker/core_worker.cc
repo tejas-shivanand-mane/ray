@@ -1526,6 +1526,16 @@ Status CoreWorker::GetExperimentalMutableObjects(
 Status CoreWorker::GetObjects(const std::vector<ObjectID> &ids,
                               const int64_t timeout_ms,
                               std::vector<std::shared_ptr<RayObject>> &results) {
+  return GetObjectsInternal(ids,
+                            timeout_ms,
+                            results,
+                            /*allow_recovery_succession=*/true);
+}
+
+Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
+                                      const int64_t timeout_ms,
+                                      std::vector<std::shared_ptr<RayObject>> &results,
+                                      bool allow_recovery_succession) {
   // Normal ray.get path for immutable in-memory and shared memory objects.
   absl::flat_hash_set<ObjectID> plasma_object_ids;
   absl::flat_hash_set<ObjectID> memory_object_ids(ids.begin(), ids.end());
@@ -1551,7 +1561,6 @@ Status CoreWorker::GetObjects(const std::vector<ObjectID> &ids,
         }},
         objects_have_owners.error());
   }
-
   bool got_exception = false;
 
   if (!memory_object_ids.empty()) {
@@ -1559,7 +1568,95 @@ Status CoreWorker::GetObjects(const std::vector<ObjectID> &ids,
         memory_object_ids, timeout_ms, *worker_context_, &result_map, &got_exception));
   }
 
-  // Erase any objects that were promoted to plasma from the results. These get
+  // An OWNER_DIED result normally terminates ray.get immediately.
+  // For a borrowed object carrying a frozen succession manifest,
+  // give recovery succession one opportunity before returning the
+  // legacy Ray error.
+  if (allow_recovery_succession && recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr && got_exception) {
+    std::vector<ObjectID> owner_died_objects;
+
+    for (const auto &[object_id, object] : result_map) {
+      if (object == nullptr) {
+        continue;
+      }
+
+      rpc::ErrorType error_type;
+
+      if (!object->IsException(&error_type) || error_type != rpc::ErrorType::OWNER_DIED) {
+        continue;
+      }
+
+      RecoverySuccessionManager::BorrowedObjectRecoveryPlan plan;
+
+      if (!recovery_succession_manager_->GetBorrowedObjectRecoveryPlan(object_id,
+                                                                       &plan)) {
+        continue;
+      }
+
+      owner_died_objects.push_back(object_id);
+    }
+
+    if (!owner_died_objects.empty()) {
+      bool all_recoveries_started = true;
+
+      for (const ObjectID &object_id : owner_died_objects) {
+        auto recovery_promise = std::make_shared<std::promise<bool>>();
+
+        std::future<bool> recovery_future = recovery_promise->get_future();
+
+        RAY_LOG(INFO).WithField(object_id) << "OWNER_DIED intercepted; "
+                                           << "trying recovery succession";
+
+        RecoverBorrowedObject(object_id, [recovery_promise](bool started) {
+          recovery_promise->set_value(started);
+        });
+
+        bool recovery_started = false;
+
+        if (timeout_ms < 0) {
+          recovery_started = recovery_future.get();
+        } else {
+          const int64_t elapsed_ms = clock_.SteadyNowMillis() - start_time;
+
+          const int64_t remaining_ms = std::max<int64_t>(0, timeout_ms - elapsed_ms);
+
+          const std::future_status wait_status =
+              recovery_future.wait_for(std::chrono::milliseconds(remaining_ms));
+
+          if (wait_status == std::future_status::ready) {
+            recovery_started = recovery_future.get();
+          }
+        }
+
+        if (!recovery_started) {
+          all_recoveries_started = false;
+          break;
+        }
+      }
+
+      if (all_recoveries_started) {
+        // Remove the terminal OWNER_DIED values so the retried get
+        // waits for the replayed task output instead.
+        memory_store_->Delete(owner_died_objects);
+
+        const int64_t elapsed_ms = clock_.SteadyNowMillis() - start_time;
+
+        const int64_t remaining_timeout_ms =
+            timeout_ms < 0 ? timeout_ms : std::max<int64_t>(0, timeout_ms - elapsed_ms);
+
+        results.assign(ids.size(), nullptr);
+
+        return GetObjectsInternal(ids,
+                                  remaining_timeout_ms,
+                                  results,
+                                  /*allow_recovery_succession=*/false);
+      }
+    }
+  }
+
+  // Erase any objects that were promoted to plasma from the results.
+
   // requests will be retried at the plasma store.
   for (auto it = result_map.begin(); it != result_map.end();) {
     auto current = it++;
