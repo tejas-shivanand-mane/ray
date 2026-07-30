@@ -50,34 +50,11 @@ bool ContainsWorker(const rpc::RecoveryManifest &manifest, const rpc::Address &a
 
 int CompareManifestVersions(const rpc::RecoveryManifest &left,
                             const rpc::RecoveryManifest &right) {
-  if (left.version().generation() <
-      right.version().generation()) {
+  if (left.version().generation() < right.version().generation()) {
     return -1;
   }
 
-  if (left.version().generation() >
-      right.version().generation()) {
-    return 1;
-  }
-
-  // Lower coordinator rank wins at the same generation.
-  if (left.version().coordinator_rank() >
-      right.version().coordinator_rank()) {
-    return -1;
-  }
-
-  if (left.version().coordinator_rank() <
-      right.version().coordinator_rank()) {
-    return 1;
-  }
-
-  if (left.version().manifest_digest() <
-      right.version().manifest_digest()) {
-    return -1;
-  }
-
-  if (left.version().manifest_digest() >
-      right.version().manifest_digest()) {
+  if (left.version().generation() > right.version().generation()) {
     return 1;
   }
 
@@ -105,7 +82,6 @@ rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
 
   rpc::RecoveryManifestVersion *version = manifest.mutable_version();
   version->set_generation(1);
-  version->set_coordinator_rank(0);
 
   manifest.set_frozen(false);
   manifest.set_tombstoned(false);
@@ -318,16 +294,10 @@ RecoverySuccessionManager::PrepareHolderAdmission(
     return rpc::ReportRecoveryCandidateReply::TOMBSTONED;
   }
 
-  const uint32_t coordinator_rank = task_state.manifest.version().coordinator_rank();
+  // Only the original owner forms the frozen succession list.
+  const rpc::RecoveryHolder *owner = FindHolderByRank(task_state.manifest, 0);
 
-  const rpc::RecoveryHolder *coordinator =
-      FindHolderByRank(task_state.manifest, coordinator_rank);
-
-  if (coordinator == nullptr || !SameWorker(coordinator->address(), self_address_)) {
-    return rpc::ReportRecoveryCandidateReply::WRONG_COORDINATOR;
-  }
-
-  if (request.cached_manifest().version().coordinator_rank() != coordinator_rank) {
+  if (owner == nullptr || !SameWorker(owner->address(), self_address_)) {
     return rpc::ReportRecoveryCandidateReply::WRONG_COORDINATOR;
   }
 
@@ -379,9 +349,8 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   new_holder->set_rank(proposed_rank);
   new_holder->set_failure_domain_id(candidate_address.node_id());
 
-  rpc::RecoveryManifestVersion *new_version = proposed_manifest.mutable_version();
-  new_version->set_generation(task_state.manifest.version().generation() + 1);
-  new_version->clear_manifest_digest();
+  proposed_manifest.mutable_version()->set_generation(
+      task_state.manifest.version().generation() + 1);
 
   const uint32_t holders_after_admission =
       static_cast<uint32_t>(proposed_manifest.succession_size() - 1);
@@ -463,24 +432,20 @@ bool RecoverySuccessionManager::InstallRecoveryHolder(
 }
 
 bool RecoverySuccessionManager::CommitHolderAdmission(
-    const std::string &reservation_id,
-    rpc::RecoveryManifest *committed_manifest) {
-  if (reservation_id.empty() ||
-      committed_manifest == nullptr) {
+    const std::string &reservation_id, rpc::RecoveryManifest *committed_manifest) {
+  if (reservation_id.empty() || committed_manifest == nullptr) {
     return false;
   }
 
   absl::MutexLock lock(&mutex_);
 
-  const auto reservation_it =
-      holder_reservations_.find(reservation_id);
+  const auto reservation_it = holder_reservations_.find(reservation_id);
 
   if (reservation_it == holder_reservations_.end()) {
     return false;
   }
 
-  const TaskID task_id =
-      reservation_it->second.task_id;
+  const TaskID task_id = reservation_it->second.task_id;
 
   const auto task_it = task_states_.find(task_id);
 
@@ -489,13 +454,9 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
     return false;
   }
 
-  UpdateManifestForTaskLocked(
-      task_id,
-      reservation_it->second.proposed_manifest,
-      true);
+  UpdateManifestForTaskLocked(task_id, reservation_it->second.proposed_manifest, true);
 
-  committed_manifest->CopyFrom(
-      reservation_it->second.proposed_manifest);
+  committed_manifest->CopyFrom(reservation_it->second.proposed_manifest);
 
   holder_reservations_.erase(reservation_it);
 
@@ -632,15 +593,14 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
     return;
   }
 
-  const rpc::RecoveryHolder *coordinator = FindHolderByRank(
-      effective_manifest, effective_manifest.version().coordinator_rank());
+  const rpc::RecoveryHolder *owner = FindHolderByRank(effective_manifest, 0);
 
-  if (coordinator == nullptr || SameWorker(coordinator->address(), self_address_)) {
+  if (owner == nullptr || SameWorker(owner->address(), self_address_)) {
     return;
   }
 
   CandidateReport report;
-  report.coordinator_address.CopyFrom(coordinator->address());
+  report.coordinator_address.CopyFrom(owner->address());
 
   report.request.set_task_id(effective_manifest.task_id());
   report.request.mutable_candidate_address()->CopyFrom(self_address_);
@@ -687,8 +647,7 @@ void RecoverySuccessionManager::UpdateManifestForTaskLocked(
 }
 
 bool RecoverySuccessionManager::GetBorrowedObjectRecoveryPlan(
-    const ObjectID &object_id,
-    BorrowedObjectRecoveryPlan *plan) const {
+    const ObjectID &object_id, BorrowedObjectRecoveryPlan *plan) const {
   if (plan == nullptr) {
     return false;
   }
@@ -702,31 +661,25 @@ bool RecoverySuccessionManager::GetBorrowedObjectRecoveryPlan(
 
   plan->task_id = borrowed_it->second.task_id;
   plan->return_index = borrowed_it->second.return_index;
-  plan->cached_manifest.CopyFrom(
-      borrowed_it->second.cached_manifest);
+  plan->cached_manifest.CopyFrom(borrowed_it->second.cached_manifest);
 
   return true;
 }
 
 RecoverySuccessionManager::ReplayPreparationResult
-RecoverySuccessionManager::PrepareTaskReplay(
-    const rpc::RecoverTaskOutputRequest &request,
-    rpc::TaskSpec *task_spec,
-    rpc::RecoveryManifest *latest_manifest) {
-  if (task_spec == nullptr ||
-      latest_manifest == nullptr ||
-      request.task_id().size() != TaskID::Size() ||
-      !request.has_requester_manifest()) {
+RecoverySuccessionManager::PrepareTaskReplay(const rpc::RecoverTaskOutputRequest &request,
+                                             rpc::TaskSpec *task_spec,
+                                             rpc::RecoveryManifest *latest_manifest) {
+  if (task_spec == nullptr || latest_manifest == nullptr ||
+      request.task_id().size() != TaskID::Size() || !request.has_requester_manifest()) {
     return ReplayPreparationResult::TASK_NOT_FOUND;
   }
 
-  const TaskID task_id =
-      TaskID::FromBinary(request.task_id());
+  const TaskID task_id = TaskID::FromBinary(request.task_id());
 
   absl::MutexLock lock(&mutex_);
 
   const auto task_it = task_states_.find(task_id);
-
 
   if (task_it == task_states_.end()) {
     return ReplayPreparationResult::TASK_NOT_FOUND;
@@ -739,31 +692,24 @@ RecoverySuccessionManager::PrepareTaskReplay(
     return ReplayPreparationResult::TOMBSTONED;
   }
 
-  if (!state.task_spec.has_value() ||
-      !state.manifest_committed) {
+  if (!state.task_spec.has_value() || !state.manifest_committed) {
     return ReplayPreparationResult::TASK_NOT_FOUND;
   }
 
-
-  if (CompareManifestVersions(
-          request.requester_manifest(),
-          state.manifest) < 0) {
+  if (CompareManifestVersions(request.requester_manifest(), state.manifest) < 0) {
     return ReplayPreparationResult::MANIFEST_STALE;
   }
 
-  const int32_t max_recovery_attempts =
-    state.manifest.max_recovery_attempts();
+  const int32_t max_recovery_attempts = state.manifest.max_recovery_attempts();
 
   if (max_recovery_attempts >= 0 &&
-      state.manifest.recovery_attempt() >=
-          static_cast<uint32_t>(max_recovery_attempts)) {
+      state.manifest.recovery_attempt() >= static_cast<uint32_t>(max_recovery_attempts)) {
     return ReplayPreparationResult::RETRY_LIMIT_EXCEEDED;
   }
 
   bool self_is_holder = false;
 
-  for (const rpc::RecoveryHolder &holder :
-       state.manifest.succession()) {
+  for (const rpc::RecoveryHolder &holder : state.manifest.succession()) {
     if (SameWorker(holder.address(), self_address_)) {
       self_is_holder = true;
       break;
@@ -774,11 +720,9 @@ RecoverySuccessionManager::PrepareTaskReplay(
     return ReplayPreparationResult::WRONG_HOLDER;
   }
 
-  state.manifest.set_recovery_attempt(
-      state.manifest.recovery_attempt() + 1);
+  state.manifest.set_recovery_attempt(state.manifest.recovery_attempt() + 1);
 
-  state.task_spec->mutable_recovery_manifest()->CopyFrom(
-      state.manifest);
+  state.task_spec->mutable_recovery_manifest()->CopyFrom(state.manifest);
 
   task_spec->CopyFrom(state.task_spec.value());
   latest_manifest->CopyFrom(state.manifest);
@@ -787,8 +731,7 @@ RecoverySuccessionManager::PrepareTaskReplay(
 }
 
 void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
-    const ObjectID &object_id,
-    const rpc::RecoveryManifest &manifest) {
+    const ObjectID &object_id, const rpc::RecoveryManifest &manifest) {
   if (manifest.task_id().empty()) {
     return;
   }
@@ -800,26 +743,20 @@ void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
     return;
   }
 
-  if (CompareManifestVersions(
-          manifest,
-          borrowed_it->second.cached_manifest) < 0) {
+  if (CompareManifestVersions(manifest, borrowed_it->second.cached_manifest) < 0) {
     return;
   }
 
   borrowed_it->second.cached_manifest.CopyFrom(manifest);
 
-  auto metadata_it =
-      object_recovery_metadata_.find(object_id);
+  auto metadata_it = object_recovery_metadata_.find(object_id);
 
   if (metadata_it != object_recovery_metadata_.end()) {
-    metadata_it->second.mutable_manifest()->CopyFrom(
-        manifest);
+    metadata_it->second.mutable_manifest()->CopyFrom(manifest);
   }
 }
 
-
-std::optional<rpc::RecoveryManifest>
-RecoverySuccessionManager::BuildTombstoneForTask(
+std::optional<rpc::RecoveryManifest> RecoverySuccessionManager::BuildTombstoneForTask(
     const TaskID &task_id) const {
   absl::MutexLock lock(&mutex_);
 
@@ -829,25 +766,16 @@ RecoverySuccessionManager::BuildTombstoneForTask(
     return std::nullopt;
   }
 
-  const TaskRecoveryState &task_state =
-      task_it->second;
+  const TaskRecoveryState &task_state = task_it->second;
 
-  if (!task_state.manifest_committed ||
-      task_state.manifest.tombstoned() ||
+  if (!task_state.manifest_committed || task_state.manifest.tombstoned() ||
       !task_state.task_spec.has_value()) {
     return std::nullopt;
   }
 
-  const rpc::RecoveryHolder *coordinator =
-      FindHolderByRank(
-          task_state.manifest,
-          task_state.manifest.version()
-              .coordinator_rank());
+  const rpc::RecoveryHolder *owner = FindHolderByRank(task_state.manifest, 0);
 
-  if (coordinator == nullptr ||
-      !SameWorker(
-          coordinator->address(),
-          self_address_)) {
+  if (owner == nullptr || !SameWorker(owner->address(), self_address_)) {
     return std::nullopt;
   }
 
@@ -857,46 +785,35 @@ RecoverySuccessionManager::BuildTombstoneForTask(
   tombstone.set_tombstoned(true);
   tombstone.set_frozen(true);
 
-  rpc::RecoveryManifestVersion *version =
-      tombstone.mutable_version();
+  rpc::RecoveryManifestVersion *version = tombstone.mutable_version();
 
-  version->set_generation(
-      task_state.manifest.version().generation() + 1);
-
-  version->clear_manifest_digest();
+  version->set_generation(task_state.manifest.version().generation() + 1);
 
   return tombstone;
 }
 
 bool RecoverySuccessionManager::ApplyRecoveryTombstone(
     const rpc::RecoveryManifest &tombstone) {
-  if (tombstone.task_id().size() != TaskID::Size() ||
-      !tombstone.has_version() ||
+  if (tombstone.task_id().size() != TaskID::Size() || !tombstone.has_version() ||
       !tombstone.tombstoned()) {
     return false;
   }
 
-  const TaskID task_id =
-      TaskID::FromBinary(tombstone.task_id());
+  const TaskID task_id = TaskID::FromBinary(tombstone.task_id());
 
   absl::MutexLock lock(&mutex_);
 
   const auto task_it = task_states_.find(task_id);
 
-  if (task_it != task_states_.end() &&
-      !task_it->second.manifest.task_id().empty()) {
-    const int comparison =
-        CompareManifestVersions(
-            tombstone,
-            task_it->second.manifest);
+  if (task_it != task_states_.end() && !task_it->second.manifest.task_id().empty()) {
+    const int comparison = CompareManifestVersions(tombstone, task_it->second.manifest);
 
     if (comparison < 0) {
       return false;
     }
 
     if (comparison == 0 &&
-        tombstone.SerializeAsString() !=
-            task_it->second.manifest.SerializeAsString()) {
+        tombstone.SerializeAsString() != task_it->second.manifest.SerializeAsString()) {
       return false;
     }
   }
@@ -909,10 +826,8 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
 
   EraseTaskObjectMetadataLocked(task_id);
 
-  for (auto reservation_it =
-          holder_reservations_.begin();
-      reservation_it !=
-          holder_reservations_.end();) {
+  for (auto reservation_it = holder_reservations_.begin();
+       reservation_it != holder_reservations_.end();) {
     if (reservation_it->second.task_id == task_id) {
       auto erase_it = reservation_it;
       ++reservation_it;
@@ -927,18 +842,12 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
   return true;
 }
 
-void RecoverySuccessionManager::
-    EraseTaskObjectMetadataLocked(
-        const TaskID &task_id) {
-  const std::string task_id_binary =
-      task_id.Binary();
+void RecoverySuccessionManager::EraseTaskObjectMetadataLocked(const TaskID &task_id) {
+  const std::string task_id_binary = task_id.Binary();
 
-  for (auto metadata_it =
-           object_recovery_metadata_.begin();
-       metadata_it !=
-           object_recovery_metadata_.end();) {
-    if (metadata_it->second.task_id() ==
-        task_id_binary) {
+  for (auto metadata_it = object_recovery_metadata_.begin();
+       metadata_it != object_recovery_metadata_.end();) {
+    if (metadata_it->second.task_id() == task_id_binary) {
       auto erase_it = metadata_it;
       ++metadata_it;
       object_recovery_metadata_.erase(erase_it);
@@ -947,8 +856,7 @@ void RecoverySuccessionManager::
     }
   }
 
-  for (auto borrowed_it =
-           borrowed_objects_.begin();
+  for (auto borrowed_it = borrowed_objects_.begin();
        borrowed_it != borrowed_objects_.end();) {
     if (borrowed_it->second.task_id == task_id) {
       auto erase_it = borrowed_it;
@@ -961,11 +869,40 @@ void RecoverySuccessionManager::
 }
 
 void RecoverySuccessionManager::HandleWorkerFailure(const WorkerID &worker_id) {
-  static_cast<void>(worker_id);
+  if (worker_id.IsNil()) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  failed_workers_.insert(worker_id);
 }
 
 void RecoverySuccessionManager::HandleNodeFailure(const NodeID &node_id) {
-  static_cast<void>(node_id);
+  if (node_id.IsNil()) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  failed_nodes_.insert(node_id);
+}
+
+bool RecoverySuccessionManager::IsRecoveryHolderKnownFailed(
+    const rpc::RecoveryHolder &holder) const {
+  const rpc::Address &address = holder.address();
+
+  absl::MutexLock lock(&mutex_);
+
+  if (address.worker_id().size() == WorkerID::Size() &&
+      failed_workers_.contains(WorkerID::FromBinary(address.worker_id()))) {
+    return true;
+  }
+
+  if (address.node_id().size() == NodeID::Size() &&
+      failed_nodes_.contains(NodeID::FromBinary(address.node_id()))) {
+    return true;
+  }
+
+  return false;
 }
 
 bool RecoverySuccessionManager::HasConfirmedHolderResponsibilities() const {

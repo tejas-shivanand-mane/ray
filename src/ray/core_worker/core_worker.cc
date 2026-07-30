@@ -33,6 +33,8 @@
 
 #include <google/protobuf/util/json_util.h>
 
+#include <cstdint>
+
 #include "absl/cleanup/cleanup.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -49,9 +51,6 @@
 #include "ray/util/event.h"
 #include "ray/util/process_utils.h"
 #include "ray/util/subreaper.h"
-#include <cstdint>
-
-
 
 using json = nlohmann::json;
 using MessageType = ray::protocol::MessageType;
@@ -151,7 +150,6 @@ ShutdownReason ConvertExitTypeToShutdownReason(rpc::WorkerExitType exit_type,
   }
 }
 
-
 uint64_t StableWitnessScore(const TaskID &task_id, const NodeID &node_id) {
   // FNV-1a over TaskID || NodeID.
   constexpr uint64_t kOffsetBasis = 1469598103934665603ULL;
@@ -169,48 +167,20 @@ uint64_t StableWitnessScore(const TaskID &task_id, const NodeID &node_id) {
   return hash;
 }
 
-int CompareRecoveryManifestVersions(
-    const rpc::RecoveryManifest &left,
-    const rpc::RecoveryManifest &right) {
-  if (left.version().generation() <
-      right.version().generation()) {
+int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
+                                    const rpc::RecoveryManifest &right) {
+  if (left.version().generation() < right.version().generation()) {
     return -1;
   }
 
-  if (left.version().generation() >
-      right.version().generation()) {
-    return 1;
-  }
-
-  if (left.version().coordinator_rank() >
-      right.version().coordinator_rank()) {
-    return -1;
-  }
-
-  if (left.version().coordinator_rank() <
-      right.version().coordinator_rank()) {
-    return 1;
-  }
-
-  if (left.version().manifest_digest() <
-      right.version().manifest_digest()) {
-    return -1;
-  }
-
-  if (left.version().manifest_digest() >
-      right.version().manifest_digest()) {
+  if (left.version().generation() > right.version().generation()) {
     return 1;
   }
 
   return 0;
 }
 
-
-
 }  // namespace
-
-
-
 
 JobID GetProcessJobID(const CoreWorkerOptions &options) {
   if (options.worker_type == WorkerType::DRIVER) {
@@ -463,67 +433,55 @@ CoreWorker::CoreWorker(
                              "CoreWorker.FreeActorObjectCallback");
           }),
       clock_(clock) {
+  if (recovery_succession_enabled_) {
+    recovery_succession_manager_ =
+        std::make_shared<RecoverySuccessionManager>(rpc_address_);
 
-        if (recovery_succession_enabled_) {
-          recovery_succession_manager_ =
-              std::make_shared<RecoverySuccessionManager>(rpc_address_);
+    task_manager_->SetLineageReleasedCallback([this](const TaskID &task_id) {
+      // RemoveLineageReference holds the TaskManager lock.
+      // Post the recovery work to the CoreWorker event loop.
+      io_service_.post(
+          [this, task_id] {
+            if (!recovery_succession_enabled_ ||
+                recovery_succession_manager_ == nullptr) {
+              return;
+            }
 
-          task_manager_->SetLineageReleasedCallback(
-              [this](const TaskID &task_id) {
-                // RemoveLineageReference holds the TaskManager lock.
-                // Post the recovery work to the CoreWorker event loop.
-                io_service_.post(
-                    [this, task_id] {
-                      if (!recovery_succession_enabled_ ||
-                          recovery_succession_manager_ ==
-                              nullptr) {
-                        return;
-                      }
+            auto tombstone = recovery_succession_manager_->BuildTombstoneForTask(task_id);
 
-                      auto tombstone =
-                          recovery_succession_manager_
-                              ->BuildTombstoneForTask(
-                                  task_id);
+            if (!tombstone.has_value()) {
+              return;
+            }
 
-                      if (!tombstone.has_value()) {
-                        return;
-                      }
+            if (!recovery_tombstones_in_flight_.insert(task_id).second) {
+              return;
+            }
 
-                      if (!recovery_tombstones_in_flight_
-                              .insert(task_id)
-                              .second) {
-                        return;
-                      }
+            RAY_LOG(INFO).WithField(task_id) << "Task lineage released; "
+                                             << "publishing recovery tombstone";
 
-                      RAY_LOG(INFO)
-                          .WithField(task_id)
-                          << "Task lineage released; "
-                          << "publishing recovery tombstone";
+            PublishRecoveryTombstone(std::move(tombstone.value()));
+          },
+          "CoreWorker.PublishRecoveryTombstone");
+    });
 
-                      PublishRecoveryTombstone(
-                          std::move(
-                              tombstone.value()));
-                    },
-                    "CoreWorker.PublishRecoveryTombstone");
-              });
+    if (future_resolver_ != nullptr) {
+      std::weak_ptr<RecoverySuccessionManager> weak_recovery_manager =
+          recovery_succession_manager_;
 
-          if (future_resolver_ != nullptr) {
-            std::weak_ptr<RecoverySuccessionManager> weak_recovery_manager =
-                recovery_succession_manager_;
+      future_resolver_->SetRecoveryMetadataCallback(
+          [weak_recovery_manager](const ObjectID &object_id,
+                                  const rpc::RecoveryObjectMetadata &metadata) {
+            const auto recovery_manager = weak_recovery_manager.lock();
 
-            future_resolver_->SetRecoveryMetadataCallback(
-                [weak_recovery_manager](const ObjectID &object_id,
-                                        const rpc::RecoveryObjectMetadata &metadata) {
-                  const auto recovery_manager = weak_recovery_manager.lock();
+            if (recovery_manager == nullptr) {
+              return;
+            }
 
-                  if (recovery_manager == nullptr) {
-                    return;
-                  }
-
-                  recovery_manager->RegisterBorrowedObject(object_id, metadata);
-                });
-          }
-        }
+            recovery_manager->RegisterBorrowedObject(object_id, metadata);
+          });
+    }
+  }
 
   // Initialize task receivers.
   if (options_.worker_type == WorkerType::WORKER) {
@@ -556,7 +514,7 @@ CoreWorker::CoreWorker(
 
   RegisterToGcs(options_.worker_launch_time_ms, options_.worker_launched_time_ms);
 
-  if (options_.worker_type == WorkerType::DRIVER) {
+  if (options_.worker_type == WorkerType::DRIVER || recovery_succession_enabled_) {
     SubscribeToNodeChanges();
   }
 
@@ -644,42 +602,27 @@ CoreWorker::CoreWorker(
             // the reference went out of scope since the call to the ref counter to get
             // the lost objects. It's okay to not mark the object as failed or recover
             // the object since there are no reference holders.
-            if (recovery_succession_enabled_ &&
-              recovery_succession_manager_ != nullptr) {
-            RecoverySuccessionManager::
-                BorrowedObjectRecoveryPlan plan;
+            if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+              RecoverySuccessionManager::BorrowedObjectRecoveryPlan plan;
 
-            if (recovery_succession_manager_
-                    ->GetBorrowedObjectRecoveryPlan(
-                        object_id,
-                        &plan)) {
-              RecoverBorrowedObject(
-                  object_id,
-                  [this, object_id](bool started) {
-                    if (!started) {
-                      RAY_UNUSED(
-                          object_recovery_manager_
-                              ->RecoverObject(object_id));
-                    }
-                  });
+              if (recovery_succession_manager_->GetBorrowedObjectRecoveryPlan(object_id,
+                                                                              &plan)) {
+                RecoverBorrowedObject(object_id, [this, object_id](bool started) {
+                  if (!started) {
+                    RAY_UNUSED(object_recovery_manager_->RecoverObject(object_id));
+                  }
+                });
 
                 continue;
-                }
               }
+            }
 
-          RAY_UNUSED(
-              object_recovery_manager_->RecoverObject(
-                  object_id));
-
-
+            RAY_UNUSED(object_recovery_manager_->RecoverObject(object_id));
           }
         }
       },
       100,
       "CoreWorker.RecoverObjects");
-
-
-
 
   periodical_runner_->RunFnPeriodically(
       [this] { InternalHeartbeat(); },
@@ -932,12 +875,19 @@ void CoreWorker::RegisterToGcs(int64_t worker_launch_time_ms,
 
   gcs_client_->Workers().AsyncAdd(worker_data, nullptr);
 
-  if (options_.worker_type == WorkerType::WORKER) {
-    // Watch for owner-worker death so finished streaming-generator tasks with
-    // unconsumed objects don't leak their actor-wide BP slot
+  if (options_.worker_type == WorkerType::WORKER || recovery_succession_enabled_) {
     gcs_client_->Workers().AsyncSubscribeToWorkerFailures(
         [this](const rpc::WorkerDeltaData &worker_failure_data) {
-          HandleOwnerDied(WorkerID::FromBinary(worker_failure_data.worker_id()));
+          const WorkerID dead_worker =
+              WorkerID::FromBinary(worker_failure_data.worker_id());
+
+          if (options_.worker_type == WorkerType::WORKER) {
+            HandleOwnerDied(dead_worker);
+          }
+
+          if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+            recovery_succession_manager_->HandleWorkerFailure(dead_worker);
+          }
         },
         nullptr);
   }
@@ -993,10 +943,15 @@ void CoreWorker::SubscribeToNodeChanges() {
     // raylet_client_pool, and core_worker_client_pool here to avoid destruction order
     // fiasco between gcs_client, reference_counter_, raylet_client_pool_, and
     // core_worker_client_pool_.
+
+    const std::weak_ptr<RecoverySuccessionManager> weak_recovery_manager =
+        recovery_succession_manager_;
+
     auto on_node_change = [reference_counter = reference_counter_,
                            rate_limiter = lease_request_rate_limiter_,
                            raylet_client_pool = raylet_client_pool_,
-                           core_worker_client_pool = core_worker_client_pool_](
+                           core_worker_client_pool = core_worker_client_pool_,
+                           weak_recovery_manager](
                               const NodeID &node_id,
                               const rpc::GcsNodeAddressAndLiveness &data) {
       if (data.state() == rpc::GcsNodeInfo::DEAD) {
@@ -1006,7 +961,12 @@ void CoreWorker::SubscribeToNodeChanges() {
         reference_counter->ResetObjectsOnRemovedNode(node_id);
         raylet_client_pool->Disconnect(node_id);
         core_worker_client_pool->Disconnect(node_id);
+
+        if (const auto recovery_manager = weak_recovery_manager.lock()) {
+          recovery_manager->HandleNodeFailure(node_id);
+        }
       }
+
       auto cluster_size_based_rate_limiter =
           dynamic_cast<ClusterSizeBasedLeaseRequestRateLimiter *>(rate_limiter.get());
       if (cluster_size_based_rate_limiter != nullptr) {
@@ -2251,15 +2211,10 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             scheduling_strategy,
                             root_detached_actor_id);
 
-  if (recovery_succession_enabled_ &&
-      recovery_succession_manager_ != nullptr &&
-      RecoverySuccessionManager::IsEligibleTask(
-          builder.GetMessage())) {
-    rpc::RecoveryManifest manifest =
-        recovery_succession_manager_->BuildInitialManifest(
-            task_id,
-            worker_context_->GetCurrentJobID(),
-            max_retries);
+  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr &&
+      RecoverySuccessionManager::IsEligibleTask(builder.GetMessage())) {
+    rpc::RecoveryManifest manifest = recovery_succession_manager_->BuildInitialManifest(
+        task_id, worker_context_->GetCurrentJobID(), max_retries);
 
     PopulateRecoveryWitnesses(&manifest);
 
@@ -4185,10 +4140,8 @@ void CoreWorker::HandleReportRecoveryCandidate(
 
   const TaskID task_id = TaskID::FromBinary(admission_plan.proposed_manifest.task_id());
 
-
   rpc::RecoveryManifest proposed_manifest;
-  proposed_manifest.CopyFrom(
-      admission_plan.proposed_manifest);
+  proposed_manifest.CopyFrom(admission_plan.proposed_manifest);
 
   auto candidate_client =
       core_worker_client_pool_->GetOrConnect(admission_plan.candidate_address);
@@ -4221,103 +4174,77 @@ void CoreWorker::HandleReportRecoveryCandidate(
         PublishRecoveryManifestToWitnesses(
             proposed_manifest,
             [this,
-            manager,
-            reservation_id,
-            task_id,
-            reply,
-            send_reply_callback =
-                std::move(send_reply_callback)](
+             manager,
+             reservation_id,
+             task_id,
+             reply,
+             send_reply_callback = std::move(send_reply_callback)](
                 bool witness_stored,
-                std::optional<rpc::RecoveryManifest>
-                    newer_manifest) mutable {
+                std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
               if (!witness_stored) {
-                manager->AbortHolderAdmission(
-                    reservation_id);
+                manager->AbortHolderAdmission(reservation_id);
 
-                reply->set_result(
-                    rpc::ReportRecoveryCandidateReply::
-                        STALE_MANIFEST);
+                reply->set_result(rpc::ReportRecoveryCandidateReply::STALE_MANIFEST);
 
                 if (newer_manifest.has_value()) {
-                  reply->mutable_latest_manifest()->CopyFrom(
-                      newer_manifest.value());
+                  reply->mutable_latest_manifest()->CopyFrom(newer_manifest.value());
 
-                  manager->ApplyCommittedManifest(
-                      newer_manifest.value());
+                  manager->ApplyCommittedManifest(newer_manifest.value());
                 }
 
-                send_reply_callback(
-                    Status::OK(), nullptr, nullptr);
+                send_reply_callback(Status::OK(), nullptr, nullptr);
                 return;
               }
 
               rpc::RecoveryManifest committed_manifest;
 
-              if (!manager->CommitHolderAdmission(
-                      reservation_id,
-                      &committed_manifest)) {
-                reply->set_result(
-                    rpc::ReportRecoveryCandidateReply::
-                        STALE_MANIFEST);
+              if (!manager->CommitHolderAdmission(reservation_id, &committed_manifest)) {
+                reply->set_result(rpc::ReportRecoveryCandidateReply::STALE_MANIFEST);
 
-                send_reply_callback(
-                    Status::OK(), nullptr, nullptr);
+                send_reply_callback(Status::OK(), nullptr, nullptr);
                 return;
               }
 
-              reply->set_result(
-                  rpc::ReportRecoveryCandidateReply::ACCEPTED);
+              reply->set_result(rpc::ReportRecoveryCandidateReply::ACCEPTED);
 
-              reply->mutable_latest_manifest()->CopyFrom(
-                  committed_manifest);
+              reply->mutable_latest_manifest()->CopyFrom(committed_manifest);
 
               RAY_LOG(INFO).WithField(task_id)
                   << "Committed recovery succession manifest "
                   << "after witness publication with "
-                  << committed_manifest.succession_size()
-                  << " total members";
+                  << committed_manifest.succession_size() << " total members";
 
-              for (const rpc::RecoveryHolder &holder :
-                  committed_manifest.succession()) {
-                if (holder.address().worker_id() ==
-                    rpc_address_.worker_id()) {
+              for (const rpc::RecoveryHolder &holder : committed_manifest.succession()) {
+                if (holder.address().worker_id() == rpc_address_.worker_id()) {
                   continue;
                 }
 
-                rpc::CommitRecoveryManifestRequest
-                    commit_request;
+                rpc::CommitRecoveryManifestRequest commit_request;
 
-                commit_request.mutable_manifest()->CopyFrom(
-                    committed_manifest);
+                commit_request.mutable_manifest()->CopyFrom(committed_manifest);
 
-                const uint32_t holder_rank =
-                    holder.rank();
+                const uint32_t holder_rank = holder.rank();
 
                 auto holder_client =
-                    core_worker_client_pool_->GetOrConnect(
-                        holder.address());
+                    core_worker_client_pool_->GetOrConnect(holder.address());
 
                 holder_client->CommitRecoveryManifest(
                     std::move(commit_request),
                     [task_id, holder_rank](
                         const Status &commit_status,
-                        rpc::CommitRecoveryManifestReply
-                            &&commit_reply) {
+                        rpc::CommitRecoveryManifestReply &&commit_reply) {
                       static_cast<void>(commit_reply);
 
                       if (!commit_status.ok()) {
-                        RAY_LOG(WARNING)
-                            .WithField(task_id)
+                        RAY_LOG(WARNING).WithField(task_id)
                             << "Failed to commit recovery "
-                            << "manifest to rank "
-                            << holder_rank << ": "
+                            << "manifest to rank " << holder_rank << ": "
                             << commit_status;
                       }
                     });
               }
 
-              send_reply_callback(
-                  Status::OK(), nullptr, nullptr);
+              send_reply_callback(Status::OK(), nullptr, nullptr);
             });
       });
 }
@@ -4369,57 +4296,42 @@ void CoreWorker::HandleCommitRecoveryManifest(
   send_reply_callback(Status::OK(), nullptr, nullptr);
 }
 
-void CoreWorker::HandleRecoverTaskOutput(
-    rpc::RecoverTaskOutputRequest request,
-    rpc::RecoverTaskOutputReply *reply,
-    rpc::SendReplyCallback send_reply_callback) {
-  if (!recovery_succession_enabled_ ||
-      recovery_succession_manager_ == nullptr) {
-    reply->set_result(
-        rpc::RecoverTaskOutputReply::DISABLED);
+void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
+                                         rpc::RecoverTaskOutputReply *reply,
+                                         rpc::SendReplyCallback send_reply_callback) {
+  if (!recovery_succession_enabled_ || recovery_succession_manager_ == nullptr) {
+    reply->set_result(rpc::RecoverTaskOutputReply::DISABLED);
 
-    send_reply_callback(
-        Status::OK(), nullptr, nullptr);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
 
   rpc::TaskSpec replay_task_proto;
   rpc::RecoveryManifest latest_manifest;
 
-  const auto preparation =
-      recovery_succession_manager_->PrepareTaskReplay(
-          request,
-          &replay_task_proto,
-          &latest_manifest);
+  const auto preparation = recovery_succession_manager_->PrepareTaskReplay(
+      request, &replay_task_proto, &latest_manifest);
 
-  reply->mutable_latest_manifest()->CopyFrom(
-      latest_manifest);
+  reply->mutable_latest_manifest()->CopyFrom(latest_manifest);
 
-  using PreparationResult =
-      RecoverySuccessionManager::
-          ReplayPreparationResult;
+  using PreparationResult = RecoverySuccessionManager::ReplayPreparationResult;
 
   switch (preparation) {
   case PreparationResult::TASK_NOT_FOUND:
   case PreparationResult::WRONG_HOLDER:
-    reply->set_result(
-        rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
+    reply->set_result(rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
     break;
 
   case PreparationResult::MANIFEST_STALE:
-    reply->set_result(
-        rpc::RecoverTaskOutputReply::MANIFEST_STALE);
+    reply->set_result(rpc::RecoverTaskOutputReply::MANIFEST_STALE);
     break;
 
   case PreparationResult::TOMBSTONED:
-    reply->set_result(
-        rpc::RecoverTaskOutputReply::TOMBSTONED);
+    reply->set_result(rpc::RecoverTaskOutputReply::TOMBSTONED);
     break;
 
   case PreparationResult::RETRY_LIMIT_EXCEEDED:
-    reply->set_result(
-        rpc::RecoverTaskOutputReply::
-            RETRY_LIMIT_EXCEEDED);
+    reply->set_result(rpc::RecoverTaskOutputReply::RETRY_LIMIT_EXCEEDED);
     break;
 
   case PreparationResult::READY:
@@ -4427,157 +4339,141 @@ void CoreWorker::HandleRecoverTaskOutput(
   }
 
   if (preparation != PreparationResult::READY) {
-    send_reply_callback(
-        Status::OK(), nullptr, nullptr);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
 
-  TaskSpecification replay_task(
-      std::move(replay_task_proto));
+  TaskSpecification replay_task(std::move(replay_task_proto));
 
-  const int32_t max_retries =
-      replay_task.MaxRetries();
+  const int32_t max_retries = replay_task.MaxRetries();
 
-  std::vector<rpc::ObjectReference> returned_refs =
-      task_manager_->AddPendingTask(
-          rpc_address_,
-          replay_task,
-          "recovery-succession replay",
-          max_retries);
+  std::vector<rpc::ObjectReference> returned_refs = task_manager_->AddPendingTask(
+      rpc_address_, replay_task, "recovery-succession replay", max_retries);
 
   if (request.return_index() >= returned_refs.size()) {
-    reply->set_result(
-        rpc::RecoverTaskOutputReply::REPLAY_FAILED);
+    reply->set_result(rpc::RecoverTaskOutputReply::REPLAY_FAILED);
 
-    send_reply_callback(
-        Status::OK(), nullptr, nullptr);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
 
-  recovery_succession_manager_->RegisterOwnedTask(
-      replay_task,
-      &returned_refs);
+  recovery_succession_manager_->RegisterOwnedTask(replay_task, &returned_refs);
 
-  reply->set_result(
-      rpc::RecoverTaskOutputReply::RECOVERED);
+  reply->set_result(rpc::RecoverTaskOutputReply::RECOVERED);
 
-  reply->mutable_replacement_ref()->CopyFrom(
-      returned_refs[request.return_index()]);
+  reply->mutable_replacement_ref()->CopyFrom(returned_refs[request.return_index()]);
 
-  const TaskID task_id =
-      TaskID::FromBinary(request.task_id());
+  const TaskID task_id = TaskID::FromBinary(request.task_id());
 
   RAY_LOG(INFO).WithField(task_id)
-      << "Phase 5 recovery replay accepted for return "
-      << request.return_index();
+      << "Recovery succession replay accepted for return " << request.return_index();
 
   io_service_.post(
-      [this,
-       replay_task =
-           std::move(replay_task)]() mutable {
-        normal_task_submitter_->SubmitTask(
-            std::move(replay_task));
+      [this, replay_task = std::move(replay_task)]() mutable {
+        normal_task_submitter_->SubmitTask(std::move(replay_task));
       },
       "CoreWorker.RecoverTaskOutput");
 
-  send_reply_callback(
-      Status::OK(), nullptr, nullptr);
+  send_reply_callback(Status::OK(), nullptr, nullptr);
 }
 
-
-void CoreWorker::RecoverBorrowedObject(
-    const ObjectID &object_id,
-    RecoveryAttemptCallback callback) {
-  if (!recovery_succession_enabled_ ||
-      recovery_succession_manager_ == nullptr) {
+void CoreWorker::RecoverBorrowedObject(const ObjectID &object_id,
+                                       RecoveryAttemptCallback callback) {
+  if (!recovery_succession_enabled_ || recovery_succession_manager_ == nullptr) {
     callback(false);
     return;
   }
 
-  RecoverySuccessionManager::
-      BorrowedObjectRecoveryPlan plan;
+  RecoverySuccessionManager::BorrowedObjectRecoveryPlan plan;
 
-  if (!recovery_succession_manager_
-           ->GetBorrowedObjectRecoveryPlan(
-               object_id,
-               &plan)) {
+  if (!recovery_succession_manager_->GetBorrowedObjectRecoveryPlan(object_id, &plan)) {
     callback(false);
     return;
   }
 
-  LookupRecoveryManifestFromWitnesses(
-      plan.cached_manifest,
-      [this,
-       object_id,
-       plan = std::move(plan),
-       callback = std::move(callback)](
-          std::optional<rpc::RecoveryManifest>
-              witness_manifest) mutable {
-        rpc::RecoveryManifest effective_manifest;
-
-        if (witness_manifest.has_value() &&
-            CompareRecoveryManifestVersions(
-                witness_manifest.value(),
-                plan.cached_manifest) > 0) {
-          effective_manifest.CopyFrom(
-              witness_manifest.value());
-
-          recovery_succession_manager_
-              ->UpdateBorrowedObjectManifest(
-                  object_id,
-                  effective_manifest);
-        } else {
-          effective_manifest.CopyFrom(
-              plan.cached_manifest);
-        }
-
-        TryRecoveryHolders(
-            object_id,
-            plan.return_index,
-            effective_manifest,
-            0,
-            std::move(callback));
-      });
+  // Try the cached fixed manifest first. Witnesses are only
+  // consulted if every cached entry is exhausted.
+  TryRecoveryHolders(
+      object_id, plan.return_index, plan.cached_manifest, 0, false, std::move(callback));
 }
 
-void CoreWorker::TryRecoveryHolders(
-    const ObjectID &object_id,
-    uint32_t return_index,
-    const rpc::RecoveryManifest &manifest,
-    size_t holder_index,
-    RecoveryAttemptCallback callback) {
-  if (holder_index >=
-      static_cast<size_t>(
-          manifest.succession_size())) {
+void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
+                                    uint32_t return_index,
+                                    const rpc::RecoveryManifest &manifest,
+                                    size_t holder_index,
+                                    bool witness_lookup_attempted,
+                                    RecoveryAttemptCallback callback) {
+  if (manifest.tombstoned()) {
     callback(false);
     return;
   }
 
-  const rpc::RecoveryHolder &holder =
-      manifest.succession(
-          static_cast<int>(holder_index));
+  if (holder_index >= static_cast<size_t>(manifest.succession_size())) {
+    if (witness_lookup_attempted) {
+      callback(false);
+      return;
+    }
 
-  // Rank zero is the original owner, which is the worker
-  // whose failure triggered succession recovery.
-  if (holder.rank() == 0) {
-    TryRecoveryHolders(
-        object_id,
-        return_index,
+    LookupRecoveryManifestFromWitnesses(
         manifest,
-        holder_index + 1,
-        std::move(callback));
+        [this, object_id, return_index, manifest, callback = std::move(callback)](
+            std::optional<rpc::RecoveryManifest> witness_manifest) mutable {
+          if (!witness_manifest.has_value() ||
+              CompareRecoveryManifestVersions(witness_manifest.value(), manifest) <= 0) {
+            callback(false);
+            return;
+          }
+
+          rpc::RecoveryManifest newer_manifest;
+          newer_manifest.CopyFrom(witness_manifest.value());
+
+          recovery_succession_manager_->UpdateBorrowedObjectManifest(object_id,
+                                                                     newer_manifest);
+
+          if (newer_manifest.tombstoned()) {
+            callback(false);
+            return;
+          }
+
+          TryRecoveryHolders(
+              object_id, return_index, newer_manifest, 0, true, std::move(callback));
+        });
+
+    return;
+  }
+
+  const rpc::RecoveryHolder &holder = manifest.succession(static_cast<int>(holder_index));
+
+  // Rank zero is the failed original owner.
+  if (holder.rank() == 0) {
+    TryRecoveryHolders(object_id,
+                       return_index,
+                       manifest,
+                       holder_index + 1,
+                       witness_lookup_attempted,
+                       std::move(callback));
+    return;
+  }
+
+  if (recovery_succession_manager_->IsRecoveryHolderKnownFailed(holder)) {
+    RAY_LOG(INFO).WithField(object_id)
+        << "Skipping known-dead recovery holder rank " << holder.rank();
+
+    TryRecoveryHolders(object_id,
+                       return_index,
+                       manifest,
+                       holder_index + 1,
+                       witness_lookup_attempted,
+                       std::move(callback));
     return;
   }
 
   rpc::RecoverTaskOutputRequest request;
   request.set_task_id(manifest.task_id());
   request.set_return_index(return_index);
-  request.mutable_requester_manifest()->CopyFrom(
-      manifest);
+  request.mutable_requester_manifest()->CopyFrom(manifest);
 
-  auto holder_client =
-      core_worker_client_pool_->GetOrConnect(
-          holder.address());
+  auto holder_client = core_worker_client_pool_->GetOrConnect(holder.address());
 
   const uint32_t holder_rank = holder.rank();
 
@@ -4589,56 +4485,59 @@ void CoreWorker::TryRecoveryHolders(
        manifest,
        holder_index,
        holder_rank,
-       callback = std::move(callback)](
-          const Status &status,
-          rpc::RecoverTaskOutputReply &&reply) mutable {
+       witness_lookup_attempted,
+       callback = std::move(callback)](const Status &status,
+                                       rpc::RecoverTaskOutputReply &&reply) mutable {
         if (!status.ok()) {
-          TryRecoveryHolders(
-              object_id,
-              return_index,
-              manifest,
-              holder_index + 1,
-              std::move(callback));
+          TryRecoveryHolders(object_id,
+                             return_index,
+                             manifest,
+                             holder_index + 1,
+                             witness_lookup_attempted,
+                             std::move(callback));
           return;
         }
 
-        if (reply.result() ==
-            rpc::RecoverTaskOutputReply::
-                MANIFEST_STALE &&
+        if (reply.result() == rpc::RecoverTaskOutputReply::MANIFEST_STALE &&
             reply.has_latest_manifest()) {
-          recovery_succession_manager_
-              ->UpdateBorrowedObjectManifest(
-                  object_id,
-                  reply.latest_manifest());
+          recovery_succession_manager_->UpdateBorrowedObjectManifest(
+              object_id, reply.latest_manifest());
 
-          TryRecoveryHolders(
-              object_id,
-              return_index,
-              reply.latest_manifest(),
-              0,
-              std::move(callback));
+          TryRecoveryHolders(object_id,
+                             return_index,
+                             reply.latest_manifest(),
+                             0,
+                             witness_lookup_attempted,
+                             std::move(callback));
           return;
         }
 
-        if (reply.result() !=
-            rpc::RecoverTaskOutputReply::RECOVERED) {
-          TryRecoveryHolders(
-              object_id,
-              return_index,
-              manifest,
-              holder_index + 1,
-              std::move(callback));
+        if (reply.result() == rpc::RecoverTaskOutputReply::TOMBSTONED) {
+          if (reply.has_latest_manifest()) {
+            recovery_succession_manager_->UpdateBorrowedObjectManifest(
+                object_id, reply.latest_manifest());
+          }
+
+          callback(false);
           return;
         }
 
-        RAY_LOG(INFO).WithField(object_id)
-            << "Phase 5 recovery accepted by holder rank "
-            << holder_rank;
+        if (reply.result() != rpc::RecoverTaskOutputReply::RECOVERED) {
+          TryRecoveryHolders(object_id,
+                             return_index,
+                             manifest,
+                             holder_index + 1,
+                             witness_lookup_attempted,
+                             std::move(callback));
+          return;
+        }
+
+        RAY_LOG(INFO).WithField(object_id) << "Recovery succession accepted by "
+                                           << "holder rank " << holder_rank;
 
         callback(true);
       });
 }
-
 
 void CoreWorker::HandleApplyRecoveryTombstone(
     rpc::ApplyRecoveryTombstoneRequest request,
@@ -4646,37 +4545,26 @@ void CoreWorker::HandleApplyRecoveryTombstone(
     rpc::SendReplyCallback send_reply_callback) {
   static_cast<void>(reply);
 
-  if (!recovery_succession_enabled_ ||
-      recovery_succession_manager_ == nullptr ||
+  if (!recovery_succession_enabled_ || recovery_succession_manager_ == nullptr ||
       !request.has_tombstone()) {
-    send_reply_callback(
-        Status::OK(), nullptr, nullptr);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
 
-  const rpc::RecoveryManifest &tombstone =
-      request.tombstone();
+  const rpc::RecoveryManifest &tombstone = request.tombstone();
 
-  const bool applied =
-      recovery_succession_manager_
-          ->ApplyRecoveryTombstone(tombstone);
+  const bool applied = recovery_succession_manager_->ApplyRecoveryTombstone(tombstone);
 
   if (applied) {
-    RAY_LOG(INFO)
-        .WithField(
-            TaskID::FromBinary(tombstone.task_id()))
+    RAY_LOG(INFO).WithField(TaskID::FromBinary(tombstone.task_id()))
         << "Applied recovery succession tombstone";
   }
 
-  send_reply_callback(
-      Status::OK(), nullptr, nullptr);
+  send_reply_callback(Status::OK(), nullptr, nullptr);
 }
 
-
-void CoreWorker::PublishRecoveryTombstone(
-    rpc::RecoveryManifest tombstone) {
-  const TaskID task_id =
-      TaskID::FromBinary(tombstone.task_id());
+void CoreWorker::PublishRecoveryTombstone(rpc::RecoveryManifest tombstone) {
+  const TaskID task_id = TaskID::FromBinary(tombstone.task_id());
 
   // Keep a separate copy for the asynchronous callback.
   // Do not move the same object that is passed as the RPC manifest.
@@ -4685,120 +4573,83 @@ void CoreWorker::PublishRecoveryTombstone(
 
   PublishRecoveryManifestToWitnesses(
       tombstone,
-      [this,
-       task_id,
-       tombstone = std::move(callback_tombstone)](
-          bool stored,
-          std::optional<rpc::RecoveryManifest>
-              newer_manifest) mutable {
+      [this, task_id, tombstone = std::move(callback_tombstone)](
+          bool stored, std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
         if (!stored) {
-          RAY_LOG(WARNING).WithField(task_id)
-              << "Failed to publish recovery succession "
-              << "tombstone to witnesses";
+          RAY_LOG(WARNING).WithField(task_id) << "Failed to publish recovery succession "
+                                              << "tombstone to witnesses";
 
           if (newer_manifest.has_value()) {
             RAY_LOG(WARNING).WithField(task_id)
                 << "Witness returned newer recovery manifest: "
-                << "generation="
-                << newer_manifest->version().generation()
-                << ", coordinator_rank="
-                << newer_manifest->version()
-                       .coordinator_rank()
-                << ", tombstoned="
-                << newer_manifest->tombstoned();
+                << "generation=" << newer_manifest->version().generation()
+                << ", tombstoned=" << newer_manifest->tombstoned();
           }
 
-          if (newer_manifest.has_value() &&
-              newer_manifest->tombstoned()) {
+          if (newer_manifest.has_value() && newer_manifest->tombstoned()) {
             const bool applied_newer =
-                recovery_succession_manager_
-                    ->ApplyRecoveryTombstone(
-                        newer_manifest.value());
+                recovery_succession_manager_->ApplyRecoveryTombstone(
+                    newer_manifest.value());
 
             if (applied_newer) {
-              RAY_LOG(INFO).WithField(task_id)
-                  << "Applied newer recovery succession "
-                  << "tombstone returned by witness";
+              RAY_LOG(INFO).WithField(task_id) << "Applied newer recovery succession "
+                                               << "tombstone returned by witness";
             }
           }
 
-          recovery_tombstones_in_flight_.erase(
-              task_id);
+          recovery_tombstones_in_flight_.erase(task_id);
           return;
         }
 
         const bool applied =
-            recovery_succession_manager_
-                ->ApplyRecoveryTombstone(
-                    tombstone);
+            recovery_succession_manager_->ApplyRecoveryTombstone(tombstone);
 
         if (!applied) {
-          RAY_LOG(WARNING).WithField(task_id)
-              << "Witness stored recovery tombstone, "
-              << "but local tombstone application failed";
+          RAY_LOG(WARNING).WithField(task_id) << "Witness stored recovery tombstone, "
+                                              << "but local tombstone application failed";
 
-          recovery_tombstones_in_flight_.erase(
-              task_id);
+          recovery_tombstones_in_flight_.erase(task_id);
           return;
         }
 
-        RAY_LOG(INFO).WithField(task_id)
-            << "Published recovery succession tombstone";
+        RAY_LOG(INFO).WithField(task_id) << "Published recovery succession tombstone";
 
-        PropagateRecoveryTombstoneToHolders(
-            tombstone);
+        PropagateRecoveryTombstoneToHolders(tombstone);
 
-        recovery_tombstones_in_flight_.erase(
-            task_id);
+        recovery_tombstones_in_flight_.erase(task_id);
       });
 }
 
 void CoreWorker::PropagateRecoveryTombstoneToHolders(
     const rpc::RecoveryManifest &tombstone) {
-  const TaskID task_id =
-      TaskID::FromBinary(tombstone.task_id());
+  const TaskID task_id = TaskID::FromBinary(tombstone.task_id());
 
-  for (const rpc::RecoveryHolder &holder :
-       tombstone.succession()) {
-    if (holder.address().worker_id() ==
-        rpc_address_.worker_id()) {
+  for (const rpc::RecoveryHolder &holder : tombstone.succession()) {
+    if (holder.address().worker_id() == rpc_address_.worker_id()) {
       continue;
     }
 
     rpc::ApplyRecoveryTombstoneRequest request;
-    request.mutable_tombstone()->CopyFrom(
-        tombstone);
+    request.mutable_tombstone()->CopyFrom(tombstone);
 
     const uint32_t holder_rank = holder.rank();
 
-    auto holder_client =
-        core_worker_client_pool_->GetOrConnect(
-            holder.address());
+    auto holder_client = core_worker_client_pool_->GetOrConnect(holder.address());
 
     holder_client->ApplyRecoveryTombstone(
         std::move(request),
-        [task_id, holder_rank](
-            const Status &status,
-            rpc::ApplyRecoveryTombstoneReply
-                &&reply) {
+        [task_id, holder_rank](const Status &status,
+                               rpc::ApplyRecoveryTombstoneReply &&reply) {
           static_cast<void>(reply);
 
           if (!status.ok()) {
-            RAY_LOG(WARNING)
-                .WithField(task_id)
+            RAY_LOG(WARNING).WithField(task_id)
                 << "Failed to send recovery "
-                << "tombstone to rank "
-                << holder_rank << ": "
-                << status;
+                << "tombstone to rank " << holder_rank << ": " << status;
           }
         });
   }
 }
-
-
-
-
-
 
 void CoreWorker::HandleWaitForActorRefDeleted(
     rpc::WaitForActorRefDeletedRequest request,
@@ -5845,20 +5696,17 @@ void CoreWorker::FreeObjectOnNodesAsync(const ObjectID &object_id,
   }
 }
 
-
 std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
     const TaskID &task_id) const {
   const uint32_t requested_count =
       RayConfig::instance().recovery_succession_witness_count();
 
-  if (!recovery_succession_enabled_ || requested_count == 0 ||
-      gcs_client_ == nullptr) {
+  if (!recovery_succession_enabled_ || requested_count == 0 || gcs_client_ == nullptr) {
     return {};
   }
 
   auto nodes_result = gcs_client_->Nodes().GetAllNoCache(
-      /*timeout_ms=*/5000,
-      rpc::GcsNodeInfo::ALIVE);
+      /*timeout_ms=*/5000, rpc::GcsNodeInfo::ALIVE);
 
   if (!nodes_result.ok()) {
     RAY_LOG(WARNING).WithField(task_id)
@@ -5875,8 +5723,7 @@ std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
   std::vector<WitnessCandidate> candidates;
 
   for (const rpc::GcsNodeInfo &node : nodes_result.value()) {
-    if (node.node_id().empty() ||
-        node.node_manager_address().empty() ||
+    if (node.node_id().empty() || node.node_manager_address().empty() ||
         node.node_manager_port() <= 0) {
       continue;
     }
@@ -5892,24 +5739,21 @@ std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
     address.set_port(node.node_manager_port());
 
     candidates.push_back(
-        WitnessCandidate{
-            StableWitnessScore(task_id, NodeID::FromBinary(node.node_id())),
-            std::move(address)});
+        WitnessCandidate{StableWitnessScore(task_id, NodeID::FromBinary(node.node_id())),
+                         std::move(address)});
   }
 
-  std::sort(
-      candidates.begin(),
-      candidates.end(),
-      [](const WitnessCandidate &left, const WitnessCandidate &right) {
-        if (left.score != right.score) {
-          return left.score > right.score;
-        }
+  std::sort(candidates.begin(),
+            candidates.end(),
+            [](const WitnessCandidate &left, const WitnessCandidate &right) {
+              if (left.score != right.score) {
+                return left.score > right.score;
+              }
 
-        return left.address.node_id() < right.address.node_id();
-      });
+              return left.address.node_id() < right.address.node_id();
+            });
 
-  const size_t selected_count =
-      std::min<size_t>(requested_count, candidates.size());
+  const size_t selected_count = std::min<size_t>(requested_count, candidates.size());
 
   std::vector<rpc::Address> witnesses;
   witnesses.reserve(selected_count);
@@ -5921,8 +5765,7 @@ std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
   return witnesses;
 }
 
-void CoreWorker::PopulateRecoveryWitnesses(
-    rpc::RecoveryManifest *manifest) const {
+void CoreWorker::PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) const {
   if (manifest == nullptr || manifest->task_id().empty()) {
     return;
   }
@@ -5931,23 +5774,18 @@ void CoreWorker::PopulateRecoveryWitnesses(
 
   const TaskID task_id = TaskID::FromBinary(manifest->task_id());
 
-  std::vector<rpc::Address> witnesses =
-      SelectRecoveryWitnesses(task_id);
+  std::vector<rpc::Address> witnesses = SelectRecoveryWitnesses(task_id);
 
   for (const rpc::Address &witness : witnesses) {
     manifest->add_witness_raylets()->CopyFrom(witness);
   }
 
-  manifest->set_witness_count(
-      static_cast<uint32_t>(witnesses.size()));
+  manifest->set_witness_count(static_cast<uint32_t>(witnesses.size()));
 }
 
-
 void CoreWorker::PublishRecoveryManifestToWitnesses(
-    const rpc::RecoveryManifest &manifest,
-    RecoveryWitnessPublishCallback callback) {
-  if (!recovery_succession_enabled_ ||
-      manifest.task_id().empty() ||
+    const rpc::RecoveryManifest &manifest, RecoveryWitnessPublishCallback callback) {
+  if (!recovery_succession_enabled_ || manifest.task_id().empty() ||
       manifest.witness_raylets_size() == 0) {
     callback(false, std::nullopt);
     return;
@@ -5958,34 +5796,27 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     size_t completed ABSL_GUARDED_BY(mutex) = 0;
     bool callback_sent ABSL_GUARDED_BY(mutex) = false;
 
-    std::optional<rpc::RecoveryManifest> newest_manifest
-        ABSL_GUARDED_BY(mutex);
+    std::optional<rpc::RecoveryManifest> newest_manifest ABSL_GUARDED_BY(mutex);
   };
 
   auto state = std::make_shared<PublishState>();
 
-  const size_t witness_count =
-      static_cast<size_t>(
-          manifest.witness_raylets_size());
+  const size_t witness_count = static_cast<size_t>(manifest.witness_raylets_size());
 
-  for (const rpc::Address &witness :
-       manifest.witness_raylets()) {
+  for (const rpc::Address &witness : manifest.witness_raylets()) {
     rpc::UpdateRecoveryWitnessRequest request;
     request.mutable_manifest()->CopyFrom(manifest);
 
-    auto witness_client =
-    raylet_client_pool_->GetOrConnectByAddress(witness);
+    auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
 
     witness_client->UpdateRecoveryWitness(
         std::move(request),
         [state, witness_count, callback](
-            const Status &status,
-            rpc::UpdateRecoveryWitnessReply &&reply) mutable {
+            const Status &status, rpc::UpdateRecoveryWitnessReply &&reply) mutable {
           bool report_success = false;
           bool report_failure = false;
 
-          std::optional<rpc::RecoveryManifest>
-              newest_manifest;
+          std::optional<rpc::RecoveryManifest> newest_manifest;
 
           {
             absl::MutexLock lock(&state->mutex);
@@ -5994,26 +5825,20 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
 
             if (reply.has_latest_manifest()) {
               if (!state->newest_manifest.has_value() ||
-                  CompareRecoveryManifestVersions(
-                      reply.latest_manifest(),
-                      state->newest_manifest.value()) > 0) {
-                state->newest_manifest =
-                    reply.latest_manifest();
+                  CompareRecoveryManifestVersions(reply.latest_manifest(),
+                                                  state->newest_manifest.value()) > 0) {
+                state->newest_manifest = reply.latest_manifest();
               }
             }
 
             // One witness acknowledgement is enough for the
             // lightweight advertised-confirmation rule.
-            if (!state->callback_sent &&
-                status.ok() &&
-                reply.stored()) {
+            if (!state->callback_sent && status.ok() && reply.stored()) {
               state->callback_sent = true;
               report_success = true;
-            } else if (!state->callback_sent &&
-                       state->completed == witness_count) {
+            } else if (!state->callback_sent && state->completed == witness_count) {
               state->callback_sent = true;
-              newest_manifest =
-                  state->newest_manifest;
+              newest_manifest = state->newest_manifest;
               report_failure = true;
             }
           }
@@ -6021,20 +5846,16 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
           if (report_success) {
             callback(true, std::nullopt);
           } else if (report_failure) {
-            callback(false,
-                     std::move(newest_manifest));
+            callback(false, std::move(newest_manifest));
           }
         });
   }
 }
 
-
-
 void CoreWorker::LookupRecoveryManifestFromWitnesses(
     const rpc::RecoveryManifest &cached_manifest,
     RecoveryWitnessLookupCallback callback) {
-  if (!recovery_succession_enabled_ ||
-      cached_manifest.task_id().empty() ||
+  if (!recovery_succession_enabled_ || cached_manifest.task_id().empty() ||
       cached_manifest.witness_raylets_size() == 0) {
     callback(std::nullopt);
     return;
@@ -6045,49 +5866,38 @@ void CoreWorker::LookupRecoveryManifestFromWitnesses(
 
     size_t completed ABSL_GUARDED_BY(mutex) = 0;
 
-    std::optional<rpc::RecoveryManifest> newest
-        ABSL_GUARDED_BY(mutex);
+    std::optional<rpc::RecoveryManifest> newest ABSL_GUARDED_BY(mutex);
   };
 
   auto state = std::make_shared<LookupState>();
 
   const size_t witness_count =
-      static_cast<size_t>(
-          cached_manifest.witness_raylets_size());
+      static_cast<size_t>(cached_manifest.witness_raylets_size());
 
-  for (const rpc::Address &witness :
-       cached_manifest.witness_raylets()) {
+  for (const rpc::Address &witness : cached_manifest.witness_raylets()) {
     rpc::GetRecoveryWitnessRequest request;
-    request.set_task_id(
-        cached_manifest.task_id());
+    request.set_task_id(cached_manifest.task_id());
 
-    auto witness_client =
-    raylet_client_pool_->GetOrConnectByAddress(witness);
+    auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
 
     witness_client->GetRecoveryWitness(
         std::move(request),
-        [state, witness_count, callback](
-            const Status &status,
-            rpc::GetRecoveryWitnessReply &&reply) mutable {
+        [state, witness_count, callback](const Status &status,
+                                         rpc::GetRecoveryWitnessReply &&reply) mutable {
           bool finished = false;
 
-          std::optional<rpc::RecoveryManifest>
-              newest;
+          std::optional<rpc::RecoveryManifest> newest;
 
           {
             absl::MutexLock lock(&state->mutex);
 
             ++state->completed;
 
-            if (status.ok() &&
-                reply.found() &&
-                reply.has_manifest()) {
+            if (status.ok() && reply.found() && reply.has_manifest()) {
               if (!state->newest.has_value() ||
-                  CompareRecoveryManifestVersions(
-                      reply.manifest(),
-                      state->newest.value()) > 0) {
-                state->newest =
-                    reply.manifest();
+                  CompareRecoveryManifestVersions(reply.manifest(),
+                                                  state->newest.value()) > 0) {
+                state->newest = reply.manifest();
               }
             }
 
@@ -6103,7 +5913,5 @@ void CoreWorker::LookupRecoveryManifestFromWitnesses(
         });
   }
 }
-
-
 
 }  // namespace ray::core

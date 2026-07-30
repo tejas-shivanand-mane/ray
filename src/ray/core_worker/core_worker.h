@@ -17,7 +17,9 @@
 #include <gtest/gtest_prod.h>
 
 #include <deque>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <tuple>
@@ -26,6 +28,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/synchronization/mutex.h"
 #include "ray/asio/periodical_runner_interface.h"
 #include "ray/common/buffer.h"
@@ -55,12 +58,6 @@
 #include "ray/util/clock.h"
 #include "ray/util/shared_lru.h"
 #include "src/ray/protobuf/pubsub.pb.h"
-
-#include <functional>
-#include <optional>
-#include "absl/container/flat_hash_set.h"
-
-
 
 namespace ray::core {
 
@@ -1587,50 +1584,34 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                               const absl::flat_hash_set<NodeID> &locations);
 
  private:
-
-
-
-
   /// Selects node-distinct witness raylets for a newly owned task.
   std::vector<rpc::Address> SelectRecoveryWitnesses(const TaskID &task_id) const;
 
   /// Adds selected witnesses to a newly created owner manifest.
   void PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) const;
 
-
   using RecoveryWitnessPublishCallback =
-      std::function<void(
-          bool,
-          std::optional<rpc::RecoveryManifest>)>;
+      std::function<void(bool, std::optional<rpc::RecoveryManifest>)>;
 
-  void PublishRecoveryManifestToWitnesses(
-      const rpc::RecoveryManifest &manifest,
-      RecoveryWitnessPublishCallback callback);
+  void PublishRecoveryManifestToWitnesses(const rpc::RecoveryManifest &manifest,
+                                          RecoveryWitnessPublishCallback callback);
 
   using RecoveryWitnessLookupCallback =
-      std::function<void(
-          std::optional<rpc::RecoveryManifest>)>;
+      std::function<void(std::optional<rpc::RecoveryManifest>)>;
 
-  void LookupRecoveryManifestFromWitnesses(
-      const rpc::RecoveryManifest &cached_manifest,
-      RecoveryWitnessLookupCallback callback);
+  void LookupRecoveryManifestFromWitnesses(const rpc::RecoveryManifest &cached_manifest,
+                                           RecoveryWitnessLookupCallback callback);
 
+  using RecoveryAttemptCallback = std::function<void(bool)>;
 
-  using RecoveryAttemptCallback =
-    std::function<void(bool)>;
+  void RecoverBorrowedObject(const ObjectID &object_id, RecoveryAttemptCallback callback);
 
-  void RecoverBorrowedObject(
-      const ObjectID &object_id,
-      RecoveryAttemptCallback callback);
-
-  void TryRecoveryHolders(
-      const ObjectID &object_id,
-      uint32_t return_index,
-      const rpc::RecoveryManifest &manifest,
-      size_t holder_index,
-      RecoveryAttemptCallback callback);
-
-
+  void TryRecoveryHolders(const ObjectID &object_id,
+                          uint32_t return_index,
+                          const rpc::RecoveryManifest &manifest,
+                          size_t holder_index,
+                          bool witness_lookup_attempted,
+                          RecoveryAttemptCallback callback);
 
   /// Resolve a raylet RPC client by node id. Should be used to only get a temporary RPC
   /// client, since the retryable GRPC client relies on clients going out of scope to
@@ -1643,9 +1624,6 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   static nlohmann::json OverrideRuntimeEnv(const nlohmann::json &child,
                                            const std::shared_ptr<nlohmann::json> &parent);
-
-
-                                           
 
   /// The following tests will use `OverrideRuntimeEnv` function.
   FRIEND_TEST(TestOverrideRuntimeEnv, TestOverrideEnvVars);
@@ -2093,22 +2071,14 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// Distributed recovery succession state. Null when the feature is disabled.
   std::shared_ptr<RecoverySuccessionManager> recovery_succession_manager_;
 
-
-  absl::flat_hash_set<TaskID>
-    recovery_tombstones_in_flight_;
+  absl::flat_hash_set<TaskID> recovery_tombstones_in_flight_;
 
   /// Manages recovery of objects stored in remote plasma nodes.
   std::unique_ptr<ObjectRecoveryManager> object_recovery_manager_;
 
+  void PublishRecoveryTombstone(rpc::RecoveryManifest tombstone);
 
-
-
-
-  void PublishRecoveryTombstone(
-      rpc::RecoveryManifest tombstone);
-
-  void PropagateRecoveryTombstoneToHolders(
-      const rpc::RecoveryManifest &tombstone);
+  void PropagateRecoveryTombstoneToHolders(const rpc::RecoveryManifest &tombstone);
 
   ///
   /// Fields related to actor handles.

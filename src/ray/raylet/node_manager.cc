@@ -74,31 +74,13 @@ int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
   if (left.version().generation() < right.version().generation()) {
     return -1;
   }
+
   if (left.version().generation() > right.version().generation()) {
-    return 1;
-  }
-
-  // For the same generation, lower coordinator rank wins.
-  if (left.version().coordinator_rank() > right.version().coordinator_rank()) {
-    return -1;
-  }
-  if (left.version().coordinator_rank() < right.version().coordinator_rank()) {
-    return 1;
-  }
-
-  if (left.version().manifest_digest() < right.version().manifest_digest()) {
-    return -1;
-  }
-  if (left.version().manifest_digest() > right.version().manifest_digest()) {
     return 1;
   }
 
   return 0;
 }
-
-
-
-
 
 rpc::ObjectReference FlatbufferToSingleObjectReference(
     const flatbuffers::String &object_id, const protocol::Address &address) {
@@ -225,17 +207,10 @@ const std::vector<std::string> node_manager_message_enum =
                       static_cast<int>(ray::protocol::MessageType::MIN),
                       static_cast<int>(ray::protocol::MessageType::MAX));
 
-
-
-
-
-bool ValidRecoveryManifest(
-    const rpc::RecoveryManifest &manifest) {
-  return manifest.task_id().size() ==
-             TaskID::Size() &&
-         manifest.has_version() &&
+bool ValidRecoveryManifest(const rpc::RecoveryManifest &manifest) {
+  return manifest.task_id().size() == TaskID::Size() && manifest.has_version() &&
          manifest.version().generation() > 0;
-}         
+}
 
 }  // namespace
 
@@ -290,8 +265,7 @@ NodeManager::NodeManager(
       periodical_runner_(periodical_runner),
       report_resources_period_ms_(config.report_resources_period_ms),
       initial_config_(config),
-      recovery_succession_enabled_(
-          RayConfig::instance().enable_recovery_succession()),
+      recovery_succession_enabled_(RayConfig::instance().enable_recovery_succession()),
       lease_dependency_manager_(lease_dependency_manager),
       wait_manager_(/*is_object_local*/
                     [this](const ObjectID &object_id) {
@@ -386,14 +360,12 @@ NodeManager::NodeManager(
                                         "NodeManager.GCTaskFailureReason");
 }
 
-
 void NodeManager::HandleUpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest request,
     rpc::UpdateRecoveryWitnessReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
-  if (!RayConfig::instance().enable_recovery_succession() ||
-    !request.has_manifest() ||
-    !ValidRecoveryManifest(request.manifest())) {
+  if (!RayConfig::instance().enable_recovery_succession() || !request.has_manifest() ||
+      !ValidRecoveryManifest(request.manifest())) {
     reply->set_stored(false);
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
@@ -412,15 +384,13 @@ void NodeManager::HandleUpdateRecoveryWitness(
       reply->set_stored(true);
     } else {
       rpc::RecoveryManifest &existing = existing_it->second;
-      const int comparison =
-          CompareRecoveryManifestVersions(incoming, existing);
+      const int comparison = CompareRecoveryManifestVersions(incoming, existing);
 
       if (comparison > 0) {
         existing.CopyFrom(incoming);
         reply->set_stored(true);
       } else if (comparison == 0 &&
-                 incoming.SerializeAsString() ==
-                     existing.SerializeAsString()) {
+                 incoming.SerializeAsString() == existing.SerializeAsString()) {
         // Idempotent retry.
         reply->set_stored(true);
       } else {
@@ -433,10 +403,9 @@ void NodeManager::HandleUpdateRecoveryWitness(
   send_reply_callback(Status::OK(), nullptr, nullptr);
 }
 
-void NodeManager::HandleGetRecoveryWitness(
-    rpc::GetRecoveryWitnessRequest request,
-    rpc::GetRecoveryWitnessReply *reply,
-    rpc::SendReplyCallback send_reply_callback) {
+void NodeManager::HandleGetRecoveryWitness(rpc::GetRecoveryWitnessRequest request,
+                                           rpc::GetRecoveryWitnessReply *reply,
+                                           rpc::SendReplyCallback send_reply_callback) {
   if (!RayConfig::instance().enable_recovery_succession() ||
       request.task_id().size() != TaskID::Size()) {
     reply->set_found(false);
@@ -2360,9 +2329,6 @@ void NodeManager::HandleIsLocalWorkerDead(rpc::IsLocalWorkerDeadRequest request,
   reply->set_is_dead(!registered);
   send_reply_callback(Status::OK(), /*success=*/nullptr, /*failure=*/nullptr);
 }
-
-
-
 
 void NodeManager::HandleDrainRaylet(rpc::DrainRayletRequest request,
                                     rpc::DrainRayletReply *reply,

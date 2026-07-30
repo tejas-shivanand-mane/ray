@@ -1166,8 +1166,9 @@ message LineageReconstructionTask {
 
 message RecoveryManifestVersion {
   uint64 generation = 1;
-  uint32 coordinator_rank = 2;
-  bytes manifest_digest = 3;
+
+  reserved 2, 3;
+  reserved "coordinator_rank", "manifest_digest";
 }
 
 message RecoveryHolder {

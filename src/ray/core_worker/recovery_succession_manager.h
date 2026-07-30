@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -27,9 +28,6 @@
 #include "ray/common/task/task_spec.h"
 #include "src/ray/protobuf/common.pb.h"
 #include "src/ray/protobuf/core_worker.pb.h"
-#include <functional>
-
-
 
 namespace ray::core {
 
@@ -100,11 +98,10 @@ class RecoverySuccessionManager {
   /// Adds recovery metadata to direct and nested ObjectRef arguments.
   void PopulateTaskArgumentMetadata(rpc::TaskSpec *task_spec) const;
 
-
   struct BorrowedObjectRecoveryPlan {
-  TaskID task_id;
-  uint32_t return_index = 0;
-  rpc::RecoveryManifest cached_manifest;
+    TaskID task_id;
+    uint32_t return_index = 0;
+    rpc::RecoveryManifest cached_manifest;
   };
 
   enum class ReplayPreparationResult {
@@ -116,42 +113,33 @@ class RecoverySuccessionManager {
     WRONG_HOLDER,
   };
 
-  bool GetBorrowedObjectRecoveryPlan(
-      const ObjectID &object_id,
-      BorrowedObjectRecoveryPlan *plan) const;
+  bool GetBorrowedObjectRecoveryPlan(const ObjectID &object_id,
+                                     BorrowedObjectRecoveryPlan *plan) const;
 
-  ReplayPreparationResult PrepareTaskReplay(
-      const rpc::RecoverTaskOutputRequest &request,
-      rpc::TaskSpec *task_spec,
-      rpc::RecoveryManifest *latest_manifest);
+  ReplayPreparationResult PrepareTaskReplay(const rpc::RecoverTaskOutputRequest &request,
+                                            rpc::TaskSpec *task_spec,
+                                            rpc::RecoveryManifest *latest_manifest);
 
-  void UpdateBorrowedObjectManifest(
-      const ObjectID &object_id,
-      const rpc::RecoveryManifest &manifest);
+  void UpdateBorrowedObjectManifest(const ObjectID &object_id,
+                                    const rpc::RecoveryManifest &manifest);
 
-
-
-  std::optional<rpc::RecoveryManifest> BuildTombstoneForTask(
-      const TaskID &task_id) const;
+  std::optional<rpc::RecoveryManifest> BuildTombstoneForTask(const TaskID &task_id) const;
 
   /// Applies a tombstone and removes retained lineage and object metadata.
-  bool ApplyRecoveryTombstone(
-      const rpc::RecoveryManifest &tombstone);
+  bool ApplyRecoveryTombstone(const rpc::RecoveryManifest &tombstone);
 
-
-
-  /// Failure-based takeover and repair are implemented later.
+  /// Records definitive Ray failure notifications.
   void HandleWorkerFailure(const WorkerID &worker_id);
   void HandleNodeFailure(const NodeID &node_id);
+
+  /// Returns true when the holder's worker or node is known to be dead.
+  bool IsRecoveryHolderKnownFailed(const rpc::RecoveryHolder &holder) const;
 
   /// Returns whether this worker is a committed non-owner lineage holder.
   bool HasConfirmedHolderResponsibilities() const;
 
  private:
-
-
-  void EraseTaskObjectMetadataLocked(
-      const TaskID &task_id)
+  void EraseTaskObjectMetadataLocked(const TaskID &task_id)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   struct TaskRecoveryState {
@@ -208,6 +196,12 @@ class RecoverySuccessionManager {
 
   /// Prevents repeated reports for the same producer task.
   absl::flat_hash_set<TaskID> candidate_reports_sent_ ABSL_GUARDED_BY(mutex_);
+
+  /// Workers definitively reported dead by the GCS.
+  absl::flat_hash_set<WorkerID> failed_workers_ ABSL_GUARDED_BY(mutex_);
+
+  /// Nodes definitively reported dead by the GCS.
+  absl::flat_hash_set<NodeID> failed_nodes_ ABSL_GUARDED_BY(mutex_);
 };
 
 }  // namespace ray::core

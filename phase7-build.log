@@ -1,0 +1,307 @@
+Using pip 25.1 from /home/tejas/anaconda3/lib/python3.13/site-packages/pip (python 3.13)
+Obtaining file:///home/tejas/Downloads/ray/python
+  Preparing metadata (setup.py): started
+  Running command python setup.py egg_info
+  /home/tejas/anaconda3/lib/python3.13/site-packages/setuptools/__init__.py:85: _DeprecatedInstaller: setuptools.installer and fetch_build_eggs are deprecated.
+  !!
+
+          ********************************************************************************
+          Requirements should be satisfied by a PEP 517 installer.
+          If you are using pip, you can try `pip install --use-pep517`.
+          ********************************************************************************
+
+  !!
+    dist.fetch_build_eggs(dist.setup_requires)
+  running egg_info
+  creating /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info
+  writing /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/dependency_links.txt
+  writing entry points to /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/entry_points.txt
+  writing requirements to /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/requires.txt
+  writing top-level names to /tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/SOURCES.txt'
+  reading manifest template 'MANIFEST.in'
+  adding license file 'LICENSE.txt'
+  writing manifest file '/tmp/pip-pip-egg-info-ejw1k1uk/ray.egg-info/SOURCES.txt'
+  Preparing metadata (setup.py): finished with status 'done'
+Requirement already satisfied: click>=7.0 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (8.4.2)
+Requirement already satisfied: filelock in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (3.29.7)
+Requirement already satisfied: jsonschema in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (4.23.0)
+Requirement already satisfied: msgpack<2.0.0,>=1.0.0 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (1.0.3)
+Requirement already satisfied: packaging>=24.2 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (24.2)
+Requirement already satisfied: protobuf>=3.20.3 in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (5.29.3)
+Requirement already satisfied: pyyaml in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (6.0.3)
+Requirement already satisfied: requests in /home/tejas/anaconda3/lib/python3.13/site-packages (from ray==3.0.0.dev0) (2.32.3)
+Requirement already satisfied: attrs>=22.2.0 in /home/tejas/anaconda3/lib/python3.13/site-packages (from jsonschema->ray==3.0.0.dev0) (24.3.0)
+Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /home/tejas/anaconda3/lib/python3.13/site-packages (from jsonschema->ray==3.0.0.dev0) (2023.7.1)
+Requirement already satisfied: referencing>=0.28.4 in /home/tejas/anaconda3/lib/python3.13/site-packages (from jsonschema->ray==3.0.0.dev0) (0.30.2)
+Requirement already satisfied: rpds-py>=0.7.1 in /home/tejas/anaconda3/lib/python3.13/site-packages (from jsonschema->ray==3.0.0.dev0) (0.22.3)
+Requirement already satisfied: charset-normalizer<4,>=2 in /home/tejas/anaconda3/lib/python3.13/site-packages (from requests->ray==3.0.0.dev0) (3.3.2)
+Requirement already satisfied: idna<4,>=2.5 in /home/tejas/anaconda3/lib/python3.13/site-packages (from requests->ray==3.0.0.dev0) (3.7)
+Requirement already satisfied: urllib3<3,>=1.21.1 in /home/tejas/anaconda3/lib/python3.13/site-packages (from requests->ray==3.0.0.dev0) (2.3.0)
+Requirement already satisfied: certifi>=2017.4.17 in /home/tejas/anaconda3/lib/python3.13/site-packages (from requests->ray==3.0.0.dev0) (2025.4.26)
+Installing collected packages: ray
+  DEPRECATION: Legacy editable install of ray==3.0.0.dev0 from file:///home/tejas/Downloads/ray/python (setup.py develop) is deprecated. pip 25.3 will enforce this behaviour change. A possible replacement is to add a pyproject.toml or enable --use-pep517, and use setuptools >= 64. If the resulting installation is not behaving as expected, try using --config-settings editable_mode=compat. Please consult the setuptools documentation for more information. Discussion can be found at https://github.com/pypa/pip/issues/11457
+  Running setup.py develop for ray
+    Running command python setup.py develop
+    /home/tejas/anaconda3/lib/python3.13/site-packages/setuptools/__init__.py:85: _DeprecatedInstaller: setuptools.installer and fetch_build_eggs are deprecated.
+    !!
+
+            ********************************************************************************
+            Requirements should be satisfied by a PEP 517 installer.
+            If you are using pip, you can try `pip install --use-pep517`.
+            ********************************************************************************
+
+    !!
+      dist.fetch_build_eggs(dist.setup_requires)
+    running develop
+    /home/tejas/anaconda3/lib/python3.13/site-packages/setuptools/command/develop.py:42: EasyInstallDeprecationWarning: easy_install command is deprecated.
+    !!
+
+            ********************************************************************************
+            Please avoid running ``setup.py`` and ``easy_install``.
+            Instead, use pypa/build, pypa/installer or other
+            standards-based tools.
+
+            See https://github.com/pypa/setuptools/issues/917 for details.
+            ********************************************************************************
+
+    !!
+      easy_install.initialize_options(self)
+    /home/tejas/anaconda3/lib/python3.13/site-packages/setuptools/_distutils/cmd.py:66: SetuptoolsDeprecationWarning: setup.py install is deprecated.
+    !!
+
+            ********************************************************************************
+            Please avoid running ``setup.py`` directly.
+            Instead, use pypa/build, pypa/installer or other
+            standards-based tools.
+
+            See https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html for details.
+            ********************************************************************************
+
+    !!
+      self.initialize_options()
+    running egg_info
+    creating ray.egg-info
+    writing ray.egg-info/PKG-INFO
+    writing dependency_links to ray.egg-info/dependency_links.txt
+    writing entry points to ray.egg-info/entry_points.txt
+    writing requirements to ray.egg-info/requires.txt
+    writing top-level names to ray.egg-info/top_level.txt
+    writing manifest file 'ray.egg-info/SOURCES.txt'
+    reading manifest file 'ray.egg-info/SOURCES.txt'
+    reading manifest template 'MANIFEST.in'
+    adding license file 'LICENSE.txt'
+    writing manifest file 'ray.egg-info/SOURCES.txt'
+    running build_ext
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama-0.4.6.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/colorama already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/psutil-7.2.2.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/thirdparty_files/psutil already exists. Specify --upgrade to force replacement.
+    ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+    marker-pdf 1.10.2 requires regex<2025.0.0,>=2024.4.28, but you have regex 2026.7.10 which is incompatible.
+    marker-pdf 1.10.2 requires transformers<5.0.0,>=4.45.2, but you have transformers 5.13.1 which is incompatible.
+    streamlit 1.45.1 requires pandas<3,>=1.4.0, but you have pandas 3.0.3 which is incompatible.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohttp-3.14.3.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohttp already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiosignal-1.4.0.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiosignal already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/yarl-1.24.5.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/yarl already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohappyeyeballs-2.7.1.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/aiohappyeyeballs already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attrs-26.1.0.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attrs already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/attr already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/frozenlist-1.8.0.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/frozenlist already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/idna-3.18.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/idna already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/multidict-6.7.1.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/multidict already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/propcache-0.5.2.dist-info already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/propcache already exists. Specify --upgrade to force replacement.
+    WARNING: Target directory /home/tejas/Downloads/ray/python/ray/_private/runtime_env/agent/thirdparty_files/bin already exists. Specify --upgrade to force replacement.
+    Computing main repo mapping:
+    Loading:
+    Loading: 0 packages loaded
+    Analyzing: 3 targets (0 packages loaded, 0 targets configured)
+    Analyzing: 3 targets (0 packages loaded, 0 targets configured)
+
+    DEBUG: /home/tejas/Downloads/ray/bazel/ray.bzl:175:10: [<generated file external/jemalloc/libjemalloc/lib/libjemalloc.so>]
+    INFO: Analyzed 3 targets (3 packages loaded, 1786 targets configured).
+    INFO: From Generating proto_library //src/ray/protobuf/public:events_task_definition_event_proto:
+    src/ray/protobuf/public/events_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
+    INFO: From Generating proto_library //src/ray/protobuf/public:events_actor_task_definition_event_proto:
+    src/ray/protobuf/public/events_actor_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
+    [10,843 / 11,918] Executing genrule @@local_config_python//_python3:_python3_include; 0s processwrapper-sandbox ... (13 actions, 12 running)
+    INFO: From Generating Descriptor Set proto_library //src/ray/protobuf/public:events_actor_task_definition_event_proto:
+    src/ray/protobuf/public/events_actor_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
+    INFO: From Generating Descriptor Set proto_library //src/ray/protobuf/public:events_task_definition_event_proto:
+    src/ray/protobuf/public/events_task_definition_event.proto:17:1: warning: Import src/ray/protobuf/public/runtime_environment.proto is unused.
+    [11,188 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 1s processwrapper-sandbox ... (16 actions, 15 running)
+    INFO: From PackageZip core_py_proto.zip:
+    /home/tejas/.cache/bazel/_bazel_tejas/2532fb3dbcfe690cd6edc5c0a849b95a/sandbox/processwrapper-sandbox/167/execroot/io_ray/bazel-out/k8-opt-exec-ST-a828a81199fe/bin/external/rules_pkg/pkg/private/zip/build_zip.runfiles/io_ray/../rules_pkg/pkg/private/zip/build_zip.py:70: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+      ts = datetime.datetime.utcfromtimestamp(ts)
+    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_status.c:
+    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
+    [11,195 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 2s processwrapper-sandbox ... (17 actions, 15 running)
+    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_setup.c:
+    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
+    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_debug.c:
+    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
+    INFO: From Compiling src/ray/thirdparty/setproctitle/spt_strlcpy.c:
+    cc1: warning: command-line option '-Wconversion-null' is valid for C++/ObjC++ but not for C
+    [11,206 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 3s processwrapper-sandbox ... (16 actions running)
+    [11,212 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 4s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,225 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 6s processwrapper-sandbox ... (17 actions, 15 running)
+    [11,230 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 7s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,233 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 8s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,253 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 9s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,257 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 10s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,258 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,267 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,281 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 14s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,286 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,294 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,298 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 18s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,312 / 11,918] Compiling src/ray/protobuf/gcs.pb.cc; 15s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,318 / 11,918] Compiling src/ray/gcs/gcs_health_check_manager.cc; 8s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,325 / 11,918] Compiling src/ray/gcs/gcs_health_check_manager.cc; 9s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,334 / 11,918] Compiling src/ray/rpc/grpc_server.cc; 8s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,337 / 11,918] Compiling src/ray/protobuf/autoscaler.pb.cc; 9s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,345 / 11,918] Compiling src/ray/protobuf/gcs_service.pb.cc; 8s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,351 / 11,918] Compiling src/ray/protobuf/gcs_service.pb.cc; 9s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,358 / 11,918] Compiling src/ray/protobuf/gcs_service.pb.cc; 10s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,363 / 11,918] Compiling src/ray/protobuf/gcs_service.pb.cc; 12s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,368 / 11,918] Compiling src/ray/util/event.cc; 13s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,374 / 11,918] Compiling src/ray/util/event.cc; 14s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,380 / 11,918] Compiling src/ray/util/event.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,384 / 11,918] Compiling src/ray/util/event.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,391 / 11,918] Compiling src/ray/protobuf/common.pb.cc; 16s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,394 / 11,918] Compiling src/ray/raylet/runtime_env_agent_client.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,399 / 11,918] Compiling src/ray/raylet/runtime_env_agent_client.cc; 18s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,404 / 11,918] Compiling src/ray/raylet/runtime_env_agent_client.cc; 20s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,412 / 11,918] Compiling src/ray/util/event.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,414 / 11,918] Compiling src/ray/util/event.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,418 / 11,918] Compiling src/ray/util/event.cc; 13s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,423 / 11,918] Compiling src/ray/util/event.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,424 / 11,918] Compiling src/ray/util/event.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,434 / 11,918] Compiling src/ray/raylet_ipc_client/client_connection.cc; 9s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,445 / 11,918] Compiling src/ray/protobuf/node_manager.grpc.pb.cc; 8s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,446 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 9s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,449 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 10s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,456 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,457 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,461 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,468 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,470 / 11,918] Compiling src/ray/gcs/store_client/rocksdb_store_client.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,475 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 12s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,479 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,486 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 14s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,488 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,496 / 11,918] Compiling src/ray/common/file_system_monitor.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,501 / 11,918] Compiling src/ray/gcs/gcs_table_storage.cc; 9s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,504 / 11,918] Compiling src/ray/gcs/gcs_table_storage.cc; 10s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,510 / 11,918] Compiling src/ray/gcs/gcs_placement_group.cc; 9s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,513 / 11,918] Compiling src/ray/protobuf/gcs_service.grpc.pb.cc; 10s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,522 / 11,918] Compiling src/ray/gcs/store_client/rocksdb_store_client.cc; 10s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,524 / 11,918] Compiling src/ray/gcs/store_client/rocksdb_store_client.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,529 / 11,918] Compiling src/ray/observability/python_event_interface.cc; 10s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,536 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 10s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,539 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,542 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,546 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,547 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,553 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,557 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,562 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,563 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,570 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,573 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 18s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,576 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 20s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,581 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 21s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,583 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 22s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,589 / 11,918] Compiling src/ray/raylet_rpc_client/raylet_client.cc; 22s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,593 / 11,918] Compiling src/ray/pubsub/python_gcs_subscriber.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,600 / 11,918] Compiling src/ray/pubsub/python_gcs_subscriber.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,607 / 11,918] Compiling src/ray/gcs/actor/gcs_actor.cc; 16s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,617 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 12s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,623 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 13s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,625 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,629 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 15s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,635 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 17s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,638 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 19s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,649 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 20s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,650 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 22s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,653 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 23s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,655 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 24s processwrapper-sandbox ... (17 actions, 15 running)
+    [11,655 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 26s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,658 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 27s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,665 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 29s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,669 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 30s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,675 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 31s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,678 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 32s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,680 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 34s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,683 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 36s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,684 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 37s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,689 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 38s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,691 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 40s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,695 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 42s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,703 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 43s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,707 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 34s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,708 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 35s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,711 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 37s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,713 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 39s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,715 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 40s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,718 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 41s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,723 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 43s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,730 / 11,918] Compiling src/ray/gcs/grpc_services.cc; 44s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,734 / 11,918] Compiling src/ray/core_worker_rpc_client/core_worker_client.cc; 18s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,735 / 11,918] Compiling src/ray/core_worker_rpc_client/core_worker_client.cc; 20s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,740 / 11,918] Compiling src/ray/object_manager/plasma/store.cc; 16s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,742 / 11,918] Compiling src/ray/object_manager/plasma/store.cc; 17s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,743 / 11,918] Compiling src/ray/object_manager/plasma/store.cc; 18s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,746 / 11,918] Compiling src/ray/gcs/gcs_task_manager.cc; 15s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,750 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 11s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,753 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 12s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,755 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 14s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,757 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 16s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,761 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 17s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,766 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 18s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,767 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 20s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,771 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 21s processwrapper-sandbox ... (16 actions running)
+    [11,772 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 22s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,775 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 24s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,777 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 28s processwrapper-sandbox ... (15 actions, 14 running)
+    [11,781 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 30s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,785 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 31s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,786 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 33s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,787 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 35s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,789 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 36s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,791 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 37s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,792 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 41s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,794 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 43s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,794 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 107s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,797 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 109s processwrapper-sandbox ... (14 actions, 13 running)
+    [11,804 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 81s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,805 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 83s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,806 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 89s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,807 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 90s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,809 / 11,918] Compiling src/ray/gcs/gcs_placement_group_scheduler.cc; 90s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,814 / 11,918] Compiling src/ray/gcs/gcs_placement_group_manager.cc; 90s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,817 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 86s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,818 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 88s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,819 / 11,918] Compiling src/ray/gcs/gcs_node_manager.cc; 90s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,821 / 11,918] Compiling src/ray/gcs/gcs_placement_group_manager.cc; 90s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,824 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 86s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,825 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 87s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,826 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 91s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,828 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 92s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,833 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 93s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,835 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 95s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,836 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 99s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,837 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 100s processwrapper-sandbox ... (17 actions, 16 running)
+    [11,838 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 102s processwrapper-sandbox ... (16 actions, 15 running)
+    [11,839 / 11,918] Compiling src/ray/gcs_rpc_client/accessor.cc; 103s processwrapper-sandbox ... (17 actions, 16 running)
