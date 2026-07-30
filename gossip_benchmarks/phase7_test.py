@@ -5,11 +5,8 @@ from pathlib import Path
 
 import ray
 from ray.cluster_utils import Cluster
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-
-from ray.util.scheduling_strategies import (
-    NodeAffinitySchedulingStrategy,
-)
 
 PAYLOAD_SIZE = 2 * 1024 * 1024
 
@@ -103,8 +100,6 @@ def run_failure_case(failure_mode: str) -> None:
 
     producer_node_id = producer_node.node_id
 
-
-
     cluster.add_node(
         num_cpus=1,
         resources={"rank2_node": 1},
@@ -155,14 +150,16 @@ def run_failure_case(failure_mode: str) -> None:
             return True
 
         def read(self):
-            return ray.get(self.ref)
+            # Keep the worker-side GetObjectsInternal timeout finite.
+            # This lets the test distinguish a deletion-confirmation
+            # stall from a replay or object-transfer stall.
+            return ray.get(self.ref, timeout=45)
 
     try:
-
         owner = Owner.options(
             resources={"owner_node": 0.01},
         ).remote(producer_node_id)
-        
+
         nested = ray.get(
             owner.create.remote()
         )
@@ -254,6 +251,7 @@ def run_failure_case(failure_mode: str) -> None:
         fresh_nested = ray.get(
             rank2_holder.export.remote()
         )
+
         fresh_ref = fresh_nested[0]
 
         borrower = Borrower.options(
@@ -280,8 +278,7 @@ def run_failure_case(failure_mode: str) -> None:
             # the borrower before recovery begins.
             time.sleep(5)
 
-            # Lose the owner and physical object immediately
-            # afterward.
+            # Lose the owner and physical object immediately afterward.
             ray.kill(
                 owner,
                 no_restart=True,
@@ -315,10 +312,43 @@ def run_failure_case(failure_mode: str) -> None:
                 f"Unknown failure mode: {failure_mode}"
             )
 
-        result = ray.get(
-            borrower.read.remote(),
-            timeout=60,
-        )
+        try:
+            result = ray.get(
+                borrower.read.remote(),
+                timeout=60,
+            )
+        except Exception:
+            print(
+                f"{failure_mode} recovery failure logs:"
+            )
+
+            print_matching_logs(
+                session_dirs,
+                [
+                    "Confirmed stale local OWNER_DIED",
+                    "OWNER_DIED observed",
+                    "OWNER_DIED intercepted",
+                    "Skipping known-dead",
+                    "Preparing recovery succession replay attempt",
+                    "Promoted borrowed object to owned recovery return",
+                    "Recovery succession replay accepted",
+                    "Recovery succession accepted by holder",
+                    "Failed to delete local OWNER_DIED",
+                    "Timed out removing stale local OWNER_DIED",
+                    "Trying to put an object that already existed in plasma",
+                    "Failed to handle task return",
+                    "Resolving task dependencies failed",
+                    "Task dependencies resolved",
+                    "Requesting lease",
+                    "Lease granted",
+                    "Pushing task",
+                    "finished from worker",
+                    "Completing task",
+                    "Objects ",
+                ],
+            )
+
+            raise
 
         assert len(result) == PAYLOAD_SIZE
 
@@ -346,12 +376,26 @@ def run_failure_case(failure_mode: str) -> None:
             print_matching_logs(
                 session_dirs,
                 [
+                    "Confirmed stale local OWNER_DIED",
                     "OWNER_DIED observed",
                     "OWNER_DIED intercepted",
-                    "Attempting to recover",
                     "Skipping known-dead",
-                    "Recovery succession",
+                    "Preparing recovery succession replay attempt",
+                    "Promoted borrowed object to owned recovery return",
+                    "Recovery succession replay accepted",
+                    "Recovery succession accepted by holder",
                     "Failed to delete local OWNER_DIED",
+                    "Timed out removing stale local OWNER_DIED",
+                    "Trying to put an object that already existed in plasma",
+                    "Failed to handle task return",
+                    "Resolving task dependencies failed",
+                    "Task dependencies resolved",
+                    "Requesting lease",
+                    "Lease granted",
+                    "Pushing task",
+                    "finished from worker",
+                    "Completing task",
+                    "Objects ",
                 ],
             )
 
