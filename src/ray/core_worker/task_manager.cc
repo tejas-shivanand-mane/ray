@@ -1733,30 +1733,47 @@ int64_t TaskManager::RemoveLineageReference(const ObjectID &object_id,
                  << it->second.reconstructable_return_ids_.size()
                  << " plasma returns in scope";
 
-  if (it->second.reconstructable_return_ids_.empty() && !it->second.IsPending()) {
+  if (it->second.reconstructable_return_ids_.empty() &&
+      !it->second.IsPending()) {
+    // Notify CoreWorker before deleting the normal Ray lineage.
+    if (lineage_released_callback_) {
+      lineage_released_callback_(task_id);
+    }
+
     // If the task can no longer be retried, decrement the lineage ref count
     // for each of the task's args.
-    for (size_t i = 0; i < it->second.spec_.NumArgs(); i++) {
+    for (size_t i = 0;
+        i < it->second.spec_.NumArgs();
+        i++) {
       if (it->second.spec_.ArgByRef(i)) {
-        released_objects->push_back(it->second.spec_.ArgObjectId(i));
+        released_objects->push_back(
+            it->second.spec_.ArgObjectId(i));
       } else {
-        const auto &inlined_refs = it->second.spec_.ArgInlinedRefs(i);
-        for (const auto &inlined_ref : inlined_refs) {
-          released_objects->push_back(ObjectID::FromBinary(inlined_ref.object_id()));
+        const auto &inlined_refs =
+            it->second.spec_.ArgInlinedRefs(i);
+
+        for (const auto &inlined_ref :
+            inlined_refs) {
+          released_objects->push_back(
+              ObjectID::FromBinary(
+                  inlined_ref.object_id()));
         }
       }
     }
 
     if (it->second.spec_.IsActorTask()) {
-      // We need to decrement the actor lineage ref count here
-      // since it's incremented during TaskManager::AddPendingTask.
-      const auto actor_creation_return_id = it->second.spec_.ActorCreationDummyObjectId();
-      released_objects->push_back(actor_creation_return_id);
+      const auto actor_creation_return_id =
+          it->second.spec_
+              .ActorCreationDummyObjectId();
+
+      released_objects->push_back(
+          actor_creation_return_id);
     }
 
-    total_lineage_footprint_bytes_ -= it->second.lineage_footprint_bytes_;
-    // The task has finished and none of the return IDs are in scope anymore,
-    // so it is safe to remove the task spec.
+    total_lineage_footprint_bytes_ -=
+        it->second.lineage_footprint_bytes_;
+
+    // The task has finished and none of its returns are in scope.
     submissible_tasks_.erase(it);
   }
 

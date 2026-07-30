@@ -463,27 +463,67 @@ CoreWorker::CoreWorker(
                              "CoreWorker.FreeActorObjectCallback");
           }),
       clock_(clock) {
-  if (recovery_succession_enabled_) {
-    recovery_succession_manager_ =
-        std::make_shared<RecoverySuccessionManager>(rpc_address_);
 
-    if (future_resolver_ != nullptr) {
-      std::weak_ptr<RecoverySuccessionManager> weak_recovery_manager =
-          recovery_succession_manager_;
+        if (recovery_succession_enabled_) {
+          recovery_succession_manager_ =
+              std::make_shared<RecoverySuccessionManager>(rpc_address_);
 
-      future_resolver_->SetRecoveryMetadataCallback(
-          [weak_recovery_manager](const ObjectID &object_id,
-                                  const rpc::RecoveryObjectMetadata &metadata) {
-            const auto recovery_manager = weak_recovery_manager.lock();
+          task_manager_->SetLineageReleasedCallback(
+              [this](const TaskID &task_id) {
+                // RemoveLineageReference holds the TaskManager lock.
+                // Post the recovery work to the CoreWorker event loop.
+                io_service_.post(
+                    [this, task_id] {
+                      if (!recovery_succession_enabled_ ||
+                          recovery_succession_manager_ ==
+                              nullptr) {
+                        return;
+                      }
 
-            if (recovery_manager == nullptr) {
-              return;
-            }
+                      auto tombstone =
+                          recovery_succession_manager_
+                              ->BuildTombstoneForTask(
+                                  task_id);
 
-            recovery_manager->RegisterBorrowedObject(object_id, metadata);
-          });
-    }
-  }
+                      if (!tombstone.has_value()) {
+                        return;
+                      }
+
+                      if (!recovery_tombstones_in_flight_
+                              .insert(task_id)
+                              .second) {
+                        return;
+                      }
+
+                      RAY_LOG(INFO)
+                          .WithField(task_id)
+                          << "Task lineage released; "
+                          << "publishing recovery tombstone";
+
+                      PublishRecoveryTombstone(
+                          std::move(
+                              tombstone.value()));
+                    },
+                    "CoreWorker.PublishRecoveryTombstone");
+              });
+              
+          if (future_resolver_ != nullptr) {
+            std::weak_ptr<RecoverySuccessionManager> weak_recovery_manager =
+                recovery_succession_manager_;
+
+            future_resolver_->SetRecoveryMetadataCallback(
+                [weak_recovery_manager](const ObjectID &object_id,
+                                        const rpc::RecoveryObjectMetadata &metadata) {
+                  const auto recovery_manager = weak_recovery_manager.lock();
+
+                  if (recovery_manager == nullptr) {
+                    return;
+                  }
+
+                  recovery_manager->RegisterBorrowedObject(object_id, metadata);
+                });
+          }
+        }
 
   // Initialize task receivers.
   if (options_.worker_type == WorkerType::WORKER) {
@@ -640,14 +680,6 @@ CoreWorker::CoreWorker(
 
 
 
-  if (recovery_succession_enabled_) {
-    periodical_runner_->RunFnPeriodically(
-        [this] {
-          CheckRecoverySuccessionCleanup();
-        },
-        1000,
-        "CoreWorker.RecoverySuccessionCleanup");
-  }
 
   periodical_runner_->RunFnPeriodically(
       [this] { InternalHeartbeat(); },
@@ -4640,34 +4672,6 @@ void CoreWorker::HandleApplyRecoveryTombstone(
       Status::OK(), nullptr, nullptr);
 }
 
-void CoreWorker::CheckRecoverySuccessionCleanup() {
-  if (!recovery_succession_enabled_ ||
-      recovery_succession_manager_ == nullptr) {
-    return;
-  }
-
-  const std::vector<rpc::RecoveryManifest> tombstones =
-      recovery_succession_manager_
-          ->BuildTombstoneCandidates(
-              [this](const ObjectID &object_id) {
-                return reference_counter_
-                    ->HasReference(object_id);
-              });
-
-  for (const rpc::RecoveryManifest &tombstone :
-       tombstones) {
-    const TaskID task_id =
-        TaskID::FromBinary(tombstone.task_id());
-
-    if (!recovery_tombstones_in_flight_
-             .insert(task_id)
-             .second) {
-      continue;
-    }
-
-    PublishRecoveryTombstone(tombstone);
-  }
-}
 
 void CoreWorker::PublishRecoveryTombstone(
     rpc::RecoveryManifest tombstone) {

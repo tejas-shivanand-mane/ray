@@ -71,6 +71,10 @@ using PutInLocalPlasmaCallback =
 using AsyncRetryTaskCallback =
     std::function<void(TaskSpecification &spec, uint32_t delay_ms)>;
 using ReconstructObjectCallback = std::function<void(const ObjectID &object_id)>;
+
+using LineageReleasedCallback =
+    std::function<void(const TaskID &task_id)>;
+
 using PushErrorCallback = std::function<Status(const JobID &job_id,
                                                const std::string &type,
                                                const std::string &error_message,
@@ -293,9 +297,14 @@ class TaskManager : public TaskManagerInterface {
     reference_counter_.SetReleaseLineageCallback(
         [this](const ObjectID &object_id, std::vector<ObjectID> *ids_to_release) {
           return RemoveLineageReference(object_id, ids_to_release);
-          ShutdownIfNeeded();
         });
   }
+
+
+  void SetLineageReleasedCallback(
+    LineageReleasedCallback callback) {
+        lineage_released_callback_ = std::move(callback);
+    }
 
   std::vector<rpc::ObjectReference> AddPendingTask(const rpc::Address &caller_address,
                                                    const TaskSpecification &spec,
@@ -632,6 +641,12 @@ class TaskManager : public TaskManagerInterface {
   /// already has it) to avoid a redundant counter lookup.
   void RecordTaskState(const std::tuple<std::string, rpc::TaskStatus, bool> &key,
                        int64_t value) ABSL_EXCLUSIVE_LOCKS_REQUIRED(&mu_);
+
+
+
+
+
+  LineageReleasedCallback lineage_released_callback_;
 
   struct TaskEntry {
     TaskEntry(TaskSpecification spec,
