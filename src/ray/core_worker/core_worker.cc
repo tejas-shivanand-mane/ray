@@ -1758,6 +1758,7 @@ Status CoreWorker::GetObjectsInternal(
     RAY_CHECK(!missing_result);
   }
 
+  
   return Status::OK();
 }
 
