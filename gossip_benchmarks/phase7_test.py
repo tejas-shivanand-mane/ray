@@ -44,7 +44,10 @@ def wait_for_log_lines(
     deadline = time.monotonic() + timeout
 
     while time.monotonic() < deadline:
-        matches = find_log_lines(session_dirs, text)
+        matches = find_log_lines(
+            session_dirs,
+            text,
+        )
 
         if matches:
             return matches
@@ -82,27 +85,31 @@ def run_failure_case(failure_mode: str) -> None:
         },
     )
 
-    # The logical owner and physical producer must be separate.
+    # Logical ObjectRef owner.
     cluster.add_node(
         num_cpus=1,
         resources={"owner_node": 1},
     )
 
+    # Runs produce() and initially stores the physical object.
     producer_node = cluster.add_node(
         num_cpus=1,
         resources={"producer_node": 1},
     )
 
+    # Rank-1 holder.
     holder_a_node = cluster.add_node(
         num_cpus=1,
         resources={"holder_a_node": 1},
     )
 
+    # Rank-2 holder.
     cluster.add_node(
         num_cpus=1,
         resources={"holder_b_node": 1},
     )
 
+    # Recovery requester.
     cluster.add_node(
         num_cpus=1,
         resources={"borrower_node": 1},
@@ -112,7 +119,7 @@ def run_failure_case(failure_mode: str) -> None:
 
     @ray.remote(max_retries=2)
     def produce():
-        # Force the return value into the plasma object store.
+        # Force the output into the plasma object store.
         return b"x" * PAYLOAD_SIZE
 
     @ray.remote(max_restarts=0)
@@ -122,8 +129,8 @@ def run_failure_case(failure_mode: str) -> None:
                 resources={"producer_node": 0.01},
             ).remote()
 
-            # Keep the ObjectRef nested so Ray does not resolve
-            # and fetch its value while returning from this call.
+            # Keep the ObjectRef nested so Ray does not
+            # resolve and fetch the value.
             return [ref]
 
     @ray.remote(max_restarts=0)
@@ -133,8 +140,8 @@ def run_failure_case(failure_mode: str) -> None:
             return True
 
         def export(self):
-            # Re-serialize the reference after this worker has
-            # received the committed frozen manifest.
+            # Re-serialize the reference after receiving
+            # the committed frozen manifest.
             return [self.ref]
 
     @ray.remote(max_restarts=0)
@@ -169,14 +176,14 @@ def run_failure_case(failure_mode: str) -> None:
             resources={"borrower_node": 0.01},
         ).remote()
 
-        # Holder A should report first and occupy rank 1.
+        # Holder A reports first and should become rank 1.
         assert ray.get(
             holder_a.hold.remote([produced_ref])
         )
 
         time.sleep(3)
 
-        # Holder B should then occupy rank 2.
+        # Holder B reports second and should become rank 2.
         assert ray.get(
             holder_b.hold.remote([produced_ref])
         )
@@ -186,8 +193,8 @@ def run_failure_case(failure_mode: str) -> None:
             for node in cluster.list_all_nodes()
         }
 
-        # Wait until the owner has committed the frozen manifest:
-        # [owner, rank 1, rank 2].
+        # Wait until the frozen list contains:
+        # owner, rank 1, and rank 2.
         formed = wait_for_log_lines(
             session_dirs,
             "after witness publication with 3 total members",
@@ -196,6 +203,7 @@ def run_failure_case(failure_mode: str) -> None:
 
         if not formed:
             print("Manifest-formation logs:")
+
             print_matching_logs(
                 session_dirs,
                 [
@@ -216,11 +224,11 @@ def run_failure_case(failure_mode: str) -> None:
         for line in formed:
             print(f"  {line}")
 
-        # Allow the committed-manifest RPC to reach rank 2.
+        # Allow the committed manifest to reach rank 2.
         time.sleep(2)
 
-        # Ask rank 2 to serialize the reference. This should carry
-        # the complete frozen manifest rather than an earlier partial one.
+        # Serialize the reference from rank 2 so the borrower
+        # receives the complete frozen manifest.
         fresh_nested = ray.get(
             holder_b.export.remote()
         )
@@ -230,13 +238,16 @@ def run_failure_case(failure_mode: str) -> None:
             borrower.hold.remote([fresh_ref])
         )
 
-        # Allow the borrower to resolve the owner status and cache
-        # the recovery metadata while the owner is still alive.
+        # Allow the borrower to resolve the reference and cache
+        # recovery metadata while the owner is alive.
         time.sleep(5)
 
-        # Fail rank 1 while preserving rank 2.
+        # Fail rank 1 while keeping rank 2 alive.
         if failure_mode == "worker":
-            ray.kill(holder_a, no_restart=True)
+            ray.kill(
+                holder_a,
+                no_restart=True,
+            )
 
         elif failure_mode == "node":
             cluster.remove_node(
@@ -249,26 +260,21 @@ def run_failure_case(failure_mode: str) -> None:
                 f"Unknown failure mode: {failure_mode}"
             )
 
-        # Allow the GCS worker/node failure notification to reach
-        # the borrower before recovery begins.
+        # Allow the definitive rank-1 failure notification
+        # to reach the borrower.
         time.sleep(5)
 
-        # Kill only the logical owner worker. The physical value
-        # remains available on producer_node for now.
-        ray.kill(owner, no_restart=True)
+        # Match the Phase 5 failure sequence. Do not wait
+        # between owner death and loss of the physical object.
+        ray.kill(
+            owner,
+            no_restart=True,
+        )
 
-        # Allow owner-death notification to propagate before
-        # removing the physical object.
-        time.sleep(3)
-
-        # Lose the sole physical object copy. This should enter
-        # Ray's ordinary lost-object recovery path.
         cluster.remove_node(
             producer_node,
             allow_graceful=True,
         )
-
-        time.sleep(3)
 
         result = ray.get(
             borrower.read.remote(),
@@ -283,19 +289,19 @@ def run_failure_case(failure_mode: str) -> None:
             timeout=10,
         )
 
-        accepted = wait_for_log_lines(
-            session_dirs,
-            "Recovery succession accepted by holder rank 2",
-            timeout=10,
-        )
-
         replayed = wait_for_log_lines(
             session_dirs,
             "Recovery succession replay accepted for return",
             timeout=10,
         )
 
-        if not skipped or not accepted or not replayed:
+        accepted = wait_for_log_lines(
+            session_dirs,
+            "Recovery succession accepted by holder rank 2",
+            timeout=10,
+        )
+
+        if not skipped or not replayed or not accepted:
             print("Recovery-related logs:")
 
             print_matching_logs(
@@ -316,16 +322,19 @@ def run_failure_case(failure_mode: str) -> None:
         )
 
         assert replayed, (
-            f"{failure_mode}: rank 2 did not initiate "
-            "the recovery replay."
+            f"{failure_mode}: rank 2 did not accept "
+            "the task replay."
         )
 
         assert accepted, (
             f"{failure_mode}: the borrower did not accept "
-            "the recovery result from rank 2."
+            "recovery through rank 2."
         )
 
-        print(f"Phase 7 {failure_mode}-failure succession passed.")
+        print(
+            f"Phase 7 {failure_mode}-failure "
+            "succession passed."
+        )
 
     finally:
         ray.shutdown()
