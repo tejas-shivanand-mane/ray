@@ -4480,13 +4480,31 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
   // the dead caller address.
   replay_task_proto.mutable_caller_address()->CopyFrom(rpc_address_);
 
-  TaskSpecification replay_task(std::move(replay_task_proto));
+  // This is a new execution attempt of the same deterministic task.
+  // Ray's normal reconstruction path increments the attempt number
+  // before resubmission. Without this, the replay may be treated as
+  // the already-completed or failed original attempt.
+  replay_task_proto.set_attempt_number(
+      replay_task_proto.attempt_number() + 1);
+
+  RAY_LOG(INFO)
+      .WithField(
+          TaskID::FromBinary(
+              replay_task_proto.task_id()))
+      << "Preparing recovery succession replay attempt "
+      << replay_task_proto.attempt_number();
+
+  TaskSpecification replay_task(
+      std::move(replay_task_proto));
 
   const int32_t max_retries = replay_task.MaxRetries();
 
   std::vector<rpc::ObjectReference> returned_refs =
       task_manager_->AddPendingTaskForRecovery(
-          rpc_address_, replay_task, "recovery-succession replay", max_retries);
+          rpc_address_,
+          replay_task,
+          "recovery-succession replay",
+          max_retries);
 
   if (request.return_index() >= returned_refs.size()) {
     reply->set_result(rpc::RecoverTaskOutputReply::REPLAY_FAILED);
@@ -4660,36 +4678,45 @@ void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
           return;
         }
 
-        if (reply.result() != rpc::RecoverTaskOutputReply::RECOVERED) {
-          TryRecoveryHolders(object_id,
-                             return_index,
-                             manifest,
-                             holder_index + 1,
-                             witness_lookup_attempted,
-                             std::move(callback));
+        if (reply.result() !=
+            rpc::RecoverTaskOutputReply::RECOVERED) {
+          TryRecoveryHolders(
+              object_id,
+              return_index,
+              manifest,
+              holder_index + 1,
+              witness_lookup_attempted,
+              std::move(callback));
           return;
         }
 
         if (!reply.has_replacement_ref()) {
-          TryRecoveryHolders(object_id,
-                             return_index,
-                             manifest,
-                             holder_index + 1,
-                             witness_lookup_attempted,
-                             std::move(callback));
+          TryRecoveryHolders(
+              object_id,
+              return_index,
+              manifest,
+              holder_index + 1,
+              witness_lookup_attempted,
+              std::move(callback));
           return;
         }
 
-        const rpc::ObjectReference &replacement_ref = reply.replacement_ref();
+        const rpc::ObjectReference &replacement_ref =
+            reply.replacement_ref();
 
-        if (replacement_ref.object_id() != object_id.Binary() ||
-            replacement_ref.owner_address().worker_id().size() != WorkerID::Size()) {
-          TryRecoveryHolders(object_id,
-                             return_index,
-                             manifest,
-                             holder_index + 1,
-                             witness_lookup_attempted,
-                             std::move(callback));
+        if (replacement_ref.object_id() !=
+                object_id.Binary() ||
+            replacement_ref
+                    .owner_address()
+                    .worker_id()
+                    .size() != WorkerID::Size()) {
+          TryRecoveryHolders(
+              object_id,
+              return_index,
+              manifest,
+              holder_index + 1,
+              witness_lookup_attempted,
+              std::move(callback));
           return;
         }
 
@@ -4697,17 +4724,24 @@ void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
         // the acting holder. AddBorrowedObject preserves the requester's
         // existing local ObjectRef count.
         reference_counter_->AddBorrowedObject(
-            object_id, ObjectID::Nil(), replacement_ref.owner_address());
+            object_id,
+            ObjectID::Nil(),
+            replacement_ref.owner_address());
 
         if (replacement_ref.has_recovery_metadata()) {
-          recovery_succession_manager_->RegisterBorrowedObject(
-              object_id, replacement_ref.recovery_metadata());
+          recovery_succession_manager_
+              ->RegisterBorrowedObject(
+                  object_id,
+                  replacement_ref.recovery_metadata());
         }
 
-        RAY_LOG(INFO).WithField(object_id) << "Recovery succession accepted by "
-                                           << "holder rank " << holder_rank;
+        RAY_LOG(INFO).WithField(object_id)
+            << "Recovery succession accepted by "
+            << "holder rank "
+            << holder_rank;
 
         callback(true);
+        
       });
 }
 
