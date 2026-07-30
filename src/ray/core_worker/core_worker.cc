@@ -1721,18 +1721,44 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
           // Retry only the object fetch. Do not initiate another recovery
           // succession attempt.
           while (true) {
-            const int64_t elapsed_ms = clock_.SteadyNowMillis() - start_time;
+            const int64_t elapsed_ms =
+                clock_.SteadyNowMillis() - start_time;
 
-            const int64_t remaining_timeout_ms =
-                timeout_ms < 0 ? timeout_ms
-                               : std::max<int64_t>(0, timeout_ms - elapsed_ms);
+            if (timeout_ms >= 0 &&
+                elapsed_ms >= timeout_ms) {
+              return Status::TimedOut(
+                  "Get timed out while waiting for the "
+                  "recovery succession replay.");
+            }
+
+            // Use a short fetch interval so that a missing replacement
+            // object does not consume the entire caller timeout in one
+            // iteration.
+            constexpr int64_t kRecoveryFetchPollMs = 100;
+
+            const int64_t fetch_timeout_ms =
+                timeout_ms < 0
+                    ? kRecoveryFetchPollMs
+                    : std::min<int64_t>(
+                          kRecoveryFetchPollMs,
+                          timeout_ms - elapsed_ms);
 
             results.assign(ids.size(), nullptr);
 
-            RAY_RETURN_NOT_OK(GetObjectsInternal(ids,
-                                                 remaining_timeout_ms,
-                                                 results,
-                                                 /*allow_recovery_succession=*/false));
+            const Status fetch_status =
+                GetObjectsInternal(
+                    ids,
+                    fetch_timeout_ms,
+                    results,
+                    /*allow_recovery_succession=*/false);
+
+            if (!fetch_status.ok()) {
+              if (fetch_status.IsTimedOut()) {
+                continue;
+              }
+
+              return fetch_status;
+            }
 
             absl::flat_hash_set<ObjectID> stale_owner_died_ids;
 
@@ -1767,11 +1793,6 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
               return Status::OK();
             }
 
-            // Preserve normal timeout behavior. The current results still
-            // contain OWNER_DIED and will be returned to the caller.
-            if (timeout_ms >= 0 && clock_.SteadyNowMillis() - start_time >= timeout_ms) {
-              return Status::OK();
-            }
 
             // Release stale result buffers before deleting the corresponding
             // local store entries.
