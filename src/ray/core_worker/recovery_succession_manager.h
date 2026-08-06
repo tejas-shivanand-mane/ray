@@ -45,6 +45,10 @@ class RecoverySuccessionManager {
     rpc::Address candidate_address;
     rpc::TaskSpec task_spec;
     rpc::RecoveryManifest proposed_manifest;
+
+    // True when the candidate is the executor of the original task and
+    // RegisterExecutorTask has already retained the complete TaskSpec.
+    bool candidate_already_stores_task_spec = false;
   };
 
   explicit RecoverySuccessionManager(rpc::Address self_address);

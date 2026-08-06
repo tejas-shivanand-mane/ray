@@ -1596,6 +1596,16 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   void PublishRecoveryManifestToWitnesses(const rpc::RecoveryManifest &manifest,
                                           RecoveryWitnessPublishCallback callback);
 
+  void FinishRecoveryHolderAdmission(
+    std::string reservation_id,
+    TaskID task_id,
+    rpc::Address candidate_address,
+    bool candidate_needs_commit_rpc,
+    rpc::RecoveryManifest latest_manifest,
+    rpc::RecoveryManifest proposed_manifest,
+    rpc::ReportRecoveryCandidateReply *reply,
+    rpc::SendReplyCallback send_reply_callback);
+
   using RecoveryWitnessLookupCallback =
       std::function<void(std::optional<rpc::RecoveryManifest>)>;
 

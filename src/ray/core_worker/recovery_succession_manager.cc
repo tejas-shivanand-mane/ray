@@ -419,8 +419,15 @@ RecoverySuccessionManager::PrepareHolderAdmission(
 
   plan->reservation_id = reservation_id;
   plan->candidate_address.CopyFrom(candidate_address);
-  plan->task_spec.CopyFrom(task_it->second.task_spec.value());
-  plan->task_spec.mutable_recovery_manifest()->CopyFrom(proposed_manifest);
+  plan->candidate_already_stores_task_spec =
+      request.already_stores_task_spec();
+
+  if (!plan->candidate_already_stores_task_spec) {
+    plan->task_spec.CopyFrom(task_it->second.task_spec.value());
+    plan->task_spec.mutable_recovery_manifest()->CopyFrom(
+        proposed_manifest);
+  }
+
   plan->proposed_manifest.CopyFrom(proposed_manifest);
 
   return rpc::ReportRecoveryCandidateReply::ACCEPTED;
@@ -754,8 +761,12 @@ RecoverySuccessionManager::ReplayPreparationResult
 RecoverySuccessionManager::PrepareTaskReplay(const rpc::RecoverTaskOutputRequest &request,
                                              rpc::TaskSpec *task_spec,
                                              rpc::RecoveryManifest *latest_manifest) {
-  if (task_spec == nullptr || latest_manifest == nullptr ||
-      request.task_id().size() != TaskID::Size() || !request.has_requester_manifest()) {
+  if (task_spec == nullptr ||
+    latest_manifest == nullptr ||
+    request.task_id().size() != TaskID::Size() ||
+    !request.has_requester_manifest() ||
+    request.requester_manifest().task_id() !=
+        request.task_id()) {
     return ReplayPreparationResult::TASK_NOT_FOUND;
   }
 
@@ -780,8 +791,44 @@ RecoverySuccessionManager::PrepareTaskReplay(const rpc::RecoverTaskOutputRequest
     return ReplayPreparationResult::TASK_NOT_FOUND;
   }
 
-  if (CompareManifestVersions(request.requester_manifest(), state.manifest) < 0) {
+    const int requester_comparison =
+      CompareManifestVersions(
+          request.requester_manifest(),
+          state.manifest);
+
+  if (requester_comparison < 0) {
     return ReplayPreparationResult::MANIFEST_STALE;
+  }
+
+  if (requester_comparison == 0 &&
+      request.requester_manifest().SerializeAsString() !=
+          state.manifest.SerializeAsString()) {
+    return ReplayPreparationResult::MANIFEST_STALE;
+  }
+
+  if (requester_comparison > 0) {
+    if (request.requester_manifest().tombstoned()) {
+      latest_manifest->CopyFrom(
+          request.requester_manifest());
+
+      return ReplayPreparationResult::TOMBSTONED;
+    }
+
+    // A newer manifest may be accepted only if this worker remains a
+    // member of the committed succession list.
+    if (!ContainsWorker(
+            request.requester_manifest(),
+            self_address_)) {
+      return ReplayPreparationResult::WRONG_HOLDER;
+    }
+
+    state.manifest.CopyFrom(
+        request.requester_manifest());
+
+    state.manifest_committed = true;
+
+    latest_manifest->CopyFrom(
+        state.manifest);
   }
 
   const int32_t max_recovery_attempts = state.manifest.max_recovery_attempts();
