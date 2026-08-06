@@ -815,29 +815,35 @@ RecoverySuccessionManager::PrepareTaskReplay(const rpc::RecoverTaskOutputRequest
 }
 
 void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
-    const ObjectID &object_id, const rpc::RecoveryManifest &manifest) {
+    const ObjectID &object_id,
+    const rpc::RecoveryManifest &manifest) {
   if (manifest.task_id().empty()) {
     return;
   }
 
   absl::MutexLock lock(&mutex_);
 
-  auto borrowed_it = borrowed_objects_.find(object_id);
+  const auto borrowed_it = borrowed_objects_.find(object_id);
+
   if (borrowed_it == borrowed_objects_.end()) {
     return;
   }
 
-  if (CompareManifestVersions(manifest, borrowed_it->second.cached_manifest) < 0) {
+  auto metadata_it = object_recovery_metadata_.find(object_id);
+
+  if (metadata_it == object_recovery_metadata_.end() ||
+      !metadata_it->second.has_manifest() ||
+      metadata_it->second.task_id() != manifest.task_id()) {
     return;
   }
 
-  borrowed_it->second.cached_manifest.CopyFrom(manifest);
-
-  auto metadata_it = object_recovery_metadata_.find(object_id);
-
-  if (metadata_it != object_recovery_metadata_.end()) {
-    metadata_it->second.mutable_manifest()->CopyFrom(manifest);
+  if (CompareManifestVersions(
+          manifest,
+          metadata_it->second.manifest()) < 0) {
+    return;
   }
+
+  metadata_it->second.mutable_manifest()->CopyFrom(manifest);
 }
 
 std::optional<rpc::RecoveryManifest> RecoverySuccessionManager::BuildTombstoneForTask(
