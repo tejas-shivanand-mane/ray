@@ -139,6 +139,10 @@ class RecoverySuccessionManager {
   bool HasConfirmedHolderResponsibilities() const;
 
  private:
+
+  void EraseHolderReservationLocked(const std::string &reservation_id)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
   void EraseTaskObjectMetadataLocked(const TaskID &task_id)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
@@ -156,7 +160,6 @@ class RecoverySuccessionManager {
   struct BorrowedObjectRecoveryState {
     TaskID task_id;
     uint32_t return_index = 0;
-    rpc::RecoveryManifest cached_manifest;
   };
 
   struct HolderReservation {
@@ -190,8 +193,19 @@ class RecoverySuccessionManager {
   absl::flat_hash_map<ObjectID, rpc::RecoveryObjectMetadata> object_recovery_metadata_
       ABSL_GUARDED_BY(mutex_);
 
+  /// Object IDs carrying recovery metadata, indexed by producer task.
+  /// This avoids scanning every tracked object when one task's manifest changes
+  /// or its tombstone is applied.
+  absl::flat_hash_map<TaskID, absl::flat_hash_set<ObjectID>> task_object_ids_
+      ABSL_GUARDED_BY(mutex_);
+
+
   /// Provisional owner-side holder reservations.
   absl::flat_hash_map<std::string, HolderReservation> holder_reservations_
+      ABSL_GUARDED_BY(mutex_);
+
+  /// At most one provisional holder reservation is permitted per task.
+  absl::flat_hash_map<TaskID, std::string> holder_reservation_by_task_
       ABSL_GUARDED_BY(mutex_);
 
   /// Prevents repeated reports for the same producer task.

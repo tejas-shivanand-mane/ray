@@ -79,7 +79,7 @@ rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
   const uint32_t target_holder_count =
       RayConfig::instance().recovery_succession_target_holder_count();
 
-  RAY_CHECK_GT(target_holder_count, 0);
+  RAY_CHECK_GT(target_holder_count, 0U);
 
   manifest.set_target_holder_count(target_holder_count);
 
@@ -140,6 +140,7 @@ void RecoverySuccessionManager::RegisterOwnedTask(
     const ObjectID object_id = ObjectID::FromBinary(returned_ref.object_id());
 
     object_recovery_metadata_[object_id] = metadata;
+    task_object_ids_[task_id].insert(object_id);
 
     returned_ref.mutable_recovery_metadata()->CopyFrom(metadata);
   }
@@ -194,34 +195,67 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
       effective_metadata.CopyFrom(existing_metadata->second);
     }
 
+    const TaskID metadata_task_id =
+        TaskID::FromBinary(effective_metadata.task_id());
+
+    // Do not recreate metadata for a task whose equal-or-newer tombstone
+    // has already been applied locally.
+    const auto tombstone_it = task_states_.find(metadata_task_id);
+
+    if (tombstone_it != task_states_.end() &&
+        tombstone_it->second.manifest.tombstoned() &&
+        CompareManifestVersions(
+            tombstone_it->second.manifest,
+            effective_metadata.manifest()) >= 0) {
+      continue;
+    }
+
     BorrowedObjectRecoveryState borrowed_state;
-    borrowed_state.task_id = TaskID::FromBinary(effective_metadata.task_id());
+    borrowed_state.task_id = metadata_task_id;
     borrowed_state.return_index = effective_metadata.return_index();
-    borrowed_state.cached_manifest.CopyFrom(effective_metadata.manifest());
 
     borrowed_objects_[object_id] = std::move(borrowed_state);
-
     object_recovery_metadata_[object_id] = effective_metadata;
+    task_object_ids_[metadata_task_id].insert(object_id);
+
   }
 
   if (should_store_task) {
     const TaskID task_id = TaskID::FromBinary(task_spec.task_id());
 
-    TaskRecoveryState &task_state = task_states_[task_id];
+    const auto existing_task_it = task_states_.find(task_id);
 
-    if (task_state.manifest.task_id().empty() ||
-        CompareManifestVersions(task_spec.recovery_manifest(), task_state.manifest) > 0) {
-      task_state.manifest.CopyFrom(task_spec.recovery_manifest());
+    const bool stale_after_tombstone =
+        existing_task_it != task_states_.end() &&
+        existing_task_it->second.manifest.tombstoned() &&
+        CompareManifestVersions(
+            existing_task_it->second.manifest,
+            task_spec.recovery_manifest()) >= 0;
+
+    if (!stale_after_tombstone) {
+      TaskRecoveryState &task_state = task_states_[task_id];
+
+      if (task_state.manifest.task_id().empty() ||
+          CompareManifestVersions(
+              task_spec.recovery_manifest(),
+              task_state.manifest) > 0) {
+        task_state.manifest.CopyFrom(task_spec.recovery_manifest());
+      }
+
+      rpc::TaskSpec stored_task_spec;
+      stored_task_spec.CopyFrom(task_spec);
+      stored_task_spec.mutable_recovery_manifest()->CopyFrom(
+          task_state.manifest);
+
+      task_state.task_spec = std::move(stored_task_spec);
+
+      MaybeAddCandidateReportLocked(
+          task_state.manifest,
+          true,
+          &reports);
     }
-
-    rpc::TaskSpec stored_task_spec;
-    stored_task_spec.CopyFrom(task_spec);
-    stored_task_spec.mutable_recovery_manifest()->CopyFrom(task_state.manifest);
-
-    task_state.task_spec = std::move(stored_task_spec);
-
-    MaybeAddCandidateReportLocked(task_state.manifest, true, &reports);
   }
+
 
   for (const auto &[object_id, metadata] : received_metadata) {
     static_cast<void>(object_id);
@@ -251,14 +285,27 @@ void RecoverySuccessionManager::RegisterBorrowedObject(
     effective_metadata.CopyFrom(existing_metadata->second);
   }
 
+  const TaskID task_id =
+    TaskID::FromBinary(effective_metadata.task_id());
+
+  const auto tombstone_it = task_states_.find(task_id);
+
+  if (tombstone_it != task_states_.end() &&
+      tombstone_it->second.manifest.tombstoned() &&
+      CompareManifestVersions(
+          tombstone_it->second.manifest,
+          effective_metadata.manifest()) >= 0) {
+    return;
+  }
+
   BorrowedObjectRecoveryState borrowed_state;
-  borrowed_state.task_id = TaskID::FromBinary(effective_metadata.task_id());
+  borrowed_state.task_id = task_id;
   borrowed_state.return_index = effective_metadata.return_index();
-  borrowed_state.cached_manifest.CopyFrom(effective_metadata.manifest());
 
   borrowed_objects_[object_id] = std::move(borrowed_state);
-
   object_recovery_metadata_[object_id] = effective_metadata;
+  task_object_ids_[task_id].insert(object_id);
+
 }
 
 rpc::ReportRecoveryCandidateReply::Result
@@ -328,12 +375,8 @@ RecoverySuccessionManager::PrepareHolderAdmission(
     return rpc::ReportRecoveryCandidateReply::NO_SLOT;
   }
 
-  for (const auto &[reservation_id, reservation] : holder_reservations_) {
-    static_cast<void>(reservation_id);
-
-    if (reservation.task_id == task_id) {
-      return rpc::ReportRecoveryCandidateReply::NO_SLOT;
-    }
+  if (holder_reservation_by_task_.contains(task_id)) {
+    return rpc::ReportRecoveryCandidateReply::NO_SLOT;
   }
 
   for (const rpc::RecoveryHolder &holder : task_state.manifest.succession()) {
@@ -372,6 +415,7 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   reservation.proposed_manifest.CopyFrom(proposed_manifest);
 
   holder_reservations_[reservation_id] = std::move(reservation);
+  holder_reservation_by_task_[task_id] = reservation_id;
 
   plan->reservation_id = reservation_id;
   plan->candidate_address.CopyFrom(candidate_address);
@@ -455,7 +499,7 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
   const auto task_it = task_states_.find(task_id);
 
   if (task_it == task_states_.end()) {
-    holder_reservations_.erase(reservation_it);
+    EraseHolderReservationLocked(reservation_id);
     return false;
   }
 
@@ -463,7 +507,7 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
 
   committed_manifest->CopyFrom(reservation_it->second.proposed_manifest);
 
-  holder_reservations_.erase(reservation_it);
+  EraseHolderReservationLocked(reservation_id);
 
   return true;
 }
@@ -474,8 +518,34 @@ void RecoverySuccessionManager::AbortHolderAdmission(const std::string &reservat
   }
 
   absl::MutexLock lock(&mutex_);
-  holder_reservations_.erase(reservation_id);
+  EraseHolderReservationLocked(reservation_id);
+
 }
+
+
+void RecoverySuccessionManager::EraseHolderReservationLocked(
+    const std::string &reservation_id) {
+  const auto reservation_it =
+      holder_reservations_.find(reservation_id);
+
+  if (reservation_it == holder_reservations_.end()) {
+    return;
+  }
+
+  const TaskID task_id = reservation_it->second.task_id;
+
+  const auto task_index_it =
+      holder_reservation_by_task_.find(task_id);
+
+  if (task_index_it != holder_reservation_by_task_.end() &&
+      task_index_it->second == reservation_id) {
+    holder_reservation_by_task_.erase(task_index_it);
+  }
+
+  holder_reservations_.erase(reservation_it);
+}
+
+
 
 bool RecoverySuccessionManager::ApplyCommittedManifest(
     const rpc::RecoveryManifest &manifest) {
@@ -618,7 +688,9 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
 }
 
 void RecoverySuccessionManager::UpdateManifestForTaskLocked(
-    const TaskID &task_id, const rpc::RecoveryManifest &manifest, bool committed) {
+    const TaskID &task_id,
+    const rpc::RecoveryManifest &manifest,
+    bool committed) {
   TaskRecoveryState &task_state = task_states_[task_id];
 
   task_state.manifest.CopyFrom(manifest);
@@ -628,25 +700,22 @@ void RecoverySuccessionManager::UpdateManifestForTaskLocked(
     task_state.provisional_reservation_id.clear();
   }
 
-  if (task_state.task_spec.has_value()) {
-    task_state.task_spec->mutable_recovery_manifest()->CopyFrom(manifest);
+  // Do not copy the new manifest into the stored TaskSpec here.
+  // PrepareHolderAdmission and PrepareTaskReplay attach the current manifest
+  // immediately before the TaskSpec is transferred or replayed.
+
+  const auto object_ids_it = task_object_ids_.find(task_id);
+
+  if (object_ids_it == task_object_ids_.end()) {
+    return;
   }
 
-  const std::string task_id_binary = task_id.Binary();
+  for (const ObjectID &object_id : object_ids_it->second) {
+    const auto metadata_it =
+        object_recovery_metadata_.find(object_id);
 
-  for (auto &[object_id, metadata] : object_recovery_metadata_) {
-    static_cast<void>(object_id);
-
-    if (metadata.task_id() == task_id_binary) {
-      metadata.mutable_manifest()->CopyFrom(manifest);
-    }
-  }
-
-  for (auto &[object_id, borrowed_state] : borrowed_objects_) {
-    static_cast<void>(object_id);
-
-    if (borrowed_state.task_id == task_id) {
-      borrowed_state.cached_manifest.CopyFrom(manifest);
+    if (metadata_it != object_recovery_metadata_.end()) {
+      metadata_it->second.mutable_manifest()->CopyFrom(manifest);
     }
   }
 }
@@ -664,11 +733,21 @@ bool RecoverySuccessionManager::GetBorrowedObjectRecoveryPlan(
     return false;
   }
 
+  const auto metadata_it =
+    object_recovery_metadata_.find(object_id);
+
+  if (metadata_it == object_recovery_metadata_.end() ||
+      !metadata_it->second.has_manifest()) {
+    return false;
+  }
+
   plan->task_id = borrowed_it->second.task_id;
   plan->return_index = borrowed_it->second.return_index;
-  plan->cached_manifest.CopyFrom(borrowed_it->second.cached_manifest);
+  plan->cached_manifest.CopyFrom(
+      metadata_it->second.manifest());
 
   return true;
+
 }
 
 RecoverySuccessionManager::ReplayPreparationResult
@@ -831,47 +910,35 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
 
   EraseTaskObjectMetadataLocked(task_id);
 
-  for (auto reservation_it = holder_reservations_.begin();
-       reservation_it != holder_reservations_.end();) {
-    if (reservation_it->second.task_id == task_id) {
-      auto erase_it = reservation_it;
-      ++reservation_it;
-      holder_reservations_.erase(erase_it);
-    } else {
-      ++reservation_it;
-    }
+  const auto reservation_it =
+      holder_reservation_by_task_.find(task_id);
+
+  if (reservation_it != holder_reservation_by_task_.end()) {
+    const std::string reservation_id = reservation_it->second;
+    EraseHolderReservationLocked(reservation_id);
   }
 
-  candidate_reports_sent_.insert(task_id);
+  candidate_reports_sent_.erase(task_id);
 
   return true;
 }
 
-void RecoverySuccessionManager::EraseTaskObjectMetadataLocked(const TaskID &task_id) {
-  const std::string task_id_binary = task_id.Binary();
+void RecoverySuccessionManager::EraseTaskObjectMetadataLocked(
+    const TaskID &task_id) {
+  const auto object_ids_it = task_object_ids_.find(task_id);
 
-  for (auto metadata_it = object_recovery_metadata_.begin();
-       metadata_it != object_recovery_metadata_.end();) {
-    if (metadata_it->second.task_id() == task_id_binary) {
-      auto erase_it = metadata_it;
-      ++metadata_it;
-      object_recovery_metadata_.erase(erase_it);
-    } else {
-      ++metadata_it;
-    }
+  if (object_ids_it == task_object_ids_.end()) {
+    return;
   }
 
-  for (auto borrowed_it = borrowed_objects_.begin();
-       borrowed_it != borrowed_objects_.end();) {
-    if (borrowed_it->second.task_id == task_id) {
-      auto erase_it = borrowed_it;
-      ++borrowed_it;
-      borrowed_objects_.erase(erase_it);
-    } else {
-      ++borrowed_it;
-    }
+  for (const ObjectID &object_id : object_ids_it->second) {
+    object_recovery_metadata_.erase(object_id);
+    borrowed_objects_.erase(object_id);
   }
+
+  task_object_ids_.erase(object_ids_it);
 }
+
 
 void RecoverySuccessionManager::HandleWorkerFailure(const WorkerID &worker_id) {
   if (worker_id.IsNil()) {

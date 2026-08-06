@@ -1,6 +1,6 @@
 conda activate ray-dev
 
-export BAZEL_ARGS="--local_resources=cpu=4 \
+export BAZEL_ARGS="--local_resources=cpu=6 \
 --local_resources=memory=HOST_RAM*.35 \
 --disk_cache=$HOME/bazel-cache"
 
