@@ -257,3 +257,5 @@ CLAUDE.local.md
 
 ray-build.log
 phase1-build.log
+
+*.log

@@ -31,6 +31,7 @@
 #include "ray/util/container_util.h"
 #include "ray/util/network_util.h"
 #include "ray/util/time.h"
+#include "ray/common/ray_config.h"
 
 namespace ray {
 
@@ -288,9 +289,16 @@ void ObjectManager::MarkObjectFailed(const ObjectID &object_id,
   // alive until sealing completes. Release the remaining creator
   // reference so that a later FreeObjects request can delete the
   // terminal error object.
-  if (status.ok()) {
+
+  // Recovery succession may need to remove and replace an OWNER_DIED
+  // object using the same deterministic ObjectID.
+  if (status.ok() &&
+      RayConfig::instance().enable_recovery_succession() &&
+      error_type == rpc::ErrorType::OWNER_DIED) {
     status = buffer_pool_store_client_->Release(object_id);
   }
+
+
   if (!status.ok() && !status.IsObjectExists()) {
     std::ostringstream stream;
     stream << "A plasma error (" << status.ToString()

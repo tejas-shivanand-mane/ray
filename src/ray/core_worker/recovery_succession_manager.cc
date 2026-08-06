@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "ray/core_worker/recovery_succession_manager.h"
-
+#include "ray/common/ray_config.h"
 #include <cstddef>
 #include <utility>
 
@@ -21,7 +21,6 @@ namespace ray::core {
 
 namespace {
 
-constexpr uint32_t kDefaultTargetHolderCount = 2;
 
 const rpc::RecoveryHolder *FindHolderByRank(const rpc::RecoveryManifest &manifest,
                                             uint32_t rank) {
@@ -77,7 +76,13 @@ rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
 
   manifest.set_task_id(task_id.Binary());
   manifest.set_job_id(job_id.Binary());
-  manifest.set_target_holder_count(kDefaultTargetHolderCount);
+  const uint32_t target_holder_count =
+      RayConfig::instance().recovery_succession_target_holder_count();
+
+  RAY_CHECK_GT(target_holder_count, 0);
+
+  manifest.set_target_holder_count(target_holder_count);
+
   manifest.set_witness_count(0);
 
   rpc::RecoveryManifestVersion *version = manifest.mutable_version();
