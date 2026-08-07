@@ -4661,6 +4661,11 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
 
   io_service_.post(
       [this, replay_task = std::move(replay_task)]() mutable {
+        const TaskID replay_task_id = replay_task.TaskId();
+
+        RAY_LOG(INFO).WithField(replay_task_id)
+            << "Submitting recovery succession replay";
+
         normal_task_submitter_->SubmitTask(std::move(replay_task));
       },
       "CoreWorker.RecoverTaskOutput");
@@ -4847,18 +4852,35 @@ void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
         }
 
         // Transition the requester from the failed original owner to
-        // the acting holder. AddBorrowedObject preserves the requester's
-        // existing local ObjectRef count.
+        // the acting recovery holder.
         reference_counter_->AddBorrowedObject(
-            object_id, ObjectID::Nil(), replacement_ref.owner_address());
+            object_id,
+            ObjectID::Nil(),
+            replacement_ref.owner_address());
 
         if (replacement_ref.has_recovery_metadata()) {
           recovery_succession_manager_->RegisterBorrowedObject(
-              object_id, replacement_ref.recovery_metadata());
+              object_id,
+              replacement_ref.recovery_metadata());
         }
 
-        RAY_LOG(INFO).WithField(object_id) << "Recovery succession accepted by "
-                                           << "holder rank " << holder_rank;
+        // The original FutureResolver stopped resolving this object when
+        // the original owner died. This matters when the object had never
+        // been materialized before the failure (in-flight task recovery).
+        //
+        // Re-arm resolution against the acting holder so that when the
+        // replay finishes, the requester learns that the replacement
+        // object has been created / placed in plasma.
+        if (future_resolver_ != nullptr) {
+          future_resolver_->ResolveFutureAsync(
+              object_id,
+              replacement_ref.owner_address());
+        }
+
+        RAY_LOG(INFO).WithField(object_id)
+            << "Recovery succession accepted by holder rank "
+            << holder_rank
+            << "; future resolution restarted against acting holder";
 
         callback(true);
       });

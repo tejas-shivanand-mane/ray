@@ -80,6 +80,8 @@ def print_recovery_diagnostics(session_dirs: set[Path]) -> None:
         "Promoted borrowed object to owned recovery return",
         "Recovery succession replay accepted",
         "Recovery succession accepted by holder",
+        "future resolution restarted against acting holder",
+        "Submitting recovery succession replay",
         "Skipping known-dead recovery holder",
         "Confirmed stale local OWNER_DIED",
         "Trying to put an object that already existed in plasma",
@@ -157,31 +159,66 @@ def wait_for_cluster(expected_nodes: int, timeout_s: float) -> None:
     )
 
 
-def read_attempts(path: Path) -> list[tuple[int, int, int]]:
+def read_attempts(path: Path) -> list[tuple[str, int, int, int]]:
+    """
+    Read producer execution markers.
+
+    Each entry is:
+      (event, timestamp_ns, pid, seed)
+
+    event is either START or FINISH.
+    """
     if not path.exists():
         return []
-    out: list[tuple[int, int, int]] = []
+
+    out: list[tuple[str, int, int, int]] = []
+
     try:
         lines = path.read_text().splitlines()
     except OSError:
         return []
+
     for line in lines:
         parts = line.split(",")
-        if len(parts) != 3:
+
+        if len(parts) != 4:
             continue
+
+        event = parts[0]
+
+        if event not in {"START", "FINISH"}:
+            continue
+
         try:
-            out.append((int(parts[0]), int(parts[1]), int(parts[2])))
+            timestamp_ns = int(parts[1])
+            pid = int(parts[2])
+            seed = int(parts[3])
+
+            out.append(
+                (
+                    event,
+                    timestamp_ns,
+                    pid,
+                    seed,
+                )
+            )
         except ValueError:
             pass
+
     return out
 
 
 def wait_for_first_attempt(path: Path, timeout_s: float) -> None:
     deadline = time.monotonic() + timeout_s
+
     while time.monotonic() < deadline:
-        if read_attempts(path):
+        events = read_attempts(path)
+
+        if any(event[0] == "START" for event in events):
             return
+
         time.sleep(0.01)
+
     raise TimeoutError("Original producer task did not begin execution")
 
 
@@ -194,15 +231,27 @@ def make_remote_types():
         marker_path: str,
     ) -> bytes:
         with open(marker_path, "a", buffering=1) as f:
-            f.write(f"{time.time_ns()},{os.getpid()},{seed}\n")
+            f.write(
+                f"START,{time.time_ns()},{os.getpid()},{seed}\n"
+            )
             f.flush()
 
         time.sleep(task_duration_s)
 
         prefix = seed.to_bytes(8, "little", signed=False)
+
         if payload_bytes <= 8:
-            return prefix[:payload_bytes]
-        return prefix + b"x" * (payload_bytes - 8)
+            result = prefix[:payload_bytes]
+        else:
+            result = prefix + b"x" * (payload_bytes - 8)
+
+        with open(marker_path, "a", buffering=1) as f:
+            f.write(
+                f"FINISH,{time.time_ns()},{os.getpid()},{seed}\n"
+            )
+            f.flush()
+
+        return result
 
     @ray.remote(max_restarts=0, max_task_retries=0)
     class Owner:
@@ -313,10 +362,12 @@ FIELDS = [
     "success",
     "replayed",
     "executions_observed",
+    "replay_finished",
     "original_producer_pid",
     "producer_alive_after_failure",
     "failure_injection_s",
     "failure_to_replay_start_s",
+    "failure_to_replay_finish_s",
     "failure_to_result_s",
     "dispatch_to_failure_s",
     "dispatch_to_result_s",
@@ -362,10 +413,12 @@ def run_trial(
         "success": False,
         "replayed": False,
         "executions_observed": 0,
+        "replay_finished": False,
         "original_producer_pid": -1,
         "producer_alive_after_failure": False,
         "failure_injection_s": math.nan,
         "failure_to_replay_start_s": math.nan,
+        "failure_to_replay_finish_s": math.nan,
         "failure_to_result_s": math.nan,
         "dispatch_to_failure_s": math.nan,
         "dispatch_to_result_s": math.nan,
@@ -435,9 +488,16 @@ def run_trial(
         )[0]
 
         wait_for_first_attempt(marker, start_timeout_s)
-        attempts = read_attempts(marker)
-        if attempts:
-            row["original_producer_pid"] = attempts[0][1]
+
+        events = read_attempts(marker)
+        start_events = [
+            event
+            for event in events
+            if event[0] == "START"
+        ]
+
+        if start_events:
+            row["original_producer_pid"] = start_events[0][2]
 
         result_ref, formation_s = form_succession(
             case,
@@ -517,23 +577,74 @@ def run_trial(
             row["error_type"] = type(exc).__name__
             row["error_message"] = str(exc)
 
-        attempts = read_attempts(marker)
-        row["executions_observed"] = len(attempts)
+        events = read_attempts(marker)
 
-        post_failure_attempts = [
-            attempt for attempt in attempts if attempt[0] > failure_wall_ns
+        start_events = [
+            event
+            for event in events
+            if event[0] == "START"
         ]
-        if post_failure_attempts:
+
+        finish_events = [
+            event
+            for event in events
+            if event[0] == "FINISH"
+        ]
+
+        row["executions_observed"] = len(start_events)
+
+        post_failure_starts = [
+            event
+            for event in start_events
+            if event[1] > failure_wall_ns
+        ]
+
+        post_failure_finishes = [
+            event
+            for event in finish_events
+            if event[1] > failure_wall_ns
+        ]
+
+        if post_failure_starts:
             row["replayed"] = True
-            replay_wall_ns = min(a[0] for a in post_failure_attempts)
+
+            replay_wall_ns = min(
+                event[1]
+                for event in post_failure_starts
+            )
+
             row["failure_to_replay_start_s"] = (
                 replay_wall_ns - failure_wall_ns
             ) / 1e9
+
+        if post_failure_finishes:
+            row["replay_finished"] = True
+
+            replay_finish_wall_ns = min(
+                event[1]
+                for event in post_failure_finishes
+            )
+
+            row["failure_to_replay_finish_s"] = (
+                replay_finish_wall_ns - failure_wall_ns
+            ) / 1e9
+
+        if post_failure_starts and not post_failure_finishes:
+            print(
+                "    Replay started after failure but "
+                "no replay FINISH marker was observed."
+            )
 
         if row["success"] and not row["replayed"]:
             row["error_type"] = "NoReplayObserved"
             row["error_message"] = (
                 "Result succeeded but no post-failure replay marker was observed"
+            )
+
+        if row["success"] and not row["replay_finished"]:
+            row["error_type"] = "ReplayDidNotFinish"
+            row["error_message"] = (
+                "Result succeeded but no post-failure FINISH marker was observed"
             )
 
         if not row["success"]:
@@ -547,18 +658,57 @@ def run_trial(
             row["error_type"] = type(exc).__name__
             row["error_message"] = str(exc)
 
-        attempts = read_attempts(marker)
-        row["executions_observed"] = len(attempts)
+        events = read_attempts(marker)
+
+        start_events = [
+            event
+            for event in events
+            if event[0] == "START"
+        ]
+
+        finish_events = [
+            event
+            for event in events
+            if event[0] == "FINISH"
+        ]
+
+        row["executions_observed"] = len(start_events)
 
         if failure_wall_ns:
-            post_failure_attempts = [
-                attempt for attempt in attempts if attempt[0] > failure_wall_ns
+            post_failure_starts = [
+                event
+                for event in start_events
+                if event[1] > failure_wall_ns
             ]
-            if post_failure_attempts:
+
+            post_failure_finishes = [
+                event
+                for event in finish_events
+                if event[1] > failure_wall_ns
+            ]
+
+            if post_failure_starts:
                 row["replayed"] = True
-                replay_wall_ns = min(a[0] for a in post_failure_attempts)
+
+                replay_wall_ns = min(
+                    event[1]
+                    for event in post_failure_starts
+                )
+
                 row["failure_to_replay_start_s"] = (
                     replay_wall_ns - failure_wall_ns
+                ) / 1e9
+
+            if post_failure_finishes:
+                row["replay_finished"] = True
+
+                replay_finish_wall_ns = min(
+                    event[1]
+                    for event in post_failure_finishes
+                )
+
+                row["failure_to_replay_finish_s"] = (
+                    replay_finish_wall_ns - failure_wall_ns
                 ) / 1e9
 
         if session_dirs:
@@ -661,9 +811,11 @@ def main() -> None:
             f"formation={row['formation_success']} "
             f"success={row['success']} "
             f"replayed={row['replayed']} "
+            f"replay_finished={row['replay_finished']} "
             f"executions={row['executions_observed']} "
             f"producer_alive={row['producer_alive_after_failure']} "
             f"failure->replay={row['failure_to_replay_start_s']} "
+            f"failure->replay_finish={row['failure_to_replay_finish_s']} "
             f"failure->result={row['failure_to_result_s']} "
             f"error={row['error_type'] or '-'}",
             flush=True,
