@@ -47,10 +47,10 @@ def draw(data, metric: str, ylabel: str, output: Path) -> None:
         x = [t for t, row in points if metric in row]
         y = [row[metric] for _, row in points if metric in row]
         if x:
-            ax.plot(x, y, label=config, linewidth=1.8)
+            ax.plot(x, y,'-o', label=config, linewidth=1.8)
     ax.set_xlabel("Elapsed time (s)")
     ax.set_ylabel(ylabel)
-    ax.grid(True, alpha=0.3)
+    # ax.grid(False, alpha=0.3)
     ax.legend()
     fig.tight_layout()
     fig.savefig(output, dpi=180)
