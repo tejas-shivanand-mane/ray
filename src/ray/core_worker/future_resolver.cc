@@ -44,6 +44,20 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
                                            const rpc::Address &owner_address,
                                            const Status &status,
                                            const rpc::GetObjectStatusReply &reply) {
+
+  // A recovery successor may have taken ownership while an older
+  // GetObjectStatus RPC was still in flight. Ignore responses from
+  // an owner that is no longer the current owner of this ObjectID.
+  rpc::Address current_owner;
+
+  if (reference_counter_->GetOwner(object_id, &current_owner) &&
+      current_owner.worker_id() != owner_address.worker_id()) {
+    RAY_LOG(DEBUG).WithField(object_id)
+        << "Ignoring stale GetObjectStatus response from previous owner";
+    return;
+  }
+
+
   if (status.ok() && reply.has_recovery_metadata() && recovery_metadata_callback_) {
     recovery_metadata_callback_(object_id, reply.recovery_metadata());
   }

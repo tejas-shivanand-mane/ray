@@ -4638,17 +4638,69 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
   const int32_t max_retries = replay_task.MaxRetries();
 
   std::vector<rpc::ObjectReference> returned_refs =
-      task_manager_->AddPendingTaskForRecovery(
-          rpc_address_, replay_task, "recovery-succession replay", max_retries);
+    task_manager_->AddPendingTaskForRecovery(
+        rpc_address_,
+        replay_task,
+        "recovery-succession replay",
+        max_retries);
 
   if (request.return_index() >= returned_refs.size()) {
-    reply->set_result(rpc::RecoverTaskOutputReply::REPLAY_FAILED);
+    reply->set_result(
+        rpc::RecoverTaskOutputReply::REPLAY_FAILED);
 
-    send_reply_callback(Status::OK(), nullptr, nullptr);
+    send_reply_callback(
+        Status::OK(),
+        nullptr,
+        nullptr);
     return;
   }
 
-  recovery_succession_manager_->RegisterOwnedTask(replay_task, &returned_refs);
+  // AddPendingTaskForRecovery() has now promoted these deterministic
+  // return IDs to objects owned by this recovery holder.
+  //
+  // The holder may still have an OWNER_DIED value cached from when it
+  // was borrowing the same object from the original owner. Remove that
+  // terminal value before exposing this worker as the replacement owner.
+  std::vector<ObjectID> stale_owner_died_returns;
+
+  for (const auto &return_ref : returned_refs) {
+    if (return_ref.object_id().empty()) {
+      continue;
+    }
+
+    const ObjectID return_id =
+        ObjectID::FromBinary(return_ref.object_id());
+
+    const auto existing =
+        memory_store_->GetIfExists(return_id);
+
+    if (existing == nullptr) {
+      continue;
+    }
+
+    rpc::ErrorType error_type;
+
+    if (existing->IsException(&error_type) &&
+        error_type == rpc::ErrorType::OWNER_DIED) {
+      stale_owner_died_returns.push_back(return_id);
+    }
+  }
+
+  if (!stale_owner_died_returns.empty()) {
+    memory_store_->Delete(stale_owner_died_returns);
+
+    for (const auto &return_id :
+        stale_owner_died_returns) {
+      RAY_LOG(INFO).WithField(return_id)
+          << "Removed stale holder-local OWNER_DIED "
+            "before recovery replay";
+    }
+  }
+
+  recovery_succession_manager_->RegisterOwnedTask(
+      replay_task,
+      &returned_refs);
+
 
   reply->set_result(rpc::RecoverTaskOutputReply::RECOVERED);
 

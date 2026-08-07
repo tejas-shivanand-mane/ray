@@ -256,8 +256,8 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--output", type=Path, default=Path("holder_benchmark.csv"))
-    p.add_argument("--warmup-seconds", type=float, default=10)
-    p.add_argument("--duration-seconds", type=float, default=60)
+    p.add_argument("--warmup-seconds", type=float, default=5)
+    p.add_argument("--duration-seconds", type=float, default=30)
     p.add_argument("--bucket-seconds", type=float, default=1)
     p.add_argument("--inflight", type=int, default=64)
     p.add_argument("--payload-bytes", type=int, default=1024)

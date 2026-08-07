@@ -1,9 +1,0 @@
-config,recovery_enabled,target_non_owner_holders,task_duration_s,payload_bytes,trial,object_timeout_ms,formation_success,formation_time_s,success,replayed,executions_observed,replay_finished,original_producer_pid,producer_alive_after_failure,failure_injection_s,failure_to_replay_start_s,failure_to_replay_finish_s,failure_to_result_s,dispatch_to_failure_s,dispatch_to_result_s,error_type,error_message
-Enabled-1-holder,1,1,5.0,2097152,1,200,True,0.04460097099945415,False,False,1,False,455809,True,0.002932039,nan,nan,14.195848561,0.843892481,15.039741042,RayTaskError(OwnerDiedError),"[36mray::Borrower.read()[39m (pid=455523, ip=192.168.1.241, actor_id=88359267d8ecc1bf726d3eb101000000, repr=<local_recovery_time_benchmark_fixed_v3.Borrower object at 0x78af578f72e0>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v3.py"", line 304, in read
-    return ray.get(self.ref, timeout=timeout_s)
-ray.exceptions.OwnerDiedError: Failed to retrieve object 7451f160e6588f3bffffffffffffffffffffffff0100000001000000. To see information about where this ObjectRef was created in Python, set the environment variable RAY_record_ref_creation_sites=1 during `ray start` and `ray.init()`.
-
-The object's owner has exited. This is the Python worker that first created the ObjectRef via `.remote()` or `ray.put()`. Check cluster logs (`/tmp/ray/session_latest/logs/*260abe3428584fca14208c70f03b52c24f1318f6c1177cb05bce0892*` at IP address 192.168.1.241) for more information about the Python worker failure.
-
-Owner worker ID: 260abe3428584fca14208c70f03b52c24f1318f6c1177cb05bce0892, owner node ID: 2c826fe5bd32dca3be11df470c7fb8d3201b7dd61dc5614ddcabab59, owner address: 192.168.1.241:45209."

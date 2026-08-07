@@ -1,41 +1,17 @@
-config,recovery_enabled,target_non_owner_holders,task_duration_s,payload_bytes,trial,object_timeout_ms,formation_success,formation_time_s,success,replayed,executions_observed,original_producer_pid,producer_alive_after_owner_kill,kill_call_s,kill_to_replay_start_s,kill_to_result_s,dispatch_to_kill_s,dispatch_to_result_s,error_type,error_message
-Enabled-1-holder,1,1,10.0,1024,1,200,True,0.17613506900306675,False,True,2,400895,True,0.000151664,2.267532937,120.012624346,0.775724192,120.788348538,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=401007, ip=192.168.1.241, actor_id=f4d93a9e85ecead01b4a898101000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x7682682fb2e0>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
-    return ray.get(self.ref, timeout=timeout_s)
-  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
-ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
-Enabled-1-holder,1,1,10.0,1024,2,200,True,0.1517695869988529,False,True,2,402985,True,0.000152085,2.249348178,120.014682412,0.745434166,120.760116578,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=403098, ip=192.168.1.241, actor_id=2ad4e96ae95525517528d19f01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x7512351fb2e0>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
-    return ray.get(self.ref, timeout=timeout_s)
-  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
-ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
-Enabled-2-holders,1,2,10.0,1024,1,200,True,0.19980294800188858,False,True,2,404693,True,0.000148287,2.253257739,120.015659087,0.795123172,120.810782259,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=404806, ip=192.168.1.241, actor_id=0616a84aebe8b7d90a26c7dc01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x78be7cefb2e0>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
-    return ray.get(self.ref, timeout=timeout_s)
-  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
-ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
-Enabled-2-holders,1,2,10.0,1024,2,200,True,0.19070500999805517,False,True,2,406404,True,8.2804e-05,2.251863995,120.016076869,0.785491257,120.801568126,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=406516, ip=192.168.1.241, actor_id=f878436460cd53f136d1afe001000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x7c22744032e0>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
-    return ray.get(self.ref, timeout=timeout_s)
-  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
-ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
-Enabled-3-holders,1,3,10.0,1024,1,200,True,0.23455858300076216,False,True,2,408125,True,0.00018834,2.25194816,120.014131508,0.829253981,120.843385489,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=408237, ip=192.168.1.241, actor_id=1203c397ddb8cc18cf28745801000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x786f90ff32e0>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
-    return ray.get(self.ref, timeout=timeout_s)
-  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
-ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
-Enabled-3-holders,1,3,10.0,1024,2,200,True,0.23173422499894514,False,True,2,409857,True,0.000197688,2.249570746,120.013260467,0.828095614,120.841356081,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=409970, ip=192.168.1.241, actor_id=3658927934a14905ce3b3d2d01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x6ffe34afb2e0>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
-    return ray.get(self.ref, timeout=timeout_s)
-  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
-ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
-Enabled-4-holders,1,4,10.0,1024,1,200,True,0.2800164420004876,False,True,2,411616,True,0.00025215,2.253697386,120.014299242,0.875638316,120.889937558,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=411729, ip=192.168.1.241, actor_id=7fd5daf0c9919f1c8691514b01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x7a9a3c407340>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
-    return ray.get(self.ref, timeout=timeout_s)
-  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
-ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
-Enabled-4-holders,1,4,10.0,1024,2,200,True,0.2694526949999272,False,True,2,413381,True,0.000205392,2.250574309,120.01265192,0.864704515,120.877356435,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=413494, ip=192.168.1.241, actor_id=223ddd11a81535c68f3d181e01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x71ad944e32e0>)
-  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
-    return ray.get(self.ref, timeout=timeout_s)
-  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
-ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
+config,recovery_enabled,target_non_owner_holders,task_duration_s,payload_bytes,trial,object_timeout_ms,formation_success,formation_time_s,success,replayed,executions_observed,replay_finished,original_producer_pid,producer_alive_after_failure,failure_injection_s,failure_to_replay_start_s,failure_to_replay_finish_s,failure_to_result_s,dispatch_to_failure_s,dispatch_to_result_s,error_type,error_message
+Enabled-3-holders,1,3,5.0,2097152,1,200,True,0.13448351500119315,True,True,2,True,477969,True,0.00261613,14.379131889,19.405607587,19.427841998,0.913039231,20.340881229,,
+Enabled-1-holder,1,1,10.0,2097152,1,200,True,0.04368973200325854,True,True,2,True,479600,True,0.002392298,14.504166081,24.542395914,24.565442811,0.819281616,25.384724427,,
+Enabled-4-holders,1,4,5.0,2097152,1,200,True,0.1755719350039726,True,True,2,True,481223,True,0.002642629,14.314786406,19.340393121,19.365524854,0.950045268,20.315570122,,
+Enabled-4-holders,1,4,20.0,2097152,1,200,True,0.175333065999439,True,True,2,True,482857,True,0.002269564,14.371946157,34.474503431,34.497725003,0.952209722,35.449934725,,
+Enabled-1-holder,1,1,30.0,2097152,1,200,True,0.04560014399612555,True,True,2,True,484513,True,0.002509555,14.500707669,44.602189762,44.624018875,0.821416763,45.445435638,,
+Enabled-1-holder,1,1,20.0,2097152,1,200,True,0.04680713800189551,True,True,2,True,486196,True,0.002660332,14.49961363,34.594536795,34.616252421,0.822767758,35.439020179,,
+Enabled-4-holders,1,4,10.0,2097152,1,200,True,0.1774691550017451,True,True,2,True,487853,True,0.002186541,14.370685217,24.42197392,24.445485429,0.953713568,25.399198997,,
+Enabled-2-holders,1,2,30.0,2097152,1,200,True,0.08725006199529162,True,True,2,True,489589,True,0.002627733,14.450071584,44.547115407,44.569343785,0.863616134,45.432959919,,
+Enabled-4-holders,1,4,30.0,2097152,1,200,True,0.17416623500321293,True,True,2,True,491292,True,0.003123788,14.357190004,44.459360872,44.483755751,0.960798745,45.444554496,,
+Enabled-3-holders,1,3,20.0,2097152,1,200,True,0.1342683719994966,True,True,2,True,493622,True,0.002527134,14.403722288,34.503338089,34.52576762,0.909995028,35.435762648,,
+Enabled-3-holders,1,3,10.0,2097152,1,200,True,0.12959458299883408,True,True,2,True,497111,True,0.002676625,14.406845292,24.458688327,24.480155511,0.907302117,25.387457628,,
+Enabled-1-holder,1,1,5.0,2097152,1,200,True,0.04217513000185136,True,True,2,True,498774,True,0.002457403,14.492467963,19.519799174,19.541588355,0.818786535,20.36037489,,
+Enabled-2-holders,1,2,10.0,2097152,1,200,True,0.09659994699904928,True,True,2,True,500630,True,0.002625756,14.429674277,24.480645164,24.502316489,0.898629557,25.400946046,,
+Enabled-2-holders,1,2,20.0,2097152,1,200,True,0.08671841199975461,True,True,2,True,502461,True,0.002592842,14.444210014,34.546149758,34.569242836,0.862878255,35.432121091,,
+Enabled-2-holders,1,2,5.0,2097152,1,200,True,0.087809296004707,True,True,2,True,504443,True,0.002378022,14.405406494,19.430696686,19.453855368,0.863636994,20.317492362,,
+Enabled-3-holders,1,3,30.0,2097152,1,200,True,0.13352994700107956,True,True,2,True,506115,True,0.002414003,14.394362654,44.49604632,44.518402507,0.911946299,45.430348806,,
