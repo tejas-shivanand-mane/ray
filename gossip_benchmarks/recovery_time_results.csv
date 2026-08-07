@@ -1,0 +1,41 @@
+config,recovery_enabled,target_non_owner_holders,task_duration_s,payload_bytes,trial,object_timeout_ms,formation_success,formation_time_s,success,replayed,executions_observed,original_producer_pid,producer_alive_after_owner_kill,kill_call_s,kill_to_replay_start_s,kill_to_result_s,dispatch_to_kill_s,dispatch_to_result_s,error_type,error_message
+Enabled-1-holder,1,1,10.0,1024,1,200,True,0.17613506900306675,False,True,2,400895,True,0.000151664,2.267532937,120.012624346,0.775724192,120.788348538,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=401007, ip=192.168.1.241, actor_id=f4d93a9e85ecead01b4a898101000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x7682682fb2e0>)
+  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
+    return ray.get(self.ref, timeout=timeout_s)
+  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
+ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
+Enabled-1-holder,1,1,10.0,1024,2,200,True,0.1517695869988529,False,True,2,402985,True,0.000152085,2.249348178,120.014682412,0.745434166,120.760116578,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=403098, ip=192.168.1.241, actor_id=2ad4e96ae95525517528d19f01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x7512351fb2e0>)
+  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
+    return ray.get(self.ref, timeout=timeout_s)
+  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
+ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
+Enabled-2-holders,1,2,10.0,1024,1,200,True,0.19980294800188858,False,True,2,404693,True,0.000148287,2.253257739,120.015659087,0.795123172,120.810782259,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=404806, ip=192.168.1.241, actor_id=0616a84aebe8b7d90a26c7dc01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x78be7cefb2e0>)
+  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
+    return ray.get(self.ref, timeout=timeout_s)
+  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
+ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
+Enabled-2-holders,1,2,10.0,1024,2,200,True,0.19070500999805517,False,True,2,406404,True,8.2804e-05,2.251863995,120.016076869,0.785491257,120.801568126,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=406516, ip=192.168.1.241, actor_id=f878436460cd53f136d1afe001000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x7c22744032e0>)
+  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
+    return ray.get(self.ref, timeout=timeout_s)
+  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
+ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
+Enabled-3-holders,1,3,10.0,1024,1,200,True,0.23455858300076216,False,True,2,408125,True,0.00018834,2.25194816,120.014131508,0.829253981,120.843385489,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=408237, ip=192.168.1.241, actor_id=1203c397ddb8cc18cf28745801000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x786f90ff32e0>)
+  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
+    return ray.get(self.ref, timeout=timeout_s)
+  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
+ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
+Enabled-3-holders,1,3,10.0,1024,2,200,True,0.23173422499894514,False,True,2,409857,True,0.000197688,2.249570746,120.013260467,0.828095614,120.841356081,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=409970, ip=192.168.1.241, actor_id=3658927934a14905ce3b3d2d01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x6ffe34afb2e0>)
+  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
+    return ray.get(self.ref, timeout=timeout_s)
+  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
+ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
+Enabled-4-holders,1,4,10.0,1024,1,200,True,0.2800164420004876,False,True,2,411616,True,0.00025215,2.253697386,120.014299242,0.875638316,120.889937558,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=411729, ip=192.168.1.241, actor_id=7fd5daf0c9919f1c8691514b01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x7a9a3c407340>)
+  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
+    return ray.get(self.ref, timeout=timeout_s)
+  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
+ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
+Enabled-4-holders,1,4,10.0,1024,2,200,True,0.2694526949999272,False,True,2,413381,True,0.000205392,2.250574309,120.01265192,0.864704515,120.877356435,RayTaskError(GetTimeoutError),"[36mray::Borrower.read()[39m (pid=413494, ip=192.168.1.241, actor_id=223ddd11a81535c68f3d181e01000000, repr=<local_recovery_time_benchmark_fixed_v2.Borrower object at 0x71ad944e32e0>)
+  File ""/home/tejas/Downloads/ray/gossip_benchmarks/local_recovery_time_benchmark_fixed_v2.py"", line 328, in read
+    return ray.get(self.ref, timeout=timeout_s)
+  File ""python/ray/includes/common.pxi"", line 107, in ray._raylet.check_status
+ray.exceptions.GetTimeoutError: Get timed out: some object(s) not ready."
