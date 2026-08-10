@@ -94,6 +94,207 @@ bool LocalDependencyResolver::CancelDependencyResolution(const TaskID &task_id) 
   return pending_tasks_.erase(task_id) > 0;
 }
 
+
+void LocalDependencyResolver::ArmObjectDependency(
+    const TaskID &task_id,
+    const ObjectID &object_id) {
+  auto callback =
+      [this, task_id, object_id](
+          std::shared_ptr<RayObject> object) {
+        ResolveObjectDependency(
+            task_id,
+            object_id,
+            std::move(object));
+      };
+
+  auto existing =
+      in_memory_store_.GetIfExists(object_id);
+
+  if (existing != nullptr) {
+    RAY_LOG(DEBUG)
+        .WithField(object_id)
+        << "Object already exists in in-memory "
+           "store, resolving dependency "
+           "synchronously";
+
+    callback(std::move(existing));
+  } else {
+    RAY_LOG(DEBUG)
+        .WithField(object_id)
+        << "Object does not exist in in-memory "
+           "store, resolving dependency "
+           "asynchronously";
+
+    in_memory_store_.GetAsync(
+        object_id,
+        std::move(callback));
+  }
+}
+
+void LocalDependencyResolver::ResolveObjectDependency(
+    const TaskID &task_id,
+    const ObjectID &object_id,
+    std::shared_ptr<RayObject> object) {
+  RAY_CHECK(object != nullptr);
+
+  // ------------------------------------------------------------
+  // Recovery-succession interception.
+  //
+  // OWNER_DIED is normally treated as a resolved dependency.
+  // For a recovery-aware task, first give recovery succession
+  // one opportunity to replace the dead dependency owner.
+  // ------------------------------------------------------------
+  rpc::ErrorType error_type;
+
+  if (object->IsException(&error_type) &&
+      error_type == rpc::ErrorType::OWNER_DIED &&
+      dependency_recovery_callback_) {
+    bool should_attempt_recovery = false;
+
+    {
+      absl::MutexLock lock(&mu_);
+
+      auto it = pending_tasks_.find(task_id);
+
+      if (it == pending_tasks_.end()) {
+        return;
+      }
+
+      should_attempt_recovery =
+          it->second
+              ->recovery_attempted_dependencies
+              .insert(object_id)
+              .second;
+    }
+
+    if (should_attempt_recovery) {
+      RAY_LOG(INFO)
+          .WithField(task_id)
+          .WithField(object_id)
+          << "OWNER_DIED dependency intercepted "
+             "during task dependency resolution; "
+             "trying recovery succession";
+
+      // Remove the terminal in-memory sentinel before
+      // restarting FutureResolver against the recovery
+      // holder. Otherwise a new GetAsync() would
+      // immediately return the same OWNER_DIED value.
+      std::vector<ObjectID> stale_ids{
+          object_id};
+
+      in_memory_store_.Delete(stale_ids);
+
+      auto original_error = object;
+
+      dependency_recovery_callback_(
+          object_id,
+          [this,
+           task_id,
+           object_id,
+           original_error =
+               std::move(original_error)](
+              bool recovery_started) mutable {
+            if (recovery_started) {
+              RAY_LOG(INFO)
+                  .WithField(task_id)
+                  .WithField(object_id)
+                  << "Recovery succession accepted "
+                     "for task dependency; waiting "
+                     "for reconstructed object";
+
+              // RecoverBorrowedObject() has changed the
+              // borrowed owner and restarted
+              // FutureResolver. Re-arm this dependency
+              // against that future.
+              ArmObjectDependency(
+                  task_id,
+                  object_id);
+
+              return;
+            }
+
+            RAY_LOG(INFO)
+                .WithField(task_id)
+                .WithField(object_id)
+                << "Recovery succession unavailable "
+                   "for task dependency; preserving "
+                   "OWNER_DIED behavior";
+
+            // The attempted set prevents this call from
+            // recursively trying recovery again.
+            ResolveObjectDependency(
+                task_id,
+                object_id,
+                std::move(original_error));
+          });
+
+      return;
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Existing dependency-resolution logic.
+  // ------------------------------------------------------------
+
+  std::unique_ptr<TaskState>
+      resolved_task_state = nullptr;
+
+  std::vector<ObjectID>
+      inlined_dependency_ids;
+
+  std::vector<ObjectID>
+      contained_ids;
+
+  {
+    RAY_LOG(DEBUG)
+        .WithField(object_id)
+        << "Object dependency resolved";
+
+    absl::MutexLock lock(&mu_);
+
+    auto it = pending_tasks_.find(task_id);
+
+    if (it == pending_tasks_.end()) {
+      return;
+    }
+
+    auto &state = it->second;
+
+    state->local_dependencies[object_id] =
+        std::move(object);
+
+    if (--state->obj_dependencies_remaining ==
+        0) {
+      InlineDependencies(
+          state->local_dependencies,
+          state->task,
+          &inlined_dependency_ids,
+          &contained_ids,
+          tensor_transport_getter_);
+
+      if (state->actor_dependencies_remaining ==
+          0) {
+        resolved_task_state =
+            std::move(state);
+
+        pending_tasks_.erase(it);
+      }
+    }
+  }
+
+  if (!inlined_dependency_ids.empty()) {
+    task_manager_.OnTaskDependenciesInlined(
+        inlined_dependency_ids,
+        contained_ids);
+  }
+
+  if (resolved_task_state) {
+    resolved_task_state
+        ->on_dependencies_resolved_(
+            resolved_task_state->status);
+  }
+}
+
 void LocalDependencyResolver::ResolveDependencies(
     TaskSpecification &task, std::function<void(Status)> on_dependencies_resolved) {
   absl::flat_hash_set<ObjectID> local_dependency_ids;
@@ -130,61 +331,11 @@ void LocalDependencyResolver::ResolveDependencies(
     RAY_CHECK(inserted.second);
   }
 
-  for (const auto &obj_id : local_dependency_ids) {
-    auto resolve_object_dependency = [this, task_id, obj_id](
-                                         std::shared_ptr<RayObject> obj) {
-      RAY_CHECK(obj != nullptr);
-
-      std::unique_ptr<TaskState> resolved_task_state = nullptr;
-      std::vector<ObjectID> inlined_dependency_ids;
-      std::vector<ObjectID> contained_ids;
-      {
-        RAY_LOG(DEBUG).WithField(obj_id) << "Object dependency resolved";
-        absl::MutexLock lock(&mu_);
-
-        auto it = pending_tasks_.find(task_id);
-        // The dependency resolution for the task has been cancelled.
-        if (it == pending_tasks_.end()) {
-          return;
-        }
-        auto &state = it->second;
-        state->local_dependencies[obj_id] = std::move(obj);
-        if (--state->obj_dependencies_remaining == 0) {
-          InlineDependencies(state->local_dependencies,
-                             state->task,
-                             &inlined_dependency_ids,
-                             &contained_ids,
-                             tensor_transport_getter_);
-          if (state->actor_dependencies_remaining == 0) {
-            resolved_task_state = std::move(state);
-            pending_tasks_.erase(it);
-          }
-        }
-      }
-
-      if (!inlined_dependency_ids.empty()) {
-        task_manager_.OnTaskDependenciesInlined(inlined_dependency_ids, contained_ids);
-      }
-      if (resolved_task_state) {
-        resolved_task_state->on_dependencies_resolved_(resolved_task_state->status);
-      }
-    };
-
-    // GetAsync always posts a callback to the I/O event queue even when the
-    // object already exists (see https://github.com/ray-project/ray/pull/47833
-    // for why). In workloads like Data shuffle, all map outputs
-    // are ready before reduce tasks are submitted, so checking synchronously
-    // first avoids flooding the I/O context with callbacks.
-    auto existing = in_memory_store_.GetIfExists(obj_id);
-    if (existing != nullptr) {
-      RAY_LOG(DEBUG).WithField(obj_id) << "Object already exists in in-memory store, "
-                                          "resolving dependency synchronously";
-      resolve_object_dependency(std::move(existing));
-    } else {
-      RAY_LOG(DEBUG).WithField(obj_id) << "Object does not exist in in-memory store, "
-                                          "resolving dependency asynchronously";
-      in_memory_store_.GetAsync(obj_id, std::move(resolve_object_dependency));
-    }
+  for (const auto &obj_id :
+      local_dependency_ids) {
+    ArmObjectDependency(
+        task_id,
+        obj_id);
   }
 
   for (const auto &actor_id : actor_dependency_ids) {

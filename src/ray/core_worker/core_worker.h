@@ -1583,6 +1583,16 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   void FreeObjectOnNodesAsync(const ObjectID &object_id,
                               const absl::flat_hash_set<NodeID> &locations);
 
+
+  /// Attempts recovery succession for an object that
+  /// failed while resolving a normal-task dependency.
+  ///
+  /// Used by LocalDependencyResolver before a recovery
+  /// replay is dispatched to an executor.
+  void TryRecoverTaskDependency(
+      const ObjectID &object_id,
+      std::function<void(bool)> callback);
+                              
  private:
   /// Selects node-distinct witness raylets for a newly owned task.
   std::vector<rpc::Address> SelectRecoveryWitnesses(const TaskID &task_id) const;

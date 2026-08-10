@@ -102,6 +102,8 @@ class NormalTaskSubmitter {
       const JobID &job_id,
       std::shared_ptr<LeaseRequestRateLimiter> lease_request_rate_limiter,
       const TensorTransportGetter &tensor_transport_getter,
+      DependencyRecoveryCallback
+    dependency_recovery_callback,
       instrumented_io_context &io_service,
       ray::observability::MetricInterface &scheduler_placement_time_ms_histogram,
       ClockInterface &clock)
@@ -110,7 +112,13 @@ class NormalTaskSubmitter {
         raylet_client_pool_(std::move(raylet_client_pool)),
         gcs_client_(std::move(gcs_client)),
         lease_policy_(std::move(lease_policy)),
-        resolver_(*store, task_manager, *actor_creator, tensor_transport_getter),
+        resolver_(
+          *store,
+          task_manager,
+          *actor_creator,
+          tensor_transport_getter,
+          std::move(
+          dependency_recovery_callback)),
         task_manager_(task_manager),
         lease_timeout_ms_(lease_timeout_ms),
         local_node_id_(local_node_id),

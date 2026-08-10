@@ -32,17 +32,26 @@ namespace core {
 using TensorTransportGetter =
     std::function<std::optional<std::string>(const ObjectID &object_id)>;
 
+using DependencyRecoveryCallback =
+std::function<void(
+    const ObjectID &object_id,
+    std::function<void(bool)> callback)>;
+
 // This class is thread-safe.
 class LocalDependencyResolver {
  public:
-  LocalDependencyResolver(CoreWorkerMemoryStore &store,
-                          TaskManagerInterface &task_manager,
-                          ActorCreatorInterface &actor_creator,
-                          const TensorTransportGetter &tensor_transport_getter)
-      : in_memory_store_(store),
-        task_manager_(task_manager),
-        actor_creator_(actor_creator),
-        tensor_transport_getter_(tensor_transport_getter) {}
+  LocalDependencyResolver(
+    CoreWorkerMemoryStore &store,
+    TaskManagerInterface &task_manager,
+    ActorCreatorInterface &actor_creator,
+    const TensorTransportGetter &tensor_transport_getter,
+    DependencyRecoveryCallback dependency_recovery_callback)
+    : in_memory_store_(store),
+      task_manager_(task_manager),
+      actor_creator_(actor_creator),
+      tensor_transport_getter_(tensor_transport_getter),
+      dependency_recovery_callback_(
+          std::move(dependency_recovery_callback)) {}
 
   /// Resolve all local and remote dependencies for the task, calling the specified
   /// callback when done. Direct call ids in the task specification will be resolved
@@ -65,6 +74,9 @@ class LocalDependencyResolver {
   /// \return true if dependency resolution was successfully cancelled
   bool CancelDependencyResolution(const TaskID &task_id);
 
+
+
+
   /// Return the number of tasks pending dependency resolution.
   int64_t NumPendingTasks() const {
     absl::MutexLock lock(&mu_);
@@ -72,6 +84,16 @@ class LocalDependencyResolver {
   }
 
  private:
+  void ArmObjectDependency(
+      const TaskID &task_id,
+      const ObjectID &object_id);
+
+  void ResolveObjectDependency(
+      const TaskID &task_id,
+      const ObjectID &object_id,
+      std::shared_ptr<RayObject> object);
+
+
   struct TaskState {
     TaskState(TaskSpecification t,
               const absl::flat_hash_set<ObjectID> &deps,
@@ -99,6 +121,9 @@ class LocalDependencyResolver {
     /// Dependency resolution status.
     Status status;
     std::function<void(Status)> on_dependencies_resolved_;
+
+    absl::flat_hash_set<ObjectID>
+    recovery_attempted_dependencies;
   };
 
   /// The in-memory store.
@@ -116,6 +141,9 @@ class LocalDependencyResolver {
   /// objects, we will not clear the ObjectRef metadata, even if the task
   /// executor has inlined the object value.
   const TensorTransportGetter tensor_transport_getter_;
+
+  const DependencyRecoveryCallback
+    dependency_recovery_callback_;
 
   absl::flat_hash_map<TaskID, std::unique_ptr<TaskState>> pending_tasks_
       ABSL_GUARDED_BY(mu_);

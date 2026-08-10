@@ -602,6 +602,15 @@ std::shared_ptr<CoreWorker> CoreWorkerProcessImpl::CreateCoreWorker(
         // Currently, RDT is only supported for actor tasks.
         return std::nullopt;
       },
+      [this](
+          const ObjectID &object_id,
+          std::function<void(bool)> callback) {
+        auto core_worker = GetCoreWorker();
+
+        core_worker->TryRecoverTaskDependency(
+            object_id,
+            std::move(callback));
+      },
       io_service_,
       *scheduler_placement_time_percentile_ms_,
       /*clock=*/clock_);

@@ -4859,6 +4859,45 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
 
   TaskSpecification replay_task(std::move(replay_task_proto));
 
+  // Register recovery metadata carried by direct
+  // ObjectRef dependencies of this stored TaskSpec.
+  //
+  // Recovery holders retain TaskSpecs but are not
+  // necessarily executors of the original task, so
+  // make the upstream dependency recovery plan
+  // explicit before NormalTaskSubmitter resolves
+  // those dependencies.
+  for (size_t i = 0;
+      i < replay_task.NumArgs();
+      ++i) {
+    if (!replay_task.ArgByRef(i)) {
+      continue;
+    }
+
+    const auto &arg_ref =
+        replay_task.ArgRef(i);
+
+    if (arg_ref.object_id().empty() ||
+        !arg_ref.has_recovery_metadata()) {
+      continue;
+    }
+
+    const ObjectID dependency_id =
+        ObjectID::FromBinary(
+            arg_ref.object_id());
+
+    recovery_succession_manager_
+        ->RegisterBorrowedObject(
+            dependency_id,
+            arg_ref.recovery_metadata());
+
+    RAY_LOG(INFO)
+        .WithField(replay_task.TaskId())
+        .WithField(dependency_id)
+        << "Registered recovery metadata for "
+          "replay task dependency";
+  }
+
   const int32_t max_retries = replay_task.MaxRetries();
 
   std::vector<rpc::ObjectReference> returned_refs =
@@ -4948,6 +4987,28 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
 
   send_reply_callback(Status::OK(), nullptr, nullptr);
 }
+
+
+void CoreWorker::TryRecoverTaskDependency(
+    const ObjectID &object_id,
+    std::function<void(bool)> callback) {
+  if (!recovery_succession_enabled_ ||
+      recovery_succession_manager_ ==
+          nullptr) {
+    callback(false);
+    return;
+  }
+
+  RAY_LOG(INFO)
+      .WithField(object_id)
+      << "Trying recovery succession for "
+         "normal-task dependency";
+
+  RecoverBorrowedObject(
+      object_id,
+      std::move(callback));
+}
+
 
 void CoreWorker::RecoverBorrowedObject(const ObjectID &object_id,
                                        RecoveryAttemptCallback callback) {
