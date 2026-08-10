@@ -105,12 +105,12 @@ def draw(
             )
 
     if failure_at is not None:
-        ax.axvline(
-            failure_at,
-            linestyle="--",
-            linewidth=1.5,
-            label="Failure injected",
-        )
+        # ax.axvline(
+        #     failure_at,
+        #     linestyle="--",
+        #     linewidth=1.5,
+        #     label="Failure injected",
+        # )
         ax.axvline(
                     failure_at + 14.5,
                     linestyle="--",
