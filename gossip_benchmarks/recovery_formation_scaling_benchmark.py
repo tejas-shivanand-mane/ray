@@ -90,7 +90,8 @@ class IncrementalCommitLogCounter:
             log_dir = session_dir / "logs"
             if not log_dir.exists():
                 continue
-            for path in log_dir.glob("*"):
+
+            for path in log_dir.glob("python-core-worker-*.log"):
                 if path.is_file():
                     yield path
 
@@ -628,13 +629,29 @@ def write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
         exist_ok=True,
     )
 
+    formatted_rows = []
+
+    for row in rows:
+        formatted_row = {}
+
+        for key, value in row.items():
+            if isinstance(value, float):
+                if math.isnan(value):
+                    formatted_row[key] = "nan"
+                else:
+                    formatted_row[key] = f"{value:.4f}"
+            else:
+                formatted_row[key] = value
+
+        formatted_rows.append(formatted_row)
+
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=FIELDS,
         )
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(formatted_rows)
 
 
 def validate_args(args) -> None:
@@ -778,7 +795,7 @@ def main():
     parser.add_argument(
         "--log-poll-interval-ms",
         type=float,
-        default=20.0,
+        default=1.0,
         help=(
             "Incremental log polling interval used only to "
             "observe INFO-level commit completion."
