@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import math
 import os
 import statistics
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("RAY_BACKEND_LOG_LEVEL", "warning")
+os.environ["RAY_BACKEND_LOG_LEVEL"] = "info"
 os.environ.setdefault("RAY_DEDUP_LOGS", "0")
 
 import ray
@@ -402,6 +403,7 @@ def run_trial(case: Case, args, trial: int):
             address=layout.cluster.address,
             log_to_driver=False,
             include_dashboard=False,
+            logging_level=logging.ERROR,
         )
 
         expected = 1 + 1 + args.holders + 1 + args.witness_count
