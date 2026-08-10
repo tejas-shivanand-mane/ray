@@ -377,6 +377,9 @@ FIELDS = [
     *DIAGNOSTIC_FLAG_FIELDS,
     "error_type",
     "error_message",
+    "finishes_observed",
+    "replay_finished",
+    "failure_to_replay_finish_s",
 ]
 
 
@@ -401,6 +404,9 @@ def run_trial(
         "diagnostic_stage": "not_collected",
         "error_type": "",
         "error_message": "",
+        "finishes_observed": 0,
+        "replay_finished": False,
+        "failure_to_replay_finish_s": math.nan,
     }
     for key in DIAGNOSTIC_FLAG_FIELDS:
         row[key] = False
@@ -574,7 +580,23 @@ def run_trial(
         finishes = [e for e in events if e[0] == "FINISH"]
 
         row["executions_observed"] = len(starts)
+        row["finishes_observed"] = len(finishes)
         row["replayed"] = len(starts) >= 2
+
+        if len(starts) >= 2:
+            replay_pid = starts[1][2]
+
+            replay_finishes = [
+                e for e in finishes
+                if e[2] == replay_pid
+            ]
+
+            if replay_finishes:
+                row["replay_finished"] = True
+                row["failure_to_replay_finish_s"] = max(
+                    0.0,
+                    (replay_finishes[0][1] - failure_wall_ns) / 1e9,
+                )
 
         if mode != "owner_plus_producer_node" and finishes:
             original_pid = first_start[2]
@@ -671,8 +693,11 @@ def print_compact_result(
         f"executions={row['executions_observed']} "
         f"replayed={row['replayed']} "
         f"replay_start={row['failure_to_replay_start_s']} "
+        f"replay_finished={row['replay_finished']} "
+        f"replay_finish={row['failure_to_replay_finish_s']} "
+        f"finishes={row['finishes_observed']} "
         f"result={row['failure_to_result_s']:.3f}s "
-        f"original_finished={row['original_task_finished_after_owner_failure']}"
+        f"original_finished={row['original_task_finished_after_owner_failure']} "
         f"stale_filtered={int(row['stale_owner_died_ignored'])} "
         f"affinity_cleared={int(row['soft_affinity_cleared'])}"
     )
