@@ -380,6 +380,8 @@ FIELDS = [
     "finishes_observed",
     "replay_finished",
     "failure_to_replay_finish_s",
+    "original_pid",
+    "replay_pid",
 ]
 
 
@@ -407,6 +409,8 @@ def run_trial(
         "finishes_observed": 0,
         "replay_finished": False,
         "failure_to_replay_finish_s": math.nan,
+        "original_pid": -1,
+        "replay_pid": -1,
     }
     for key in DIAGNOSTIC_FLAG_FIELDS:
         row[key] = False
@@ -577,6 +581,9 @@ def run_trial(
 
         events = read_marker(marker)
         starts = [e for e in events if e[0] == "START"]
+        row["original_pid"] = starts[0][2] if len(starts) >= 1 else -1
+        row["replay_pid"] = starts[1][2] if len(starts) >= 2 else -1
+
         finishes = [e for e in events if e[0] == "FINISH"]
 
         row["executions_observed"] = len(starts)
@@ -700,6 +707,8 @@ def print_compact_result(
         f"original_finished={row['original_task_finished_after_owner_failure']} "
         f"stale_filtered={int(row['stale_owner_died_ignored'])} "
         f"affinity_cleared={int(row['soft_affinity_cleared'])}"
+        f"original_pid={row['original_pid']} "
+        f"replay_pid={row['replay_pid']} "
     )
 
     # Only show the recovery-path detail when a trial fails.
@@ -715,6 +724,7 @@ def print_compact_result(
             f"accepted={int(row['replay_accepted'])} "
             f"submitted={int(row['replay_submitted'])} "
             f"future_restart={int(row['future_resolution_restarted'])}"
+            
         )
 
         if row["error_type"]:

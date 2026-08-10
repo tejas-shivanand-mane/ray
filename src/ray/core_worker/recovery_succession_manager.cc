@@ -239,7 +239,8 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
           CompareManifestVersions(
               task_spec.recovery_manifest(),
               task_state.manifest) > 0) {
-        task_state.manifest.CopyFrom(task_spec.recovery_manifest());
+        task_state.manifest.CopyFrom(
+            task_spec.recovery_manifest());
       }
 
       rpc::TaskSpec stored_task_spec;
@@ -249,10 +250,22 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
 
       task_state.task_spec = std::move(stored_task_spec);
 
-      MaybeAddCandidateReportLocked(
-          task_state.manifest,
-          true,
-          &reports);
+      // IMPORTANT:
+      //
+      // Do not admit the original task executor as a recovery
+      // succession holder.
+      //
+      // Although the executor may run on a node distinct from the
+      // task owner, Ray's worker lease is owned by the task submitter.
+      // If that owner's node dies, NodeManager::NodeRemoved() kills
+      // this leased executor as part of normal Ray cleanup.
+      //
+      // Therefore the executor is not failure-independent from the
+      // original owner and cannot provide owner-failure tolerance.
+      //
+      // The TaskSpec may still be retained locally for normal task
+      // bookkeeping, but holder admission must come from independent
+      // downstream borrowers.
     }
   }
 
