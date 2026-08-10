@@ -644,7 +644,6 @@ FIELDS = [
     "stages_with_duplicate_replay",
     "max_post_failure_starts_for_one_stage",
     "error_type",
-    "error_message",
 ]
 
 
@@ -690,7 +689,6 @@ def make_row(
         "stages_with_duplicate_replay": 0,
         "max_post_failure_starts_for_one_stage": 0,
         "error_type": "",
-        "error_message": "",
     }
 
 
@@ -1128,9 +1126,9 @@ def run_trial(
                 type(exc).__name__
             )
 
-            row["error_message"] = (
-                str(exc)[:500]
-            )
+            # row["error_message"] = (
+            #     str(exc)[:500]
+            # )
 
         analyze_marker(
             row=row,
@@ -1146,9 +1144,9 @@ def run_trial(
             row["error_type"] = (
                 type(exc).__name__
             )
-            row["error_message"] = (
-                str(exc)[:500]
-            )
+            # row["error_message"] = (
+            #     str(exc)[:500]
+            # )
 
         if failure_wall_ns > 0:
             analyze_marker(
@@ -1478,7 +1476,6 @@ def main():
                         "  "
                         f"success=False "
                         f"error={row['error_type']}: "
-                        f"{row['error_message']}"
                     )
 
                 write_rows(
