@@ -1527,16 +1527,20 @@ Status CoreWorker::GetExperimentalMutableObjects(
 Status CoreWorker::GetObjects(const std::vector<ObjectID> &ids,
                               const int64_t timeout_ms,
                               std::vector<std::shared_ptr<RayObject>> &results) {
-  return GetObjectsInternal(ids,
-                            timeout_ms,
-                            results,
-                            /*allow_recovery_succession=*/true);
+  return GetObjectsInternal(
+      ids,
+      timeout_ms,
+      results,
+      /*allow_recovery_succession=*/true,
+      /*recovery_in_progress_ids=*/nullptr);
 }
 
-Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
-                                      const int64_t timeout_ms,
-                                      std::vector<std::shared_ptr<RayObject>> &results,
-                                      bool allow_recovery_succession) {
+Status CoreWorker::GetObjectsInternal(
+    const std::vector<ObjectID> &ids,
+    const int64_t timeout_ms,
+    std::vector<std::shared_ptr<RayObject>> &results,
+    bool allow_recovery_succession,
+    const absl::flat_hash_set<ObjectID> *recovery_in_progress_ids) {
   // Normal ray.get path for immutable in-memory and shared memory objects.
   absl::flat_hash_set<ObjectID> plasma_object_ids;
   absl::flat_hash_set<ObjectID> memory_object_ids(ids.begin(), ids.end());
@@ -1600,6 +1604,121 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
     RAY_RETURN_NOT_OK(plasma_store_provider_->Get(
         object_ids, owner_addresses, local_timeout_ms, &result_map));
   }
+
+
+
+
+
+  // A recovery replay may already have been accepted while an old
+  // OWNER_DIED sentinel for the same deterministic ObjectID is still
+  // propagating through the local object store / pull path.
+  //
+  // Do not expose that stale terminal value to the caller while the
+  // accepted recovery attempt is still producing the replacement.
+  if (recovery_in_progress_ids != nullptr &&
+      !recovery_in_progress_ids->empty()) {
+    std::vector<ObjectID> stale_owner_died_objects;
+
+    for (const ObjectID &object_id : *recovery_in_progress_ids) {
+      auto it = result_map.find(object_id);
+
+      if (it == result_map.end() || it->second == nullptr) {
+        continue;
+      }
+
+      rpc::ErrorType error_type;
+
+      if (it->second->IsException(&error_type) &&
+          error_type == rpc::ErrorType::OWNER_DIED) {
+        stale_owner_died_objects.push_back(object_id);
+      }
+    }
+
+    if (!stale_owner_died_objects.empty()) {
+      // Release any plasma buffers before deleting the stale sentinel.
+      for (const ObjectID &object_id : stale_owner_died_objects) {
+        result_map.erase(object_id);
+      }
+
+      // Remove a possible in-memory copy.
+      memory_store_->Delete(stale_owner_died_objects);
+
+      // Remove the local plasma OWNER_DIED sentinel as well.
+      absl::flat_hash_set<ObjectID> stale_plasma_ids(
+          stale_owner_died_objects.begin(),
+          stale_owner_died_objects.end());
+
+      const Status delete_status =
+          plasma_store_provider_->Delete(
+              stale_plasma_ids,
+              /*local_only=*/true);
+
+      if (!delete_status.ok()) {
+        return delete_status;
+      }
+
+      // FreeObjects is asynchronous. Wait until the stale sentinel has
+      // actually disappeared before starting another pull for the same ID.
+      while (true) {
+        bool stale_object_present = false;
+
+        for (const ObjectID &object_id : stale_plasma_ids) {
+          bool contains = false;
+
+          RAY_RETURN_NOT_OK(
+              plasma_store_provider_->Contains(object_id, &contains));
+
+          if (contains) {
+            stale_object_present = true;
+            break;
+          }
+        }
+
+        if (!stale_object_present) {
+          break;
+        }
+
+        const int64_t elapsed_ms =
+            clock_.SteadyNowMillis() - start_time;
+
+        if (timeout_ms >= 0 && elapsed_ms >= timeout_ms) {
+          return Status::TimedOut(
+              "Timed out removing stale OWNER_DIED while "
+              "recovery replay was in progress.");
+        }
+
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(10));
+      }
+
+      RAY_LOG(INFO)
+          << "Ignored stale OWNER_DIED while recovery replay "
+            "is in progress";
+
+      const int64_t elapsed_ms =
+          clock_.SteadyNowMillis() - start_time;
+
+      const int64_t remaining_timeout_ms =
+          timeout_ms < 0
+              ? timeout_ms
+              : std::max<int64_t>(
+                    0,
+                    timeout_ms - elapsed_ms);
+
+      results.assign(ids.size(), nullptr);
+
+      return GetObjectsInternal(
+          ids,
+          remaining_timeout_ms,
+          results,
+          /*allow_recovery_succession=*/false,
+          recovery_in_progress_ids);
+    }
+  }
+
+
+
+  
 
   // OWNER_DIED can be returned either by the memory store or
   // by the plasma fetch above.
@@ -1753,21 +1872,35 @@ Status CoreWorker::GetObjectsInternal(const std::vector<ObjectID> &ids,
           }
         }
 
+
+
+
+
         if (all_recoveries_accepted) {
-          const int64_t elapsed_ms = clock_.SteadyNowMillis() - start_time;
+          const int64_t elapsed_ms =
+              clock_.SteadyNowMillis() - start_time;
 
           const int64_t remaining_timeout_ms =
-              timeout_ms < 0 ? timeout_ms : std::max<int64_t>(0, timeout_ms - elapsed_ms);
+              timeout_ms < 0
+                  ? timeout_ms
+                  : std::max<int64_t>(
+                        0,
+                        timeout_ms - elapsed_ms);
+
+          // Only suppress stale OWNER_DIED for objects for which a
+          // recovery holder actually accepted responsibility.
+          absl::flat_hash_set<ObjectID> recovery_in_progress(
+              recoverable_owner_died_objects.begin(),
+              recoverable_owner_died_objects.end());
 
           results.assign(ids.size(), nullptr);
 
-          // The stale local OWNER_DIED object was fully removed before
-          // replay was requested. Keep one pull active until the acting
-          // holder produces the replacement object.
-          return GetObjectsInternal(ids,
-                                    remaining_timeout_ms,
-                                    results,
-                                    /*allow_recovery_succession=*/false);
+          return GetObjectsInternal(
+              ids,
+              remaining_timeout_ms,
+              results,
+              /*allow_recovery_succession=*/false,
+              &recovery_in_progress);
         }
 
         // Recovery succession was unavailable or rejected. Return
@@ -4622,6 +4755,34 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
   // this replay. Keep the original task and return IDs, but replace
   // the dead caller address.
   replay_task_proto.mutable_caller_address()->CopyFrom(rpc_address_);
+
+
+  // Recovery should not remain blocked behind the original execution
+  // merely because the task had a soft node-affinity preference.
+  //
+  // A soft affinity is a placement preference rather than a semantic
+  // requirement, so recovery is free to use Ray's default scheduler.
+  // Hard affinity and other scheduling strategies are preserved.
+  auto *scheduling_strategy =
+      replay_task_proto.mutable_scheduling_strategy();
+
+  if (scheduling_strategy->has_node_affinity_scheduling_strategy() &&
+      scheduling_strategy->node_affinity_scheduling_strategy().soft()) {
+    scheduling_strategy->clear_scheduling_strategy();
+    scheduling_strategy->mutable_default_scheduling_strategy();
+
+    RAY_LOG(INFO)
+        .WithField(
+            TaskID::FromBinary(
+                replay_task_proto.task_id()))
+        << "Cleared soft node affinity for recovery succession replay";
+  }
+
+
+
+
+
+
 
   // This is a new execution attempt of the same deterministic task.
   // Ray's normal reconstruction path increments the attempt number

@@ -1945,10 +1945,12 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                     const int64_t timeout_ms,
                     std::vector<std::shared_ptr<RayObject>> &results);
 
-  Status GetObjectsInternal(const std::vector<ObjectID> &ids,
-                            const int64_t timeout_ms,
-                            std::vector<std::shared_ptr<RayObject>> &results,
-                            bool allow_recovery_succession);
+  Status GetObjectsInternal(
+      const std::vector<ObjectID> &ids,
+      const int64_t timeout_ms,
+      std::vector<std::shared_ptr<RayObject>> &results,
+      bool allow_recovery_succession,
+      const absl::flat_hash_set<ObjectID> *recovery_in_progress_ids = nullptr);
 
   /// Helper to compute idleness from precomputed counters.
   ///
