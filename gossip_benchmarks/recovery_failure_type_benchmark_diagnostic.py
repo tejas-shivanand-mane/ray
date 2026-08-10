@@ -61,6 +61,12 @@ DIAGNOSTIC_TERMS = {
     ),
     "skipped_dead_holder": "Skipping known-dead recovery holder",
     "stale_owner_died_confirmed": "Confirmed stale local OWNER_DIED",
+    "stale_owner_died_ignored": (
+    "Ignored stale OWNER_DIED while recovery replay is in progress"
+),
+"soft_affinity_cleared": (
+    "Cleared soft node affinity for recovery succession replay"
+),
 }
 
 
@@ -124,7 +130,7 @@ def classify_stage(
         return "success"
     if flags["owner_died_no_plan"]:
         return "owner_died_no_borrowed_plan"
-    if not flags["owner_died_observed"]:
+    if not flags["owner_died_observed"] and not flags["owner_died_intercepted"]:
         return "owner_died_not_observed"
     if not flags["owner_died_intercepted"]:
         return "owner_died_not_intercepted"
@@ -665,7 +671,10 @@ def print_compact_result(
         f"executions={row['executions_observed']} "
         f"replayed={row['replayed']} "
         f"replay_start={row['failure_to_replay_start_s']} "
-        f"result={row['failure_to_result_s']:.3f}s"
+        f"result={row['failure_to_result_s']:.3f}s "
+        f"original_finished={row['original_task_finished_after_owner_failure']}"
+        f"stale_filtered={int(row['stale_owner_died_ignored'])} "
+        f"affinity_cleared={int(row['soft_affinity_cleared'])}"
     )
 
     # Only show the recovery-path detail when a trial fails.
