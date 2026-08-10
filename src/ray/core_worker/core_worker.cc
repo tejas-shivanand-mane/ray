@@ -4092,6 +4092,21 @@ Status CoreWorker::GetAndPinArgsForExecutor(const TaskSpecification &task,
       // value from plasma.
       reference_counter_->AddBorrowedObject(
           arg_id, ObjectID::Nil(), task.ArgRef(i).owner_address());
+
+
+      // Recovery-succession metadata may be carried directly on the
+      // task argument. Register it locally before fetching the argument
+      // so a replay executor can recover an upstream dependency whose
+      // original owner has died.
+      if (recovery_succession_enabled_ &&
+          recovery_succession_manager_ != nullptr &&
+          arg_ref.has_recovery_metadata()) {
+        recovery_succession_manager_->RegisterBorrowedObject(
+            arg_id,
+            arg_ref.recovery_metadata());
+      }
+
+
       borrowed_ids->push_back(arg_id);
       // We need to put an OBJECT_IN_PLASMA error here so the subsequent call to Get()
       // properly redirects to the plasma store.
@@ -4140,14 +4155,62 @@ Status CoreWorker::GetAndPinArgsForExecutor(const TaskSpecification &task,
     }
   }
 
-  // Fetch by-reference arguments directly from the plasma store.
+  // Fetch by-reference task arguments.
+  //
+  // Normal executor argument fetching historically goes directly through
+  // Plasma. Recovery-succession replay requires a recovery-aware fetch,
+  // because a replayed downstream task may depend on an upstream object
+  // whose original owner has died.
+  //
+  // Recovery replays increment the task attempt number, so IsRetry() lets
+  // us keep the normal fast path unchanged for original executions.
   absl::flat_hash_map<ObjectID, std::shared_ptr<RayObject>> result_map;
-  // Resolve owner addresses of by-ref ids
-  std::vector<ObjectID> object_ids =
-      std::vector<ObjectID>(by_ref_ids.begin(), by_ref_ids.end());
-  auto owner_addresses = reference_counter_->GetOwnerAddresses(object_ids);
-  RAY_RETURN_NOT_OK(
-      plasma_store_provider_->Get(object_ids, owner_addresses, -1, &result_map));
+
+  std::vector<ObjectID> object_ids(
+      by_ref_ids.begin(),
+      by_ref_ids.end());
+
+  if (recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
+      task.IsRetry() &&
+      !object_ids.empty()) {
+    RAY_LOG(INFO).WithField(task.TaskId())
+        << "Using recovery-aware argument fetch for retry/recovery task";
+
+    std::vector<std::shared_ptr<RayObject>> recovery_results;
+
+    RAY_RETURN_NOT_OK(
+        GetObjectsInternal(
+            object_ids,
+            /*timeout_ms=*/-1,
+            recovery_results,
+            /*allow_recovery_succession=*/true));
+
+    RAY_CHECK_EQ(
+        recovery_results.size(),
+        object_ids.size());
+
+    for (size_t i = 0; i < object_ids.size(); ++i) {
+      if (recovery_results[i] != nullptr) {
+        result_map[object_ids[i]] =
+            std::move(recovery_results[i]);
+      }
+    }
+  } else {
+    // Preserve the existing Ray argument-fetch path for normal,
+    // non-recovery task executions.
+    auto owner_addresses =
+        reference_counter_->GetOwnerAddresses(object_ids);
+
+    RAY_RETURN_NOT_OK(
+        plasma_store_provider_->Get(
+            object_ids,
+            owner_addresses,
+            -1,
+            &result_map));
+  }
+
+
   for (const auto &it : result_map) {
     for (size_t idx : by_ref_indices[it.first]) {
       args->at(idx) = it.second;
