@@ -45,7 +45,7 @@ class LocalDependencyResolver {
     TaskManagerInterface &task_manager,
     ActorCreatorInterface &actor_creator,
     const TensorTransportGetter &tensor_transport_getter,
-    DependencyRecoveryCallback dependency_recovery_callback)
+    DependencyRecoveryCallback dependency_recovery_callback = {})
     : in_memory_store_(store),
       task_manager_(task_manager),
       actor_creator_(actor_creator),
