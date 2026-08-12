@@ -445,6 +445,30 @@ void NodeManager::HandleGetRecoveryWitness(
     rpc::GetRecoveryWitnessRequest request,
     rpc::GetRecoveryWitnessReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
+
+  if (!request.claim_recovery()) {
+    {
+      absl::MutexLock lock(&recovery_witness_mutex_);
+
+      const auto manifest_it =
+          recovery_witness_manifests_.find(task_id);
+
+      if (manifest_it == recovery_witness_manifests_.end()) {
+        reply->set_found(false);
+      } else {
+        reply->set_found(true);
+        reply->mutable_manifest()->CopyFrom(
+            manifest_it->second);
+
+        reply->set_claim_result(
+            rpc::GetRecoveryWitnessReply::CLAIM_NOT_REQUESTED);
+      }
+    }
+
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
   if (!RayConfig::instance().enable_recovery_succession() ||
       request.task_id().size() != TaskID::Size()) {
     reply->set_found(false);

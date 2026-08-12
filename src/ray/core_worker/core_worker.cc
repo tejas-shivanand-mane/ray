@@ -5427,7 +5427,26 @@ void CoreWorker::TryRecoveryWitnessHolders(
         }
 
 
+        if (reply.claim_result() !=
+                rpc::GetRecoveryWitnessReply::CLAIM_GRANTED ||
+            !reply.has_task_spec() ||
+            !reply.has_acting_owner()) {
+          TryRecoveryWitnessHolders(
+              object_id,
+              return_index,
+              manifest,
+              witness_index + 1,
+              std::move(callback));
+          return;
+        }
 
+        if (reply.acting_owner().worker_id() !=
+                rpc_address_.worker_id() ||
+            reply.acting_owner().node_id() !=
+                rpc_address_.node_id()) {
+          callback(false);
+          return;
+        }
 
 
 
@@ -5474,9 +5493,7 @@ void CoreWorker::TryRecoveryWitnessHolders(
             .mutable_recovery_manifest()
             ->CopyFrom(reply.manifest());
 
-        rpc::RecoveryManifest *replay_manifest =
-            replay_task_proto
-                .mutable_recovery_manifest();
+        
 
 
         auto replacement_ref =
