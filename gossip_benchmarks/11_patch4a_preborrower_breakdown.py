@@ -15,8 +15,8 @@ The Succession-R4 run enables Patch 4A profiling and reports the recovery-specif
 work that happens before any holder admission:
     - task argument recovery-metadata propagation
     - initial manifest construction
-    - witness selection
-      - synchronous GCS GetAllNoCache subset
+    - cached witness selection
+    - legacy synchronous GCS-query counter (expected to remain zero)
     - TaskSpec recovery-manifest attachment
     - RegisterOwnedTask / return-ref recovery metadata
 
@@ -83,7 +83,6 @@ PROFILE_KEYS = [
 COUNT_KEYS = [
     "initial_manifest_build_count",
     "witness_selection_count",
-    "witness_gcs_query_count",
     "task_spec_manifest_attach_count",
     "register_owned_task_count",
 ]
@@ -322,10 +321,19 @@ def add_profile_derived(
         profile["witness_selection_time_ns"],
         profile["witness_selection_count"],
     )
-    gcs_us = avg_us(
-        profile["witness_gcs_query_time_ns"],
-        profile["witness_gcs_query_count"],
+    gcs_query_count = int(
+        profile["witness_gcs_query_count"]
     )
+
+    if gcs_query_count > 0:
+        gcs_us = avg_us(
+            profile["witness_gcs_query_time_ns"],
+            gcs_query_count,
+        )
+    else:
+        gcs_us = 0.0
+
+
     attach_us = avg_us(
         profile["task_spec_manifest_attach_time_ns"],
         profile["task_spec_manifest_attach_count"],
@@ -343,7 +351,7 @@ def add_profile_derived(
     summary["profile_register_owned_task_avg_us"] = register_us
 
     # GCS is a subset of witness selection. Do not double-count it in total setup.
-    if not math.isnan(witness_us) and not math.isnan(gcs_us):
+    if not math.isnan(witness_us):
         summary["profile_witness_non_gcs_avg_us"] = max(
             0.0, witness_us - gcs_us
         )
@@ -371,7 +379,7 @@ def add_profile_derived(
 
     summary["profile_explicit_recovery_setup_avg_us"] = explicit_total_us
 
-    if not math.isnan(witness_us) and witness_us > 0 and not math.isnan(gcs_us):
+    if not math.isnan(witness_us) and witness_us > 0:
         summary["profile_gcs_share_of_witness_selection_pct"] = (
             100.0 * gcs_us / witness_us
         )
@@ -381,7 +389,6 @@ def add_profile_derived(
     if (
         not math.isnan(explicit_total_us)
         and explicit_total_us > 0
-        and not math.isnan(gcs_us)
     ):
         summary["profile_gcs_share_of_explicit_setup_pct"] = (
             100.0 * gcs_us / explicit_total_us
@@ -412,6 +419,12 @@ def add_profile_derived(
     # after the profile reset, so equality is expected here too.
     summary["profile_argument_count_matches_eligible"] = int(
         int(profile["task_argument_metadata_calls"]) == build_count
+    )
+
+
+    summary["profile_gcs_query_eliminated"] = int(
+        int(profile["witness_gcs_query_count"]) == 0
+        and int(profile["witness_gcs_query_time_ns"]) == 0
     )
 
 
@@ -590,6 +603,10 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ),
             "profile_argument_count_matches_eligible_all": min(
                 int(row["profile_argument_count_matches_eligible"])
+                for row in group
+            ),
+            "profile_gcs_query_eliminated_all": min(
+                int(row["profile_gcs_query_eliminated"])
                 for row in group
             ),
         }

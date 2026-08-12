@@ -59,6 +59,9 @@
 #include "ray/util/shared_lru.h"
 #include "src/ray/protobuf/pubsub.pb.h"
 
+#include <condition_variable>
+#include <mutex>
+
 namespace ray::core {
 
 JobID GetProcessJobID(const CoreWorkerOptions &options);
