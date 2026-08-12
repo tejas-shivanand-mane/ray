@@ -459,8 +459,8 @@ RecoverySuccessionManager::PrepareHolderAdmission(
                 copy_end - copy_start)
                 .count());
 
-    ++profile_.task_spec_copy_count;
-    profile_.task_spec_copy_time_ns += copy_ns;
+    ++profile_.owner_task_spec_copy_count;
+    profile_.owner_task_spec_copy_time_ns += copy_ns;
   } else {
     plan->task_spec.CopyFrom(
         task_it->second.task_spec.value());

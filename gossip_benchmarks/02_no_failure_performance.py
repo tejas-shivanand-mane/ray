@@ -252,7 +252,7 @@ def run_workload(
 def run_one(args: argparse.Namespace, method: Method, payload: Payload, repetition: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     cluster = None
     try:
-        cluster, node_ids = cluster, node_ids = start_cluster(
+        cluster, node_ids = start_cluster(
             method,
             args.cpus_per_node,
             args.witness_count,
@@ -291,9 +291,6 @@ def run_one(args: argparse.Namespace, method: Method, payload: Payload, repetiti
 
             for key, value in profile.items():
                 summary[f"profile_{key}"] = value
-
-        for key, value in profile.items():
-            summary[f"profile_{key}"] = value
 
 
         base = {

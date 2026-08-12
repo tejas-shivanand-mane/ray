@@ -63,8 +63,8 @@ class RecoverySuccessionManager {
     uint64_t task_spec_bytes_sent = 0;
     uint64_t manifest_bytes_sent = 0;
 
-    uint64_t task_spec_copy_count = 0;
-    uint64_t task_spec_copy_time_ns = 0;
+    uint64_t owner_task_spec_copy_count = 0;
+    uint64_t owner_task_spec_copy_time_ns = 0;
 
     uint64_t holder_install_rpc_time_ns = 0;
     uint64_t holder_commit_rpc_time_ns = 0;

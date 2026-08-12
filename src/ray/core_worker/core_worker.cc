@@ -1115,10 +1115,10 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
   result["manifest_bytes_sent"] =
       profile.manifest_bytes_sent;
 
-  result["task_spec_copy_count"] =
-      profile.task_spec_copy_count;
-  result["task_spec_copy_time_ns"] =
-      profile.task_spec_copy_time_ns;
+  result["owner_task_spec_copy_count"] =
+      profile.owner_task_spec_copy_count;
+  result["owner_task_spec_copy_time_ns"] =
+      profile.owner_task_spec_copy_time_ns;
 
   result["holder_install_rpc_time_ns"] =
       profile.holder_install_rpc_time_ns;
@@ -4600,6 +4600,7 @@ void CoreWorker::FinishRecoveryHolderAdmission(
        candidate_address = std::move(candidate_address),
        candidate_needs_commit_rpc,
        latest_manifest = std::move(latest_manifest),
+       admission_start_ns,
        reply,
        send_reply_callback = std::move(send_reply_callback)](
           bool witness_stored,
