@@ -374,6 +374,22 @@ void NodeManager::HandleUpdateRecoveryWitness(
   const rpc::RecoveryManifest &incoming = request.manifest();
   const TaskID task_id = TaskID::FromBinary(incoming.task_id());
 
+  const bool baseline_enabled =
+    RayConfig::instance().enable_recovery_succession() &&
+    RayConfig::instance().enable_recovery_witness_holder_baseline();
+
+  if (request.has_task_spec()) {
+    if (!baseline_enabled ||
+        request.task_spec().task_id() != incoming.task_id() ||
+        !request.task_spec().has_recovery_manifest() ||
+        request.task_spec().recovery_manifest().SerializeAsString() !=
+            incoming.SerializeAsString()) {
+      reply->set_stored(false);
+      send_reply_callback(Status::OK(), nullptr, nullptr);
+      return;
+    }
+  }
+
   {
     absl::MutexLock lock(&recovery_witness_mutex_);
 
@@ -398,6 +414,27 @@ void NodeManager::HandleUpdateRecoveryWitness(
         reply->mutable_latest_manifest()->CopyFrom(existing);
       }
     }
+
+    if (reply->stored()) {
+      if (incoming.tombstoned()) {
+        recovery_witness_task_specs_.erase(task_id);
+      } else if (baseline_enabled && request.has_task_spec()) {
+        recovery_witness_task_specs_[task_id].CopyFrom(
+            request.task_spec());
+      } else {
+        // Keep an already-retained baseline TaskSpec synchronized with
+        // any newer manifest published later.
+        auto task_spec_it =
+            recovery_witness_task_specs_.find(task_id);
+
+        if (task_spec_it != recovery_witness_task_specs_.end()) {
+          task_spec_it->second.mutable_recovery_manifest()->CopyFrom(
+              incoming);
+        }
+      }
+    }
+
+    
   }
 
   send_reply_callback(Status::OK(), nullptr, nullptr);
@@ -424,7 +461,19 @@ void NodeManager::HandleGetRecoveryWitness(rpc::GetRecoveryWitnessRequest reques
       reply->set_found(false);
     } else {
       reply->set_found(true);
-      reply->mutable_manifest()->CopyFrom(manifest_it->second);
+      reply->mutable_manifest()->CopyFrom(
+          manifest_it->second);
+
+      if (RayConfig::instance().enable_recovery_succession() &&
+          RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+        const auto task_spec_it =
+            recovery_witness_task_specs_.find(task_id);
+
+        if (task_spec_it != recovery_witness_task_specs_.end()) {
+          reply->mutable_task_spec()->CopyFrom(
+              task_spec_it->second);
+        }
+      }
     }
   }
 

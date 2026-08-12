@@ -2555,6 +2555,63 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     recovery_succession_manager_->RegisterOwnedTask(task_spec, &returned_refs);
   }
 
+  if (recovery_succession_enabled_ &&
+      recovery_witness_holder_baseline_enabled_ &&
+      task_spec.GetMessage().has_recovery_manifest()) {
+    rpc::RecoveryManifest baseline_manifest;
+    baseline_manifest.CopyFrom(
+        task_spec.GetMessage().recovery_manifest());
+
+    rpc::TaskSpec baseline_task_spec;
+    baseline_task_spec.CopyFrom(
+        task_spec.GetMessage());
+
+    const TaskID baseline_task_id =
+        task_spec.TaskId();
+
+    PublishRecoveryManifestToWitnesses(
+        baseline_manifest,
+        [this,
+        baseline_task_id,
+        task_spec = std::move(task_spec)](
+            bool stored,
+            std::optional<rpc::RecoveryManifest>
+                newer_manifest) mutable {
+          if (!stored) {
+            RAY_LOG(WARNING)
+                .WithField(baseline_task_id)
+                << "Failed to install full TaskSpec on all "
+                  "witness-as-holder baseline witnesses";
+
+            if (newer_manifest.has_value()) {
+              RAY_LOG(WARNING)
+                  .WithField(baseline_task_id)
+                  << "Witness returned newer recovery manifest "
+                  << "generation="
+                  << newer_manifest->version().generation();
+            }
+          } else {
+            RAY_LOG(INFO)
+                .WithField(baseline_task_id)
+                << "Installed full TaskSpec on all "
+                  "witness-as-holder baseline witnesses";
+          }
+
+          io_service_.post(
+              [this,
+              task_spec = std::move(task_spec)]() mutable {
+                normal_task_submitter_->SubmitTask(
+                    std::move(task_spec));
+              },
+              "CoreWorker.SubmitTaskBaseline");
+        },
+        &baseline_task_spec);
+
+    return returned_refs;
+  }
+
+
+
   io_service_.post(
       [this, task_spec = std::move(task_spec)]() mutable {
         normal_task_submitter_->SubmitTask(std::move(task_spec));
@@ -6362,7 +6419,11 @@ void CoreWorker::FreeObjectOnNodesAsync(const ObjectID &object_id,
 std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
     const TaskID &task_id) const {
   const uint32_t requested_count =
-      RayConfig::instance().recovery_succession_witness_count();
+    recovery_witness_holder_baseline_enabled_
+        ? RayConfig::instance()
+              .recovery_succession_target_holder_count()
+        : RayConfig::instance()
+              .recovery_succession_witness_count();
 
   if (!recovery_succession_enabled_ || requested_count == 0 || gcs_client_ == nullptr) {
     return {};
@@ -6447,7 +6508,13 @@ void CoreWorker::PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) cons
 }
 
 void CoreWorker::PublishRecoveryManifestToWitnesses(
-    const rpc::RecoveryManifest &manifest, RecoveryWitnessPublishCallback callback) {
+    const rpc::RecoveryManifest &manifest,
+    RecoveryWitnessPublishCallback callback,
+    const rpc::TaskSpec *task_spec) {
+
+  const bool require_all_witnesses =
+    task_spec != nullptr;
+
   if (!recovery_succession_enabled_ || manifest.task_id().empty() ||
       manifest.witness_raylets_size() == 0) {
     callback(false, std::nullopt);
@@ -6456,10 +6523,14 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
 
   struct PublishState {
     absl::Mutex mutex;
+
     size_t completed ABSL_GUARDED_BY(mutex) = 0;
+    size_t stored_count ABSL_GUARDED_BY(mutex) = 0;
+
     bool callback_sent ABSL_GUARDED_BY(mutex) = false;
 
-    std::optional<rpc::RecoveryManifest> newest_manifest ABSL_GUARDED_BY(mutex);
+    std::optional<rpc::RecoveryManifest>
+        newest_manifest ABSL_GUARDED_BY(mutex);
   };
 
   auto state = std::make_shared<PublishState>();
@@ -6469,6 +6540,10 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
   for (const rpc::Address &witness : manifest.witness_raylets()) {
     rpc::UpdateRecoveryWitnessRequest request;
     request.mutable_manifest()->CopyFrom(manifest);
+
+    if (task_spec != nullptr) {
+      request.mutable_task_spec()->CopyFrom(*task_spec);
+    }
 
     auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
 

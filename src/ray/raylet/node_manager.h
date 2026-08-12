@@ -378,7 +378,10 @@ class NodeManager : public rpc::NodeManagerServiceHandler,
       ABSL_GUARDED_BY(recovery_witness_mutex_);
 
 
-
+    /// Full TaskSpecs retained only for the witness-as-holder baseline.
+    absl::flat_hash_map<TaskID, rpc::TaskSpec>
+        recovery_witness_task_specs_
+            ABSL_GUARDED_BY(recovery_witness_mutex_);
 
 
   /// Release pinned bookkeeping and delete plasma copies for `object_ids`.
