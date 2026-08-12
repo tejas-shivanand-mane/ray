@@ -492,6 +492,14 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// (local, submitted_task) reference counts. For debugging purposes.
   std::unordered_map<ObjectID, std::pair<size_t, size_t>> GetAllReferenceCounts() const;
 
+
+  /// Returns recovery-succession profiling counters as JSON.
+  /// For debugging and experimental benchmarking only.
+  std::string GetRecoverySuccessionProfileJson() const;
+
+  /// Clears recovery-succession profiling counters.
+  void ResetRecoverySuccessionProfile();
+
   /// Return all pending children task ids for a given parent task id.
   /// The parent task id should exist in the current worker.
   /// For debugging and testing only.
@@ -1615,6 +1623,7 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     bool candidate_needs_commit_rpc,
     rpc::RecoveryManifest latest_manifest,
     rpc::RecoveryManifest proposed_manifest,
+    uint64_t admission_start_ns,
     rpc::ReportRecoveryCandidateReply *reply,
     rpc::SendReplyCallback send_reply_callback);
 
@@ -2117,6 +2126,9 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   ///
   /// This can be true only when recovery succession itself is enabled.
   const bool recovery_witness_holder_baseline_enabled_;
+
+
+  const bool recovery_succession_profiling_enabled_;
 
   /// Distributed recovery succession state. Null when the feature is disabled.
   std::shared_ptr<RecoverySuccessionManager> recovery_succession_manager_;

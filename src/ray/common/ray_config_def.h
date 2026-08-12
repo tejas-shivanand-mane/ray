@@ -216,6 +216,12 @@ RAY_CONFIG(uint32_t, recovery_succession_target_holder_count, 2)
 RAY_CONFIG(uint32_t, recovery_succession_witness_count, 2)
 
 
+/// Enables lightweight profiling of recovery-succession holder formation.
+/// Intended only for experiments/debugging. When false, no timing or
+/// protobuf-size measurements are performed.
+RAY_CONFIG(bool, enable_recovery_succession_profiling, false)
+
+
 /// Whether to re-populate plasma memory. This avoids memory allocation failures
 /// at runtime (SIGBUS errors creating new objects), however it will use more memory
 /// upfront and can slow down Ray startup.

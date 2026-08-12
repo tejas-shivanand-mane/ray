@@ -52,6 +52,8 @@
 #include "ray/util/event.h"
 #include "ray/util/process_utils.h"
 #include "ray/util/subreaper.h"
+#include <chrono>
+
 
 using json = nlohmann::json;
 using MessageType = ray::protocol::MessageType;
@@ -166,6 +168,14 @@ uint64_t StableWitnessScore(const TaskID &task_id, const NodeID &node_id) {
   }
 
   return hash;
+}
+
+
+uint64_t RecoveryProfileNowNs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
 }
 
 int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
@@ -412,6 +422,9 @@ CoreWorker::CoreWorker(
       recovery_witness_holder_baseline_enabled_(
           recovery_succession_enabled_ &&
           RayConfig::instance().enable_recovery_witness_holder_baseline()),
+      recovery_succession_profiling_enabled_(
+          recovery_succession_enabled_ &&
+          RayConfig::instance().enable_recovery_succession_profiling()),
       recovery_succession_manager_(nullptr),
       object_recovery_manager_(std::move(object_recovery_manager)),
       actor_manager_(std::move(actor_manager)),
@@ -1065,6 +1078,78 @@ CoreWorker::GetAllReferenceCounts() const {
     counts.erase(actor_handle_id);
   }
   return counts;
+}
+
+
+
+std::string
+CoreWorker::GetRecoverySuccessionProfileJson() const {
+  json result;
+
+  result["profiling_enabled"] =
+      recovery_succession_profiling_enabled_;
+
+  if (!recovery_succession_profiling_enabled_ ||
+      recovery_succession_manager_ == nullptr) {
+    return result.dump();
+  }
+
+  const auto profile =
+      recovery_succession_manager_
+          ->GetProfileSnapshot();
+
+  result["candidate_reports_received"] =
+      profile.candidate_reports_received;
+  result["candidate_reports_accepted"] =
+      profile.candidate_reports_accepted;
+
+  result["holder_install_rpcs_sent"] =
+      profile.holder_install_rpcs_sent;
+  result["holder_commit_rpcs_sent"] =
+      profile.holder_commit_rpcs_sent;
+  result["witness_update_rpcs_sent"] =
+      profile.witness_update_rpcs_sent;
+
+  result["task_spec_bytes_sent"] =
+      profile.task_spec_bytes_sent;
+  result["manifest_bytes_sent"] =
+      profile.manifest_bytes_sent;
+
+  result["task_spec_copy_count"] =
+      profile.task_spec_copy_count;
+  result["task_spec_copy_time_ns"] =
+      profile.task_spec_copy_time_ns;
+
+  result["holder_install_rpc_time_ns"] =
+      profile.holder_install_rpc_time_ns;
+  result["holder_commit_rpc_time_ns"] =
+      profile.holder_commit_rpc_time_ns;
+  result["witness_update_rpc_time_ns"] =
+      profile.witness_update_rpc_time_ns;
+
+  result["holder_admissions_committed"] =
+      profile.holder_admissions_committed;
+  result["holder_admission_time_ns"] =
+      profile.holder_admission_time_ns;
+  result["holder_admission_max_time_ns"] =
+      profile.holder_admission_max_time_ns;
+
+  result["manifest_generations_committed"] =
+      profile.manifest_generations_committed;
+  result["max_generation"] =
+      profile.max_generation;
+  result["max_non_owner_holders"] =
+      profile.max_non_owner_holders;
+  result["frozen_commits"] =
+      profile.frozen_commits;
+
+  return result.dump();
+}
+
+void CoreWorker::ResetRecoverySuccessionProfile() {
+  if (recovery_succession_manager_ != nullptr) {
+    recovery_succession_manager_->ResetProfile();
+  }
 }
 
 std::vector<TaskID> CoreWorker::GetPendingChildrenTasks(const TaskID &task_id) const {
@@ -4501,6 +4586,7 @@ void CoreWorker::FinishRecoveryHolderAdmission(
     bool candidate_needs_commit_rpc,
     rpc::RecoveryManifest latest_manifest,
     rpc::RecoveryManifest proposed_manifest,
+    uint64_t admission_start_ns,
     rpc::ReportRecoveryCandidateReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
   auto manager = recovery_succession_manager_;
@@ -4551,6 +4637,12 @@ void CoreWorker::FinishRecoveryHolderAdmission(
           return;
         }
 
+        if (admission_start_ns != 0) {
+          manager->RecordHolderAdmissionLatency(
+              RecoveryProfileNowNs() -
+              admission_start_ns);
+        }
+
         reply->set_result(
             rpc::ReportRecoveryCandidateReply::ACCEPTED);
 
@@ -4575,11 +4667,33 @@ void CoreWorker::FinishRecoveryHolderAdmission(
               core_worker_client_pool_->GetOrConnect(
                   candidate_address);
 
+
+          uint64_t commit_start_ns = 0;
+
+          if (recovery_succession_profiling_enabled_) {
+            manager->RecordHolderCommitRpcSent(
+                static_cast<uint64_t>(
+                    committed_manifest.ByteSizeLong()));
+
+            commit_start_ns = RecoveryProfileNowNs();
+          }
+
+
+
           candidate_client->CommitRecoveryManifest(
               std::move(commit_request),
-              [task_id](
+              [manager, task_id, commit_start_ns](
                   const Status &commit_status,
                   rpc::CommitRecoveryManifestReply &&commit_reply) {
+
+
+                if (commit_start_ns != 0) {
+                  manager->RecordHolderCommitRpcLatency(
+                      RecoveryProfileNowNs() -
+                      commit_start_ns);
+                }
+
+
                 static_cast<void>(commit_reply);
 
                 if (!commit_status.ok()) {
@@ -4592,6 +4706,9 @@ void CoreWorker::FinishRecoveryHolderAdmission(
         }
 
         send_reply_callback(Status::OK(), nullptr, nullptr);
+        
+
+
       });
 }
 
@@ -4610,6 +4727,11 @@ void CoreWorker::HandleReportRecoveryCandidate(
     return;
   }
 
+  const uint64_t admission_start_ns =
+    recovery_succession_profiling_enabled_
+        ? RecoveryProfileNowNs()
+        : 0;
+
   auto manager = recovery_succession_manager_;
 
   RecoverySuccessionManager::HolderAdmissionPlan admission_plan;
@@ -4619,6 +4741,16 @@ void CoreWorker::HandleReportRecoveryCandidate(
       request,
       &admission_plan,
       &latest_manifest);
+
+
+  if (recovery_succession_profiling_enabled_) {
+    const bool accepted_new_holder =
+        result == rpc::ReportRecoveryCandidateReply::ACCEPTED &&
+        !admission_plan.reservation_id.empty();
+
+    manager->RecordCandidateReport(
+        accepted_new_holder);
+  }
 
   reply->set_result(result);
 
@@ -4659,6 +4791,7 @@ void CoreWorker::HandleReportRecoveryCandidate(
         false,
         std::move(latest_manifest),
         std::move(proposed_manifest),
+        admission_start_ns,
         reply,
         std::move(send_reply_callback));
     return;
@@ -4709,6 +4842,19 @@ void CoreWorker::HandleReportRecoveryCandidate(
       core_worker_client_pool_->GetOrConnect(
           candidate_address);
 
+
+  uint64_t install_start_ns = 0;
+
+  if (recovery_succession_profiling_enabled_) {
+    manager->RecordHolderInstallRpcSent(
+        static_cast<uint64_t>(
+            install_request.task_spec().ByteSizeLong()),
+        static_cast<uint64_t>(
+            install_request.proposed_manifest().ByteSizeLong()));
+
+    install_start_ns = RecoveryProfileNowNs();
+  }
+
   candidate_client->InstallRecoveryHolder(
       std::move(install_request),
       [this,
@@ -4718,10 +4864,17 @@ void CoreWorker::HandleReportRecoveryCandidate(
        candidate_address = std::move(candidate_address),
        latest_manifest = std::move(latest_manifest),
        proposed_manifest = std::move(proposed_manifest),
+       install_start_ns,
        reply,
        send_reply_callback = std::move(send_reply_callback)](
           const Status &status,
           rpc::InstallRecoveryHolderReply &&install_reply) mutable {
+
+        if (install_start_ns != 0) {
+          manager->RecordHolderInstallRpcLatency(
+              RecoveryProfileNowNs() - install_start_ns);
+        }
+
         if (!status.ok() ||
             !install_reply.stored() ||
             install_reply.reservation_id() != reservation_id) {
@@ -4749,9 +4902,13 @@ void CoreWorker::HandleReportRecoveryCandidate(
             true,
             std::move(latest_manifest),
             std::move(proposed_manifest),
+            admission_start_ns,
             reply,
             std::move(send_reply_callback));
       });
+      
+
+
 }
 
 void CoreWorker::HandleInstallRecoveryHolder(rpc::InstallRecoveryHolderRequest request,
@@ -6836,11 +6993,42 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
 
     auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
 
+    uint64_t witness_start_ns = 0;
+
+    if (recovery_succession_profiling_enabled_ &&
+        !manifest.tombstoned()) {
+      const uint64_t task_spec_bytes =
+          task_spec != nullptr
+              ? static_cast<uint64_t>(
+                    task_spec->ByteSizeLong())
+              : 0;
+
+      recovery_succession_manager_
+          ->RecordWitnessUpdateRpcSent(
+              task_spec_bytes,
+              static_cast<uint64_t>(
+                  manifest.ByteSizeLong()));
+
+      witness_start_ns = RecoveryProfileNowNs();
+    }
+
     witness_client->UpdateRecoveryWitness(
     std::move(request),
-    [state, witness_count, require_all_witnesses, callback](
+    [state,
+      witness_count,
+      require_all_witnesses,
+      callback,
+      manager = recovery_succession_manager_,
+      witness_start_ns](
         const Status &status,
         rpc::UpdateRecoveryWitnessReply &&reply) mutable {
+
+
+      if (witness_start_ns != 0) {
+        manager->RecordWitnessUpdateRpcLatency(
+            RecoveryProfileNowNs() - witness_start_ns);
+      }
+
       bool report_success = false;
       bool report_failure = false;
 

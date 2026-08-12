@@ -20,6 +20,8 @@ import threading
 import time
 import traceback
 import _thread
+import json
+
 from typing import (
     Any,
     AsyncGenerator,
@@ -5020,6 +5022,23 @@ cdef class CoreWorker:
             postincrement(it)
 
         return ref_counts
+
+
+    def get_recovery_succession_profile(self):
+        cdef c_string payload
+
+        payload = (
+            CCoreWorkerProcess.GetCoreWorker()
+            .GetRecoverySuccessionProfileJson()
+        )
+
+        return json.loads(
+            payload.decode("utf-8")
+        )
+
+    def reset_recovery_succession_profile(self):
+        CCoreWorkerProcess.GetCoreWorker().ResetRecoverySuccessionProfile()
+
 
     def set_get_async_callback(self, ObjectRef object_ref, user_callback: Callable):
         # NOTE: we need to manually increment the Python reference count to avoid the

@@ -61,6 +61,7 @@ def system_config(
     *,
     witness_count: int = 2,
     object_timeout_ms: int | None = None,
+    profiling_enabled: bool = False,
 ) -> dict[str, Any]:
     """Return the Ray system config for one experimental method.
 
@@ -72,6 +73,7 @@ def system_config(
         "enable_recovery_succession": method.recovery_enabled,
         "enable_recovery_witness_holder_baseline": method.baseline_enabled,
         "recovery_succession_witness_count": max(1, int(witness_count)),
+        "enable_recovery_succession_profiling": bool(profiling_enabled),
     }
     if method.recovery_enabled:
         config["recovery_succession_target_holder_count"] = int(method.holders)

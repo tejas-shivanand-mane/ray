@@ -14,6 +14,11 @@ plots/throughput_all_payloads.png + plots/p95_latency_all_payloads.png.
 """
 from __future__ import annotations
 
+import os
+
+os.environ["RAY_BACKEND_LOG_LEVEL"] = "warning"
+os.environ["RAY_DEDUP_LOGS"] = "1"
+
 import argparse
 import math
 import random
@@ -23,7 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+
+
 import ray
+from ray._private.worker import global_worker
 from ray.cluster_utils import Cluster
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
@@ -73,11 +81,20 @@ def parse_payload(text: str) -> Payload:
     return Payload(name, size)
 
 
-def start_cluster(method: Method, cpus_per_node: int, witness_count: int) -> tuple[Cluster, list[str]]:
+def start_cluster(
+    method: Method,
+    cpus_per_node: int,
+    witness_count: int,
+    profile_recovery: bool,
+) -> tuple[Cluster, list[str]]:
     cluster = Cluster()
     cluster.add_node(
         num_cpus=0,
-        _system_config=system_config(method, witness_count=witness_count),
+        _system_config=system_config(
+            method,
+            witness_count=witness_count,
+            profiling_enabled=profile_recovery,
+        ),
         include_dashboard=False,
     )
     workers = []
@@ -235,8 +252,17 @@ def run_workload(
 def run_one(args: argparse.Namespace, method: Method, payload: Payload, repetition: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     cluster = None
     try:
-        cluster, node_ids = start_cluster(method, args.cpus_per_node, args.witness_count)
+        cluster, node_ids = cluster, node_ids = start_cluster(
+            method,
+            args.cpus_per_node,
+            args.witness_count,
+            args.profile_recovery,
+        )
         ray.init(address=cluster.address, log_to_driver=False, include_dashboard=False)
+
+        if args.profile_recovery:
+            global_worker.core_worker.reset_recovery_succession_profile()
+
         wait_for_cluster(ray, 6, args.cluster_timeout_seconds)
         produce, Consumer = make_remote_types()
         consumers = [
@@ -256,6 +282,20 @@ def run_one(args: argparse.Namespace, method: Method, payload: Payload, repetiti
             wait_timeout_s=args.wait_timeout_seconds,
             drain_timeout_s=args.drain_timeout_seconds,
         )
+
+        if args.profile_recovery:
+            profile = (
+                global_worker.core_worker
+                .get_recovery_succession_profile()
+            )
+
+            for key, value in profile.items():
+                summary[f"profile_{key}"] = value
+
+        for key, value in profile.items():
+            summary[f"profile_{key}"] = value
+
+
         base = {
             "repetition": repetition,
             "payload_name": payload.name,
@@ -361,6 +401,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--drain-timeout-seconds", type=float, default=120)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--fixed-order", action="store_true")
+    p.add_argument(
+        "--profile-recovery",
+        action="store_true",
+        help="Enable Patch 4A recovery-succession instrumentation.",
+    )
     return p
 
 

@@ -16,6 +16,8 @@
 #include "ray/common/ray_config.h"
 #include <cstddef>
 #include <utility>
+#include <chrono>
+
 
 namespace ray::core {
 
@@ -63,7 +65,9 @@ int CompareManifestVersions(const rpc::RecoveryManifest &left,
 }  // namespace
 
 RecoverySuccessionManager::RecoverySuccessionManager(rpc::Address self_address)
-    : self_address_(std::move(self_address)) {}
+    : self_address_(std::move(self_address)),
+      profiling_enabled_(
+          RayConfig::instance().enable_recovery_succession_profiling()) {}
 
 bool RecoverySuccessionManager::IsEligibleTask(const rpc::TaskSpec &task_spec) {
   return task_spec.type() == rpc::TaskType::NORMAL_TASK && !task_spec.returns_dynamic() &&
@@ -436,10 +440,35 @@ RecoverySuccessionManager::PrepareHolderAdmission(
       request.already_stores_task_spec();
 
   if (!plan->candidate_already_stores_task_spec) {
-    plan->task_spec.CopyFrom(task_it->second.task_spec.value());
+  if (profiling_enabled_) {
+    const auto copy_start =
+        std::chrono::steady_clock::now();
+
+    plan->task_spec.CopyFrom(
+        task_it->second.task_spec.value());
+
+    plan->task_spec.mutable_recovery_manifest()->CopyFrom(
+        proposed_manifest);
+
+    const auto copy_end =
+        std::chrono::steady_clock::now();
+
+    const uint64_t copy_ns =
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                copy_end - copy_start)
+                .count());
+
+    ++profile_.task_spec_copy_count;
+    profile_.task_spec_copy_time_ns += copy_ns;
+  } else {
+    plan->task_spec.CopyFrom(
+        task_it->second.task_spec.value());
+
     plan->task_spec.mutable_recovery_manifest()->CopyFrom(
         proposed_manifest);
   }
+}
 
   plan->proposed_manifest.CopyFrom(proposed_manifest);
 
@@ -524,6 +553,37 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
   }
 
   UpdateManifestForTaskLocked(task_id, reservation_it->second.proposed_manifest, true);
+
+
+  if (profiling_enabled_) {
+    const rpc::RecoveryManifest &manifest =
+        reservation_it->second.proposed_manifest;
+
+    ++profile_.holder_admissions_committed;
+    ++profile_.manifest_generations_committed;
+
+    if (manifest.version().generation() >
+        profile_.max_generation) {
+      profile_.max_generation =
+          manifest.version().generation();
+    }
+
+    const uint64_t non_owner_holders =
+        manifest.succession_size() > 0
+            ? static_cast<uint64_t>(
+                  manifest.succession_size() - 1)
+            : 0;
+
+    if (non_owner_holders >
+        profile_.max_non_owner_holders) {
+      profile_.max_non_owner_holders =
+          non_owner_holders;
+    }
+
+    if (manifest.frozen()) {
+      ++profile_.frozen_commits;
+    }
+  }
 
   committed_manifest->CopyFrom(reservation_it->second.proposed_manifest);
 
@@ -1071,6 +1131,115 @@ bool RecoverySuccessionManager::HasConfirmedHolderResponsibilities() const {
   }
 
   return false;
+}
+
+RecoverySuccessionManager::RecoverySuccessionProfile
+RecoverySuccessionManager::GetProfileSnapshot() const {
+  absl::MutexLock lock(&mutex_);
+  return profile_;
+}
+
+void RecoverySuccessionManager::ResetProfile() {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  profile_ = RecoverySuccessionProfile{};
+}
+
+void RecoverySuccessionManager::RecordCandidateReport(bool accepted) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  ++profile_.candidate_reports_received;
+
+  if (accepted) {
+    ++profile_.candidate_reports_accepted;
+  }
+}
+
+void RecoverySuccessionManager::RecordHolderInstallRpcSent(
+    uint64_t task_spec_bytes,
+    uint64_t manifest_bytes) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  ++profile_.holder_install_rpcs_sent;
+  profile_.task_spec_bytes_sent += task_spec_bytes;
+  profile_.manifest_bytes_sent += manifest_bytes;
+}
+
+void RecoverySuccessionManager::RecordHolderInstallRpcLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  profile_.holder_install_rpc_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordWitnessUpdateRpcSent(
+    uint64_t task_spec_bytes,
+    uint64_t manifest_bytes) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  ++profile_.witness_update_rpcs_sent;
+  profile_.task_spec_bytes_sent += task_spec_bytes;
+  profile_.manifest_bytes_sent += manifest_bytes;
+}
+
+void RecoverySuccessionManager::RecordWitnessUpdateRpcLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  profile_.witness_update_rpc_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordHolderCommitRpcSent(
+    uint64_t manifest_bytes) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  ++profile_.holder_commit_rpcs_sent;
+  profile_.manifest_bytes_sent += manifest_bytes;
+}
+
+void RecoverySuccessionManager::RecordHolderCommitRpcLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  profile_.holder_commit_rpc_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordHolderAdmissionLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  profile_.holder_admission_time_ns += latency_ns;
+
+  if (latency_ns > profile_.holder_admission_max_time_ns) {
+    profile_.holder_admission_max_time_ns = latency_ns;
+  }
 }
 
 }  // namespace ray::core

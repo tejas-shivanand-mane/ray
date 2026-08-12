@@ -51,6 +51,63 @@ class RecoverySuccessionManager {
     bool candidate_already_stores_task_spec = false;
   };
 
+
+  struct RecoverySuccessionProfile {
+    uint64_t candidate_reports_received = 0;
+    uint64_t candidate_reports_accepted = 0;
+
+    uint64_t holder_install_rpcs_sent = 0;
+    uint64_t holder_commit_rpcs_sent = 0;
+    uint64_t witness_update_rpcs_sent = 0;
+
+    uint64_t task_spec_bytes_sent = 0;
+    uint64_t manifest_bytes_sent = 0;
+
+    uint64_t task_spec_copy_count = 0;
+    uint64_t task_spec_copy_time_ns = 0;
+
+    uint64_t holder_install_rpc_time_ns = 0;
+    uint64_t holder_commit_rpc_time_ns = 0;
+    uint64_t witness_update_rpc_time_ns = 0;
+
+    uint64_t holder_admissions_committed = 0;
+    uint64_t holder_admission_time_ns = 0;
+    uint64_t holder_admission_max_time_ns = 0;
+
+    uint64_t manifest_generations_committed = 0;
+    uint64_t max_generation = 0;
+    uint64_t max_non_owner_holders = 0;
+    uint64_t frozen_commits = 0;
+  };
+
+
+  RecoverySuccessionProfile GetProfileSnapshot() const;
+
+  void ResetProfile();
+
+  void RecordCandidateReport(bool accepted);
+
+  void RecordHolderInstallRpcSent(uint64_t task_spec_bytes,
+                                  uint64_t manifest_bytes);
+
+  void RecordHolderInstallRpcLatency(uint64_t latency_ns);
+
+  void RecordWitnessUpdateRpcSent(uint64_t task_spec_bytes,
+                                  uint64_t manifest_bytes);
+
+  void RecordWitnessUpdateRpcLatency(uint64_t latency_ns);
+
+  void RecordHolderCommitRpcSent(uint64_t manifest_bytes);
+
+  void RecordHolderCommitRpcLatency(uint64_t latency_ns);
+
+  void RecordHolderAdmissionLatency(uint64_t latency_ns);
+
+
+
+
+
+
   explicit RecoverySuccessionManager(rpc::Address self_address);
 
   RecoverySuccessionManager(const RecoverySuccessionManager &) = delete;
@@ -184,7 +241,12 @@ class RecoverySuccessionManager {
   /// Address of this CoreWorker.
   rpc::Address self_address_;
 
+
+  const bool profiling_enabled_;
+
   mutable absl::Mutex mutex_;
+
+  RecoverySuccessionProfile profile_ ABSL_GUARDED_BY(mutex_);
 
   /// Recovery state indexed by the original task ID.
   absl::flat_hash_map<TaskID, TaskRecoveryState> task_states_ ABSL_GUARDED_BY(mutex_);
