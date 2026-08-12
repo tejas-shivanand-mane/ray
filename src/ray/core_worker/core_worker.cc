@@ -2562,6 +2562,24 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     baseline_manifest.CopyFrom(
         task_spec.GetMessage().recovery_manifest());
 
+    const uint32_t target_holder_count =
+    RayConfig::instance()
+        .recovery_succession_target_holder_count();
+
+    RAY_CHECK_EQ(
+        static_cast<uint32_t>(
+            baseline_manifest.witness_raylets_size()),
+        target_holder_count)
+        << "Witness-holder baseline requires exactly "
+        << target_holder_count
+        << " independent full-lineage witnesses, but only "
+        << baseline_manifest.witness_raylets_size()
+        << " were selected.";
+
+    RAY_CHECK_EQ(
+        baseline_manifest.witness_count(),
+        target_holder_count);
+
     rpc::TaskSpec baseline_task_spec;
     baseline_task_spec.CopyFrom(
         task_spec.GetMessage());
@@ -2577,33 +2595,25 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
             bool stored,
             std::optional<rpc::RecoveryManifest>
                 newer_manifest) mutable {
-          if (!stored) {
-            RAY_LOG(WARNING)
-                .WithField(baseline_task_id)
-                << "Failed to install full TaskSpec on all "
-                  "witness-as-holder baseline witnesses";
+              if (!stored) {
+                RAY_LOG(FATAL)
+                    .WithField(baseline_task_id)
+                    << "Witness-holder baseline failed to install "
+                    << "the full TaskSpec on every configured holder.";
+              }
 
-            if (newer_manifest.has_value()) {
-              RAY_LOG(WARNING)
+              RAY_LOG(INFO)
                   .WithField(baseline_task_id)
-                  << "Witness returned newer recovery manifest "
-                  << "generation="
-                  << newer_manifest->version().generation();
-            }
-          } else {
-            RAY_LOG(INFO)
-                .WithField(baseline_task_id)
-                << "Installed full TaskSpec on all "
-                  "witness-as-holder baseline witnesses";
-          }
+                  << "Installed full TaskSpec on all "
+                    "witness-holder baseline nodes";
 
-          io_service_.post(
-              [this,
-              task_spec = std::move(task_spec)]() mutable {
-                normal_task_submitter_->SubmitTask(
-                    std::move(task_spec));
-              },
-              "CoreWorker.SubmitTaskBaseline");
+              io_service_.post(
+                  [this,
+                  task_spec = std::move(task_spec)]() mutable {
+                    normal_task_submitter_->SubmitTask(
+                        std::move(task_spec));
+                  },
+                  "CoreWorker.SubmitTaskBaseline");
         },
         &baseline_task_spec);
 
@@ -5318,6 +5328,10 @@ void CoreWorker::TryRecoveryWitnessHolders(
   rpc::GetRecoveryWitnessRequest request;
   request.set_task_id(manifest.task_id());
 
+  request.set_claim_recovery(true);
+  request.mutable_claimant_address()->CopyFrom(
+      rpc_address_);
+
   auto witness_client =
       raylet_client_pool_->GetOrConnectByAddress(
           witness);
@@ -5336,8 +5350,7 @@ void CoreWorker::TryRecoveryWitnessHolders(
         // try the next preassigned witness.
         if (!status.ok() ||
             !reply.found() ||
-            !reply.has_manifest() ||
-            !reply.has_task_spec()) {
+            !reply.has_manifest()) {
           TryRecoveryWitnessHolders(
               object_id,
               return_index,
@@ -5346,6 +5359,77 @@ void CoreWorker::TryRecoveryWitnessHolders(
               std::move(callback));
           return;
         }
+
+        if (reply.claim_result() ==
+            rpc::GetRecoveryWitnessReply::
+                CLAIM_TOMBSTONED) {
+          recovery_succession_manager_
+              ->UpdateBorrowedObjectManifest(
+                  object_id,
+                  reply.manifest());
+
+          callback(false);
+          return;
+        }
+
+        if (reply.claim_result() ==
+            rpc::GetRecoveryWitnessReply::
+                CLAIM_RETRY_LIMIT_EXCEEDED) {
+          callback(false);
+          return;
+        }
+
+
+        if (reply.claim_result() ==
+            rpc::GetRecoveryWitnessReply::
+                CLAIM_ALREADY_GRANTED) {
+          if (!reply.has_acting_owner() ||
+              reply.acting_owner()
+                      .worker_id()
+                      .size() != WorkerID::Size()) {
+            callback(false);
+            return;
+          }
+
+          rpc::RecoveryObjectMetadata metadata;
+          metadata.set_task_id(
+              reply.manifest().task_id());
+          metadata.set_return_index(
+              return_index);
+          metadata.mutable_manifest()->CopyFrom(
+              reply.manifest());
+
+          // Another borrower already won the atomic replay claim.
+          // Follow that worker as the acting owner instead of replaying.
+          reference_counter_->AddBorrowedObject(
+              object_id,
+              ObjectID::Nil(),
+              reply.acting_owner());
+
+          recovery_succession_manager_
+              ->RegisterBorrowedObject(
+                  object_id,
+                  metadata);
+
+          if (future_resolver_ != nullptr) {
+            future_resolver_->ResolveFutureAsync(
+                object_id,
+                reply.acting_owner());
+          }
+
+          RAY_LOG(INFO)
+              .WithField(object_id)
+              << "Witness-holder baseline recovery already "
+                "claimed by another acting owner";
+
+          callback(true);
+          return;
+        }
+
+
+
+
+
 
         if (reply.manifest().task_id() !=
                 manifest.task_id() ||
@@ -5394,22 +5478,6 @@ void CoreWorker::TryRecoveryWitnessHolders(
             replay_task_proto
                 .mutable_recovery_manifest();
 
-        const int32_t max_recovery_attempts =
-            replay_manifest
-                ->max_recovery_attempts();
-
-        if (max_recovery_attempts >= 0 &&
-            replay_manifest->recovery_attempt() >=
-                static_cast<uint32_t>(
-                    max_recovery_attempts)) {
-          callback(false);
-          return;
-        }
-
-        // Match PrepareTaskReplay() semantics used by the
-        // current recovery-succession path.
-        replay_manifest->set_recovery_attempt(
-            replay_manifest->recovery_attempt() + 1);
 
         auto replacement_ref =
             StartRecoveryReplay(
@@ -5458,6 +5526,9 @@ void CoreWorker::TryRecoveryWitnessHolders(
 
         callback(true);
       });
+
+
+      
 }
 
 void CoreWorker::HandleApplyRecoveryTombstone(

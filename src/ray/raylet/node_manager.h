@@ -383,6 +383,16 @@ class NodeManager : public rpc::NodeManagerServiceHandler,
         recovery_witness_task_specs_
             ABSL_GUARDED_BY(recovery_witness_mutex_);
 
+    /// Atomic replay-claim state for the preassigned full-lineage
+    /// witness-holder baseline.
+    struct RecoveryWitnessClaimState {
+    rpc::Address acting_owner;
+    uint32_t recovery_attempt = 0;
+    };
+
+    absl::flat_hash_map<TaskID, RecoveryWitnessClaimState>
+        recovery_witness_claims_
+            ABSL_GUARDED_BY(recovery_witness_mutex_);
 
   /// Release pinned bookkeeping and delete plasma copies for `object_ids`.
   void FreeLocalObjects(const std::vector<ObjectID> &object_ids);

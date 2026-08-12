@@ -482,18 +482,40 @@ message UpdateRecoveryWitnessReply {
   optional RecoveryManifest latest_manifest = 2;
 }
 
-// Reads the latest compact manifest known by this witness.
 message GetRecoveryWitnessRequest {
   bytes task_id = 1;
+
+  // Baseline only. When true, atomically claim replay responsibility
+  // for this task at this preassigned full-lineage witness.
+  bool claim_recovery = 2;
+
+  // CoreWorker that will become acting owner and submit the replay.
+  // Required when claim_recovery is true.
+  optional Address claimant_address = 3;
 }
 
 message GetRecoveryWitnessReply {
   bool found = 1;
   optional RecoveryManifest manifest = 2;
 
-  // Present only when this witness stores full lineage for the
-  // witness-as-holder baseline.
+  // Returned only when this witness grants replay responsibility
+  // to the requester.
   optional TaskSpec task_spec = 3;
+
+  enum RecoveryClaimResult {
+    CLAIM_NOT_REQUESTED = 0;
+    CLAIM_GRANTED = 1;
+    CLAIM_ALREADY_GRANTED = 2;
+    CLAIM_RETRY_LIMIT_EXCEEDED = 3;
+    CLAIM_TOMBSTONED = 4;
+    CLAIM_INVALID = 5;
+  }
+
+  RecoveryClaimResult claim_result = 4;
+
+  // The CoreWorker that currently owns replay responsibility.
+  // Returned for CLAIM_GRANTED and CLAIM_ALREADY_GRANTED.
+  optional Address acting_owner = 5;
 }
 
 // Service for inter-node-manager communication.
