@@ -104,6 +104,8 @@ class RecoverySuccessionManager {
 
   void RecordHolderInstallRpcLatency(uint64_t latency_ns);
 
+  void RecordOwnerTaskSpecCopyLatency(uint64_t latency_ns);
+
   void RecordWitnessUpdateRpcSent(uint64_t task_spec_bytes,
                                   uint64_t manifest_bytes);
 

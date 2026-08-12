@@ -1186,6 +1186,19 @@ void RecoverySuccessionManager::RecordHolderInstallRpcLatency(
   profile_.holder_install_rpc_time_ns += latency_ns;
 }
 
+
+void RecoverySuccessionManager::RecordOwnerTaskSpecCopyLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  ++profile_.owner_task_spec_copy_count;
+  profile_.owner_task_spec_copy_time_ns += latency_ns;
+}
+
 void RecoverySuccessionManager::RecordWitnessUpdateRpcSent(
     uint64_t task_spec_bytes,
     uint64_t manifest_bytes) {

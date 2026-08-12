@@ -4862,8 +4862,20 @@ void CoreWorker::HandleReportRecoveryCandidate(
   install_request.set_proposed_rank(
       candidate_rank);
 
-  install_request.mutable_task_spec()->CopyFrom(
-      admission_plan.task_spec);
+  if (recovery_succession_profiling_enabled_) {
+    const uint64_t task_spec_copy_start_ns =
+        RecoveryProfileNowNs();
+
+    install_request.mutable_task_spec()->CopyFrom(
+        admission_plan.task_spec);
+
+    manager->RecordOwnerTaskSpecCopyLatency(
+        RecoveryProfileNowNs() -
+        task_spec_copy_start_ns);
+  } else {
+    install_request.mutable_task_spec()->CopyFrom(
+        admission_plan.task_spec);
+  }
 
   install_request.mutable_proposed_manifest()->CopyFrom(
       proposed_manifest);
