@@ -4898,17 +4898,18 @@ void CoreWorker::HandleReportRecoveryCandidate(
   }
 
   candidate_client->InstallRecoveryHolder(
-      std::move(install_request),
-      [this,
-       manager,
-       reservation_id,
-       task_id,
-       candidate_address = std::move(candidate_address),
-       latest_manifest = std::move(latest_manifest),
-       proposed_manifest = std::move(proposed_manifest),
-       install_start_ns,
-       reply,
-       send_reply_callback = std::move(send_reply_callback)](
+    std::move(install_request),
+    [this,
+     manager,
+     reservation_id,
+     task_id,
+     candidate_address = std::move(candidate_address),
+     latest_manifest = std::move(latest_manifest),
+     proposed_manifest = std::move(proposed_manifest),
+     install_start_ns,
+     admission_start_ns,
+     reply,
+     send_reply_callback = std::move(send_reply_callback)](
           const Status &status,
           rpc::InstallRecoveryHolderReply &&install_reply) mutable {
 
