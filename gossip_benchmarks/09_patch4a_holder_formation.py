@@ -325,6 +325,7 @@ def run_workload(
         "latency_p50_ms": percentile(latencies_ms, 0.50),
         "latency_p95_ms": percentile(latencies_ms, 0.95),
         "latency_p99_ms": percentile(latencies_ms, 0.99),
+        "total_pipeline_submitted": request_id,
     }
 
 
@@ -452,6 +453,34 @@ def add_profile_metrics(
         summary["profile_holder_count_ok"] = ""
         summary["profile_expected_frozen"] = ""
         summary["profile_frozen_ok"] = ""
+
+
+    total_tasks = int(summary["total_pipeline_submitted"])
+
+    control_bytes = (
+        int(profile["task_spec_bytes_sent"])
+        + int(profile["manifest_bytes_sent"])
+    )
+
+    summary["profile_control_bytes_total"] = control_bytes
+
+    summary["profile_control_bytes_per_task"] = (
+        control_bytes / total_tasks
+        if total_tasks > 0
+        else math.nan
+    )
+
+    summary["profile_holder_admissions_per_task"] = (
+        int(profile["holder_admissions_committed"]) / total_tasks
+        if total_tasks > 0
+        else math.nan
+    )
+
+    summary["profile_generations_committed_per_task"] = (
+        int(profile["manifest_generations_committed"]) / total_tasks
+        if total_tasks > 0
+        else math.nan
+    )
 
 
 def run_one(
@@ -691,6 +720,24 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     min(int(row["profile_frozen_ok"]) for row in applicable)
                     if applicable
                     else ""
+                ),
+
+                "profile_control_bytes_per_task_mean": mean_metric(
+                    "profile_control_bytes_per_task"
+                ),
+                "profile_holder_admissions_per_task_mean": mean_metric(
+                    "profile_holder_admissions_per_task"
+                ),
+                "profile_generations_committed_per_task_mean": mean_metric(
+                    "profile_generations_committed_per_task"
+                ),
+                "profile_max_generation_max": max(
+                    int(row["profile_max_generation"])
+                    for row in group
+                ),
+                "profile_manifest_generations_committed_mean": statistics.fmean(
+                    float(row["profile_manifest_generations_committed"])
+                    for row in group
                 ),
             }
         )
