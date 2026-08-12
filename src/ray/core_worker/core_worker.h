@@ -1657,7 +1657,23 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                           bool witness_lookup_attempted,
                           RecoveryAttemptCallback callback);
 
+  struct RecoveryWitnessNodeCache {
+    std::mutex mutex;
+    std::condition_variable cv;
 
+    // True once the initial node-subscription snapshot has completed.
+    bool initialized = false;
+
+    // Whether the GCS node subscription initialized successfully.
+    bool subscription_ok = false;
+
+    // Only ALIVE non-owner raylets are stored here.
+    absl::flat_hash_map<NodeID, rpc::Address> alive_nodes;
+  };
+
+  std::shared_ptr<RecoveryWitnessNodeCache>
+    recovery_witness_node_cache_ =
+        std::make_shared<RecoveryWitnessNodeCache>();
 
 
   /// Resolve a raylet RPC client by node id. Should be used to only get a temporary RPC

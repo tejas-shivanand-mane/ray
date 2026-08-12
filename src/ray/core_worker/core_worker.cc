@@ -965,13 +965,57 @@ void CoreWorker::SubscribeToNodeChanges() {
     const std::weak_ptr<RecoverySuccessionManager> weak_recovery_manager =
         recovery_succession_manager_;
 
-    auto on_node_change = [reference_counter = reference_counter_,
-                           rate_limiter = lease_request_rate_limiter_,
-                           raylet_client_pool = raylet_client_pool_,
-                           core_worker_client_pool = core_worker_client_pool_,
-                           weak_recovery_manager](
-                              const NodeID &node_id,
-                              const rpc::GcsNodeAddressAndLiveness &data) {
+
+    const auto recovery_witness_node_cache =
+        recovery_witness_node_cache_;
+
+    const NodeID recovery_owner_node_id =
+        GetCurrentNodeId();
+
+    auto on_node_change =
+    [reference_counter = reference_counter_,
+     rate_limiter = lease_request_rate_limiter_,
+     raylet_client_pool = raylet_client_pool_,
+     core_worker_client_pool = core_worker_client_pool_,
+     weak_recovery_manager,
+     recovery_witness_node_cache,
+     recovery_owner_node_id](
+        const NodeID &node_id,
+        const rpc::GcsNodeAddressAndLiveness &data) {
+
+
+
+      {
+        std::scoped_lock<std::mutex> lock(
+            recovery_witness_node_cache->mutex);
+
+        const bool valid_alive_witness =
+            data.state() == rpc::GcsNodeInfo::ALIVE &&
+            node_id != recovery_owner_node_id &&
+            !data.node_manager_address().empty() &&
+            data.node_manager_port() > 0;
+
+        if (valid_alive_witness) {
+          rpc::Address address;
+
+          address.set_node_id(node_id.Binary());
+          address.set_ip_address(
+              data.node_manager_address());
+          address.set_port(
+              data.node_manager_port());
+
+          recovery_witness_node_cache
+              ->alive_nodes[node_id] =
+              std::move(address);
+        } else {
+          recovery_witness_node_cache
+              ->alive_nodes.erase(node_id);
+        }
+      }
+
+
+
+
       if (data.state() == rpc::GcsNodeInfo::DEAD) {
         RAY_LOG(INFO).WithField(node_id)
             << "Node failure. All objects pinned on that node will be lost if object "
@@ -992,14 +1036,46 @@ void CoreWorker::SubscribeToNodeChanges() {
       }
     };
 
-    gcs_client_->Nodes().AsyncSubscribeToNodeAddressAndLivenessChange(
-        std::move(on_node_change), [this](const Status &) {
-          {
-            std::scoped_lock<std::mutex> lock(gcs_client_node_cache_populated_mutex_);
-            gcs_client_node_cache_populated_ = true;
-          }
-          gcs_client_node_cache_populated_cv_.notify_all();
-        });
+  gcs_client_->Nodes().AsyncSubscribeToNodeAddressAndLivenessChange(
+      std::move(on_node_change),
+      [this,
+      recovery_witness_node_cache](
+          const Status &status) {
+
+        {
+          std::scoped_lock<std::mutex> lock(
+              gcs_client_node_cache_populated_mutex_);
+
+          gcs_client_node_cache_populated_ = true;
+        }
+
+        gcs_client_node_cache_populated_cv_
+            .notify_all();
+
+        {
+          std::scoped_lock<std::mutex> lock(
+              recovery_witness_node_cache->mutex);
+
+          recovery_witness_node_cache
+              ->subscription_ok =
+              status.ok();
+
+          recovery_witness_node_cache
+              ->initialized = true;
+        }
+
+        recovery_witness_node_cache
+            ->cv.notify_all();
+
+        if (!status.ok()) {
+          RAY_LOG(WARNING)
+              << "Failed to initialize recovery witness "
+                "node cache: "
+              << status;
+        }
+      });
+
+
   });
 }
 
@@ -7018,37 +7094,62 @@ void CoreWorker::FreeObjectOnNodesAsync(const ObjectID &object_id,
 std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
     const TaskID &task_id) const {
   const uint32_t requested_count =
-    recovery_witness_holder_baseline_enabled_
-        ? RayConfig::instance()
-              .recovery_succession_target_holder_count()
-        : RayConfig::instance()
-              .recovery_succession_witness_count();
+      recovery_witness_holder_baseline_enabled_
+          ? RayConfig::instance()
+                .recovery_succession_target_holder_count()
+          : RayConfig::instance()
+                .recovery_succession_witness_count();
 
-  if (!recovery_succession_enabled_ || requested_count == 0 || gcs_client_ == nullptr) {
+  if (!recovery_succession_enabled_ ||
+      requested_count == 0 ||
+      recovery_witness_node_cache_ == nullptr) {
     return {};
   }
 
-    uint64_t gcs_query_start_ns = 0;
+  // Snapshot the current ALIVE witness nodes from the cache.
+  // Do not hold the cache mutex while hashing/sorting candidates.
+  std::vector<std::pair<NodeID, rpc::Address>> alive_witnesses;
 
-  if (recovery_succession_profiling_enabled_ &&
-      recovery_succession_manager_ != nullptr) {
-    gcs_query_start_ns = RecoveryProfileNowNs();
-  }
+  {
+    std::unique_lock<std::mutex> lock(
+        recovery_witness_node_cache_->mutex);
 
-  auto nodes_result = gcs_client_->Nodes().GetAllNoCache(
-      /*timeout_ms=*/5000,
-      rpc::GcsNodeInfo::ALIVE);
+    // The GCS node subscription provides the initial node snapshot and then
+    // keeps this cache updated through ALIVE/DEAD notifications.
+    //
+    // Keep the same bounded behavior as the old GetAllNoCache(timeout=5000)
+    // path instead of potentially blocking task submission forever.
+    const bool initialized =
+        recovery_witness_node_cache_->cv.wait_for(
+            lock,
+            std::chrono::milliseconds(5000),
+            [this]() {
+              return recovery_witness_node_cache_->initialized;
+            });
 
-  if (gcs_query_start_ns != 0) {
-    recovery_succession_manager_->RecordWitnessGcsQueryLatency(
-        RecoveryProfileNowNs() - gcs_query_start_ns);
-  }
+    if (!initialized) {
+      RAY_LOG(WARNING).WithField(task_id)
+          << "Timed out waiting for recovery witness node cache "
+             "initialization.";
+      return {};
+    }
 
-  if (!nodes_result.ok()) {
-    RAY_LOG(WARNING).WithField(task_id)
-        << "Could not obtain alive nodes for recovery witnesses: "
-        << nodes_result.status();
-    return {};
+    if (!recovery_witness_node_cache_->subscription_ok) {
+      RAY_LOG(WARNING).WithField(task_id)
+          << "Recovery witness node cache is unavailable because "
+             "the GCS node subscription failed.";
+      return {};
+    }
+
+    alive_witnesses.reserve(
+        recovery_witness_node_cache_->alive_nodes.size());
+
+    for (const auto &[node_id, address] :
+         recovery_witness_node_cache_->alive_nodes) {
+      alive_witnesses.emplace_back(
+          node_id,
+          address);
+    }
   }
 
   struct WitnessCandidate {
@@ -7057,49 +7158,49 @@ std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
   };
 
   std::vector<WitnessCandidate> candidates;
+  candidates.reserve(alive_witnesses.size());
 
-  for (const rpc::GcsNodeInfo &node : nodes_result.value()) {
-    if (node.node_id().empty() || node.node_manager_address().empty() ||
-        node.node_manager_port() <= 0) {
-      continue;
-    }
-
-    // Do not use the owner's own node as one of the independent witness nodes.
-    if (node.node_id() == rpc_address_.node_id()) {
-      continue;
-    }
-
-    rpc::Address address;
-    address.set_node_id(node.node_id());
-    address.set_ip_address(node.node_manager_address());
-    address.set_port(node.node_manager_port());
-
+  // Preserve the existing deterministic per-task witness selection.
+  for (auto &[node_id, address] : alive_witnesses) {
     candidates.push_back(
-        WitnessCandidate{StableWitnessScore(task_id, NodeID::FromBinary(node.node_id())),
-                         std::move(address)});
+        WitnessCandidate{
+            StableWitnessScore(task_id, node_id),
+            std::move(address)});
   }
 
-  std::sort(candidates.begin(),
-            candidates.end(),
-            [](const WitnessCandidate &left, const WitnessCandidate &right) {
-              if (left.score != right.score) {
-                return left.score > right.score;
-              }
+  std::sort(
+      candidates.begin(),
+      candidates.end(),
+      [](const WitnessCandidate &left,
+         const WitnessCandidate &right) {
+        if (left.score != right.score) {
+          return left.score > right.score;
+        }
 
-              return left.address.node_id() < right.address.node_id();
-            });
+        return left.address.node_id() <
+               right.address.node_id();
+      });
 
-  const size_t selected_count = std::min<size_t>(requested_count, candidates.size());
+  const size_t selected_count =
+      std::min<size_t>(
+          requested_count,
+          candidates.size());
 
   std::vector<rpc::Address> witnesses;
   witnesses.reserve(selected_count);
 
-  for (size_t index = 0; index < selected_count; ++index) {
-    witnesses.push_back(std::move(candidates[index].address));
+  for (size_t index = 0;
+       index < selected_count;
+       ++index) {
+    witnesses.push_back(
+        std::move(candidates[index].address));
   }
 
   return witnesses;
 }
+
+
+
 
 void CoreWorker::PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) const {
   if (manifest == nullptr || manifest->task_id().empty()) {
