@@ -866,8 +866,21 @@ RecoverySuccessionManager::PrepareTaskReplay(const rpc::RecoverTaskOutputRequest
     return ReplayPreparationResult::TOMBSTONED;
   }
 
-  if (!state.task_spec.has_value() || !state.manifest_committed) {
+  if (!state.task_spec.has_value()) {
     return ReplayPreparationResult::TASK_NOT_FOUND;
+  }
+
+  if (!state.manifest_committed) {
+    // The TaskSpec is durable locally, but this holder was installed only
+    // provisionally. Do not trust the requester's cached manifest to promote
+    // it. CoreWorker must verify the manifest directly with the compact
+    // witnesses first.
+    if (state.provisional_reservation_id.empty() ||
+        !ContainsWorker(state.manifest, self_address_)) {
+      return ReplayPreparationResult::TASK_NOT_FOUND;
+    }
+
+    return ReplayPreparationResult::WITNESS_CONFIRMATION_REQUIRED;
   }
 
     const int requester_comparison =
@@ -939,6 +952,89 @@ RecoverySuccessionManager::PrepareTaskReplay(const rpc::RecoverTaskOutputRequest
 
   return ReplayPreparationResult::READY;
 }
+
+
+
+bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
+    const rpc::RecoveryManifest &witness_manifest,
+    rpc::RecoveryManifest *confirmed_manifest) {
+  if (confirmed_manifest == nullptr ||
+      witness_manifest.task_id().size() != TaskID::Size() ||
+      !witness_manifest.has_version() ||
+      witness_manifest.tombstoned()) {
+    return false;
+  }
+
+  const TaskID task_id =
+      TaskID::FromBinary(witness_manifest.task_id());
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto task_it = task_states_.find(task_id);
+
+  if (task_it == task_states_.end() ||
+      !task_it->second.task_spec.has_value()) {
+    return false;
+  }
+
+  TaskRecoveryState &state = task_it->second;
+
+  if (state.manifest.task_id() != witness_manifest.task_id() ||
+      state.manifest.tombstoned() ||
+      !ContainsWorker(state.manifest, self_address_) ||
+      !ContainsWorker(witness_manifest, self_address_)) {
+    return false;
+  }
+
+  // If the normal CommitRecoveryManifest RPC has not arrived, this must
+  // still be a genuine provisional holder installation.
+  if (!state.manifest_committed &&
+      state.provisional_reservation_id.empty()) {
+    return false;
+  }
+
+  const int comparison =
+      CompareManifestVersions(
+          witness_manifest,
+          state.manifest);
+
+  if (comparison < 0) {
+    // The normal commit RPC may have won the race while the witness query
+    // was in flight. In that case keep the newer local committed state.
+    if (!state.manifest_committed) {
+      return false;
+    }
+
+    confirmed_manifest->CopyFrom(state.manifest);
+    return true;
+  }
+
+  if (comparison == 0 &&
+      witness_manifest.SerializeAsString() !=
+          state.manifest.SerializeAsString()) {
+    return false;
+  }
+
+  if (comparison > 0 || !state.manifest_committed) {
+    // This manifest was fetched directly from a preassigned compact witness,
+    // so it can safely convert the provisional holder into a replayable one.
+    UpdateManifestForTaskLocked(
+        task_id,
+        witness_manifest,
+        true);
+  }
+
+  candidate_reports_sent_.insert(task_id);
+
+  confirmed_manifest->CopyFrom(state.manifest);
+
+  return true;
+}
+
+
+
+
+
 
 void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
     const ObjectID &object_id,

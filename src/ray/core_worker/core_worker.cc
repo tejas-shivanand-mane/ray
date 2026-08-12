@@ -5233,7 +5233,97 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
 
   using PreparationResult = RecoverySuccessionManager::ReplayPreparationResult;
 
+  if (preparation ==
+      PreparationResult::WITNESS_CONFIRMATION_REQUIRED) {
+    // Do not trust the recovery requester's cached manifest as proof of
+    // commitment. This provisional holder independently queries the compact
+    // witnesses stored in its own manifest.
+    rpc::RecoveryManifest provisional_manifest;
+    provisional_manifest.CopyFrom(latest_manifest);
+
+    LookupRecoveryManifestFromWitnesses(
+        provisional_manifest,
+        [this,
+        request = std::move(request),
+        reply,
+        send_reply_callback = std::move(send_reply_callback)](
+            std::optional<rpc::RecoveryManifest> witness_manifest) mutable {
+          if (!witness_manifest.has_value() ||
+              witness_manifest->task_id() != request.task_id() ||
+              !witness_manifest->has_version()) {
+            reply->set_result(
+                rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
+
+            send_reply_callback(
+                Status::OK(),
+                nullptr,
+                nullptr);
+            return;
+          }
+
+          if (witness_manifest->tombstoned()) {
+            recovery_succession_manager_->ApplyRecoveryTombstone(
+                witness_manifest.value());
+
+            reply->mutable_latest_manifest()->CopyFrom(
+                witness_manifest.value());
+
+            reply->set_result(
+                rpc::RecoverTaskOutputReply::TOMBSTONED);
+
+            send_reply_callback(
+                Status::OK(),
+                nullptr,
+                nullptr);
+            return;
+          }
+
+          rpc::RecoveryManifest confirmed_manifest;
+
+          if (!recovery_succession_manager_
+                  ->ConfirmProvisionalHolderFromWitness(
+                      witness_manifest.value(),
+                      &confirmed_manifest)) {
+            reply->mutable_latest_manifest()->CopyFrom(
+                witness_manifest.value());
+
+            reply->set_result(
+                rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
+
+            send_reply_callback(
+                Status::OK(),
+                nullptr,
+                nullptr);
+            return;
+          }
+
+          // Re-run ordinary replay preparation using the manifest that this
+          // holder itself verified from a witness.
+          request.mutable_requester_manifest()->CopyFrom(
+              confirmed_manifest);
+
+          RAY_LOG(INFO)
+              .WithField(
+                  TaskID::FromBinary(request.task_id()))
+              << "Promoted provisional recovery holder "
+                "from witness-backed manifest";
+
+          HandleRecoverTaskOutput(
+              std::move(request),
+              reply,
+              std::move(send_reply_callback));
+        });
+
+    return;
+  }
+
+
   switch (preparation) {
+
+  case PreparationResult::WITNESS_CONFIRMATION_REQUIRED:
+    // Handled asynchronously above.
+    return;
+
   case PreparationResult::TASK_NOT_FOUND:
   case PreparationResult::WRONG_HOLDER:
     reply->set_result(rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);

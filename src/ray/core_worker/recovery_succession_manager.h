@@ -218,6 +218,7 @@ class RecoverySuccessionManager {
 
   enum class ReplayPreparationResult {
     READY,
+    WITNESS_CONFIRMATION_REQUIRED,
     TASK_NOT_FOUND,
     MANIFEST_STALE,
     TOMBSTONED,
@@ -225,12 +226,25 @@ class RecoverySuccessionManager {
     WRONG_HOLDER,
   };
 
+
+
   bool GetBorrowedObjectRecoveryPlan(const ObjectID &object_id,
                                      BorrowedObjectRecoveryPlan *plan) const;
 
   ReplayPreparationResult PrepareTaskReplay(const rpc::RecoverTaskOutputRequest &request,
                                             rpc::TaskSpec *task_spec,
                                             rpc::RecoveryManifest *latest_manifest);
+
+  /// Promotes a provisional holder only from a manifest obtained directly
+  /// from one of the task's compact witnesses.
+  ///
+  /// A newer witness-backed generation may also be adopted if this worker
+  /// remains in the succession list.
+  bool ConfirmProvisionalHolderFromWitness(
+      const rpc::RecoveryManifest &witness_manifest,
+      rpc::RecoveryManifest *confirmed_manifest);
+
+
 
   void UpdateBorrowedObjectManifest(const ObjectID &object_id,
                                     const rpc::RecoveryManifest &manifest);
@@ -264,7 +278,9 @@ class RecoverySuccessionManager {
     // Present on the owner, executor, and installed lineage holders.
     std::optional<rpc::TaskSpec> task_spec;
 
-    // An installed holder is not usable until CommitRecoveryManifest arrives.
+    // An installed holder is not usable until either CommitRecoveryManifest
+    // arrives or the holder independently confirms the manifest from a compact
+    // witness during owner-failure recovery.
     bool manifest_committed = true;
     std::string provisional_reservation_id;
   };
