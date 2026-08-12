@@ -1102,13 +1102,21 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.candidate_reports_received;
   result["candidate_reports_accepted"] =
       profile.candidate_reports_accepted;
-
+      
   result["holder_install_rpcs_sent"] =
       profile.holder_install_rpcs_sent;
+  result["holder_install_rpcs_completed"] =
+      profile.holder_install_rpcs_completed;
+
   result["holder_commit_rpcs_sent"] =
       profile.holder_commit_rpcs_sent;
+  result["holder_commit_rpcs_completed"] =
+      profile.holder_commit_rpcs_completed;
+
   result["witness_update_rpcs_sent"] =
       profile.witness_update_rpcs_sent;
+  result["witness_update_rpcs_completed"] =
+      profile.witness_update_rpcs_completed;
 
   result["task_spec_bytes_sent"] =
       profile.task_spec_bytes_sent;
@@ -1126,6 +1134,13 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.holder_commit_rpc_time_ns;
   result["witness_update_rpc_time_ns"] =
       profile.witness_update_rpc_time_ns;
+
+  result["witness_publish_count"] =
+    profile.witness_publish_count;
+  result["witness_publish_time_ns"] =
+      profile.witness_publish_time_ns;
+  result["witness_publish_max_time_ns"] =
+      profile.witness_publish_max_time_ns;
 
   result["holder_admissions_committed"] =
       profile.holder_admissions_committed;
@@ -4591,6 +4606,12 @@ void CoreWorker::FinishRecoveryHolderAdmission(
     rpc::SendReplyCallback send_reply_callback) {
   auto manager = recovery_succession_manager_;
 
+  uint64_t witness_publish_start_ns = 0;
+
+  if (recovery_succession_profiling_enabled_) {
+    witness_publish_start_ns = RecoveryProfileNowNs();
+  }
+
   PublishRecoveryManifestToWitnesses(
       proposed_manifest,
       [this,
@@ -4601,10 +4622,18 @@ void CoreWorker::FinishRecoveryHolderAdmission(
        candidate_needs_commit_rpc,
        latest_manifest = std::move(latest_manifest),
        admission_start_ns,
+       witness_publish_start_ns,
        reply,
        send_reply_callback = std::move(send_reply_callback)](
           bool witness_stored,
           std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
+
+        if (witness_publish_start_ns != 0) {
+          manager->RecordWitnessPublishLatency(
+              RecoveryProfileNowNs() -
+              witness_publish_start_ns);
+        }
+
         if (!witness_stored) {
           manager->AbortHolderAdmission(reservation_id);
 

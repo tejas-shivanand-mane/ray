@@ -1181,6 +1181,8 @@ void RecoverySuccessionManager::RecordHolderInstallRpcLatency(
   }
 
   absl::MutexLock lock(&mutex_);
+
+  ++profile_.holder_install_rpcs_completed;
   profile_.holder_install_rpc_time_ns += latency_ns;
 }
 
@@ -1204,8 +1206,30 @@ void RecoverySuccessionManager::RecordWitnessUpdateRpcLatency(
   }
 
   absl::MutexLock lock(&mutex_);
+
+  ++profile_.witness_update_rpcs_completed;
   profile_.witness_update_rpc_time_ns += latency_ns;
 }
+
+
+void RecoverySuccessionManager::RecordWitnessPublishLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  ++profile_.witness_publish_count;
+  profile_.witness_publish_time_ns += latency_ns;
+
+  if (latency_ns > profile_.witness_publish_max_time_ns) {
+    profile_.witness_publish_max_time_ns = latency_ns;
+  }
+}
+
+
+
 
 void RecoverySuccessionManager::RecordHolderCommitRpcSent(
     uint64_t manifest_bytes) {
@@ -1225,6 +1249,8 @@ void RecoverySuccessionManager::RecordHolderCommitRpcLatency(
   }
 
   absl::MutexLock lock(&mutex_);
+
+  ++profile_.holder_commit_rpcs_completed;
   profile_.holder_commit_rpc_time_ns += latency_ns;
 }
 

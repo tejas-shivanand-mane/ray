@@ -57,8 +57,20 @@ class RecoverySuccessionManager {
     uint64_t candidate_reports_accepted = 0;
 
     uint64_t holder_install_rpcs_sent = 0;
+    uint64_t holder_install_rpcs_completed = 0;
+
     uint64_t holder_commit_rpcs_sent = 0;
+    uint64_t holder_commit_rpcs_completed = 0;
+
     uint64_t witness_update_rpcs_sent = 0;
+    uint64_t witness_update_rpcs_completed = 0;
+
+    // Wall-clock latency of the whole witness-publication stage.
+    // This is different from witness_update_rpc_time_ns, which sums
+    // the RTTs of individual witness RPCs.
+    uint64_t witness_publish_count = 0;
+    uint64_t witness_publish_time_ns = 0;
+    uint64_t witness_publish_max_time_ns = 0;
 
     uint64_t task_spec_bytes_sent = 0;
     uint64_t manifest_bytes_sent = 0;
@@ -96,6 +108,8 @@ class RecoverySuccessionManager {
                                   uint64_t manifest_bytes);
 
   void RecordWitnessUpdateRpcLatency(uint64_t latency_ns);
+
+  void RecordWitnessPublishLatency(uint64_t latency_ns);
 
   void RecordHolderCommitRpcSent(uint64_t manifest_bytes);
 
