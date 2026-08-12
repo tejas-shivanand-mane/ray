@@ -4840,100 +4840,12 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     return;
   }
 
-  // The acting holder becomes the owner of outputs produced by
-  // this replay. Keep the original task and return IDs, but replace
-  // the dead caller address.
-  replay_task_proto.mutable_caller_address()->CopyFrom(rpc_address_);
+  auto replacement_ref =
+      StartRecoveryReplay(
+          std::move(replay_task_proto),
+          request.return_index());
 
-
-  // Recovery should not remain blocked behind the original execution
-  // merely because the task had a soft node-affinity preference.
-  //
-  // A soft affinity is a placement preference rather than a semantic
-  // requirement, so recovery is free to use Ray's default scheduler.
-  // Hard affinity and other scheduling strategies are preserved.
-  auto *scheduling_strategy =
-      replay_task_proto.mutable_scheduling_strategy();
-
-  if (scheduling_strategy->has_node_affinity_scheduling_strategy() &&
-      scheduling_strategy->node_affinity_scheduling_strategy().soft()) {
-    scheduling_strategy->clear_scheduling_strategy();
-    scheduling_strategy->mutable_default_scheduling_strategy();
-
-    RAY_LOG(INFO)
-        .WithField(
-            TaskID::FromBinary(
-                replay_task_proto.task_id()))
-        << "Cleared soft node affinity for recovery succession replay";
-  }
-
-
-
-
-
-
-
-  // This is a new execution attempt of the same deterministic task.
-  // Ray's normal reconstruction path increments the attempt number
-  // before resubmission. Without this, the replay may be treated as
-  // the already-completed or failed original attempt.
-  replay_task_proto.set_attempt_number(replay_task_proto.attempt_number() + 1);
-
-  RAY_LOG(INFO).WithField(TaskID::FromBinary(replay_task_proto.task_id()))
-      << "Preparing recovery succession replay attempt "
-      << replay_task_proto.attempt_number();
-
-  TaskSpecification replay_task(std::move(replay_task_proto));
-
-  // Register recovery metadata carried by direct
-  // ObjectRef dependencies of this stored TaskSpec.
-  //
-  // Recovery holders retain TaskSpecs but are not
-  // necessarily executors of the original task, so
-  // make the upstream dependency recovery plan
-  // explicit before NormalTaskSubmitter resolves
-  // those dependencies.
-  for (size_t i = 0;
-      i < replay_task.NumArgs();
-      ++i) {
-    if (!replay_task.ArgByRef(i)) {
-      continue;
-    }
-
-    const auto &arg_ref =
-        replay_task.ArgRef(i);
-
-    if (arg_ref.object_id().empty() ||
-        !arg_ref.has_recovery_metadata()) {
-      continue;
-    }
-
-    const ObjectID dependency_id =
-        ObjectID::FromBinary(
-            arg_ref.object_id());
-
-    recovery_succession_manager_
-        ->RegisterBorrowedObject(
-            dependency_id,
-            arg_ref.recovery_metadata());
-
-    RAY_LOG(INFO)
-        .WithField(replay_task.TaskId())
-        .WithField(dependency_id)
-        << "Registered recovery metadata for "
-          "replay task dependency";
-  }
-
-  const int32_t max_retries = replay_task.MaxRetries();
-
-  std::vector<rpc::ObjectReference> returned_refs =
-    task_manager_->AddPendingTaskForRecovery(
-        rpc_address_,
-        replay_task,
-        "recovery-succession replay",
-        max_retries);
-
-  if (request.return_index() >= returned_refs.size()) {
+  if (!replacement_ref.has_value()) {
     reply->set_result(
         rpc::RecoverTaskOutputReply::REPLAY_FAILED);
 
@@ -4944,12 +4856,117 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     return;
   }
 
-  // AddPendingTaskForRecovery() has now promoted these deterministic
-  // return IDs to objects owned by this recovery holder.
-  //
-  // The holder may still have an OWNER_DIED value cached from when it
-  // was borrowing the same object from the original owner. Remove that
-  // terminal value before exposing this worker as the replacement owner.
+  reply->set_result(
+      rpc::RecoverTaskOutputReply::RECOVERED);
+
+  reply->mutable_replacement_ref()->CopyFrom(
+      replacement_ref.value());
+
+  RAY_LOG(INFO)
+      .WithField(
+          TaskID::FromBinary(request.task_id()))
+      << "Recovery succession replay accepted for return "
+      << request.return_index();
+
+  send_reply_callback(
+      Status::OK(),
+      nullptr,
+      nullptr);
+  
+}
+
+
+
+std::optional<rpc::ObjectReference>
+CoreWorker::StartRecoveryReplay(
+    rpc::TaskSpec replay_task_proto,
+    uint32_t return_index) {
+  if (!recovery_succession_enabled_ ||
+      recovery_succession_manager_ == nullptr) {
+    return std::nullopt;
+  }
+
+  // The worker performing the replay becomes the new owner.
+  replay_task_proto.mutable_caller_address()->CopyFrom(
+      rpc_address_);
+
+  // Recovery must not remain pinned to a dead/preferred node when
+  // the original task used soft node affinity.
+  auto *scheduling_strategy =
+      replay_task_proto.mutable_scheduling_strategy();
+
+  if (scheduling_strategy
+          ->has_node_affinity_scheduling_strategy() &&
+      scheduling_strategy
+          ->node_affinity_scheduling_strategy()
+          .soft()) {
+    scheduling_strategy->clear_scheduling_strategy();
+    scheduling_strategy->mutable_default_scheduling_strategy();
+
+    RAY_LOG(INFO)
+        .WithField(
+            TaskID::FromBinary(
+                replay_task_proto.task_id()))
+        << "Cleared soft node affinity for recovery replay";
+  }
+
+  // Same deterministic task, new execution attempt.
+  replay_task_proto.set_attempt_number(
+      replay_task_proto.attempt_number() + 1);
+
+  RAY_LOG(INFO)
+      .WithField(
+          TaskID::FromBinary(
+              replay_task_proto.task_id()))
+      << "Preparing recovery replay attempt "
+      << replay_task_proto.attempt_number();
+
+  TaskSpecification replay_task(
+      std::move(replay_task_proto));
+
+  // Restore recovery information for upstream dependencies.
+  for (size_t i = 0; i < replay_task.NumArgs(); ++i) {
+    if (!replay_task.ArgByRef(i)) {
+      continue;
+    }
+
+    const auto &arg_ref = replay_task.ArgRef(i);
+
+    if (arg_ref.object_id().empty() ||
+        !arg_ref.has_recovery_metadata()) {
+      continue;
+    }
+
+    const ObjectID dependency_id =
+        ObjectID::FromBinary(
+            arg_ref.object_id());
+
+    recovery_succession_manager_->RegisterBorrowedObject(
+        dependency_id,
+        arg_ref.recovery_metadata());
+
+    RAY_LOG(INFO)
+        .WithField(replay_task.TaskId())
+        .WithField(dependency_id)
+        << "Registered recovery metadata for "
+           "replay task dependency";
+  }
+
+  const int32_t max_retries =
+      replay_task.MaxRetries();
+
+  std::vector<rpc::ObjectReference> returned_refs =
+      task_manager_->AddPendingTaskForRecovery(
+          rpc_address_,
+          replay_task,
+          "recovery replay",
+          max_retries);
+
+  if (return_index >= returned_refs.size()) {
+    return std::nullopt;
+  }
+
+  // Remove stale OWNER_DIED values for deterministic return IDs.
   std::vector<ObjectID> stale_owner_died_returns;
 
   for (const auto &return_ref : returned_refs) {
@@ -4958,7 +4975,8 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     }
 
     const ObjectID return_id =
-        ObjectID::FromBinary(return_ref.object_id());
+        ObjectID::FromBinary(
+            return_ref.object_id());
 
     const auto existing =
         memory_store_->GetIfExists(return_id);
@@ -4970,19 +4988,23 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     rpc::ErrorType error_type;
 
     if (existing->IsException(&error_type) &&
-        error_type == rpc::ErrorType::OWNER_DIED) {
-      stale_owner_died_returns.push_back(return_id);
+        error_type ==
+            rpc::ErrorType::OWNER_DIED) {
+      stale_owner_died_returns.push_back(
+          return_id);
     }
   }
 
   if (!stale_owner_died_returns.empty()) {
-    memory_store_->Delete(stale_owner_died_returns);
+    memory_store_->Delete(
+        stale_owner_died_returns);
 
     for (const auto &return_id :
-        stale_owner_died_returns) {
-      RAY_LOG(INFO).WithField(return_id)
-          << "Removed stale holder-local OWNER_DIED "
-            "before recovery replay";
+         stale_owner_died_returns) {
+      RAY_LOG(INFO)
+          .WithField(return_id)
+          << "Removed stale local OWNER_DIED "
+             "before recovery replay";
     }
   }
 
@@ -4990,28 +5012,26 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
       replay_task,
       &returned_refs);
 
-
-  reply->set_result(rpc::RecoverTaskOutputReply::RECOVERED);
-
-  reply->mutable_replacement_ref()->CopyFrom(returned_refs[request.return_index()]);
-
-  const TaskID task_id = TaskID::FromBinary(request.task_id());
-
-  RAY_LOG(INFO).WithField(task_id)
-      << "Recovery succession replay accepted for return " << request.return_index();
+  rpc::ObjectReference replacement_ref;
+  replacement_ref.CopyFrom(
+      returned_refs[return_index]);
 
   io_service_.post(
-      [this, replay_task = std::move(replay_task)]() mutable {
-        const TaskID replay_task_id = replay_task.TaskId();
+      [this,
+       replay_task = std::move(replay_task)]() mutable {
+        const TaskID replay_task_id =
+            replay_task.TaskId();
 
-        RAY_LOG(INFO).WithField(replay_task_id)
-            << "Submitting recovery succession replay";
+        RAY_LOG(INFO)
+            .WithField(replay_task_id)
+            << "Submitting recovery replay";
 
-        normal_task_submitter_->SubmitTask(std::move(replay_task));
+        normal_task_submitter_->SubmitTask(
+            std::move(replay_task));
       },
-      "CoreWorker.RecoverTaskOutput");
+      "CoreWorker.StartRecoveryReplay");
 
-  send_reply_callback(Status::OK(), nullptr, nullptr);
+  return replacement_ref;
 }
 
 
@@ -5051,10 +5071,14 @@ void CoreWorker::RecoverBorrowedObject(const ObjectID &object_id,
   }
 
   // The witness-as-holder baseline has its own recovery path.
-  // Patch 1 only isolates the modes; baseline recovery is added later.
   if (recovery_succession_enabled_ &&
       recovery_witness_holder_baseline_enabled_) {
-    callback(false);
+    TryRecoveryWitnessHolders(
+        object_id,
+        plan.return_index,
+        plan.cached_manifest,
+        0,
+        std::move(callback));
     return;
   }
 
@@ -5254,6 +5278,183 @@ void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
             << "Recovery succession accepted by holder rank "
             << holder_rank
             << "; future resolution restarted against acting holder";
+
+        callback(true);
+      });
+}
+
+
+
+
+void CoreWorker::TryRecoveryWitnessHolders(
+    const ObjectID &object_id,
+    uint32_t return_index,
+    const rpc::RecoveryManifest &manifest,
+    size_t witness_index,
+    RecoveryAttemptCallback callback) {
+  if (!recovery_succession_enabled_ ||
+      !recovery_witness_holder_baseline_enabled_ ||
+      recovery_succession_manager_ == nullptr) {
+    callback(false);
+    return;
+  }
+
+  if (manifest.tombstoned()) {
+    callback(false);
+    return;
+  }
+
+  if (witness_index >=
+      static_cast<size_t>(
+          manifest.witness_raylets_size())) {
+    callback(false);
+    return;
+  }
+
+  const rpc::Address &witness =
+      manifest.witness_raylets(
+          static_cast<int>(witness_index));
+
+  rpc::GetRecoveryWitnessRequest request;
+  request.set_task_id(manifest.task_id());
+
+  auto witness_client =
+      raylet_client_pool_->GetOrConnectByAddress(
+          witness);
+
+  witness_client->GetRecoveryWitness(
+      std::move(request),
+      [this,
+       object_id,
+       return_index,
+       manifest,
+       witness_index,
+       callback = std::move(callback)](
+          const Status &status,
+          rpc::GetRecoveryWitnessReply &&reply) mutable {
+        // Witness unavailable or it does not contain full lineage:
+        // try the next preassigned witness.
+        if (!status.ok() ||
+            !reply.found() ||
+            !reply.has_manifest() ||
+            !reply.has_task_spec()) {
+          TryRecoveryWitnessHolders(
+              object_id,
+              return_index,
+              manifest,
+              witness_index + 1,
+              std::move(callback));
+          return;
+        }
+
+        if (reply.manifest().task_id() !=
+                manifest.task_id() ||
+            reply.task_spec().task_id() !=
+                manifest.task_id()) {
+          TryRecoveryWitnessHolders(
+              object_id,
+              return_index,
+              manifest,
+              witness_index + 1,
+              std::move(callback));
+          return;
+        }
+
+        if (reply.manifest().tombstoned()) {
+          recovery_succession_manager_
+              ->UpdateBorrowedObjectManifest(
+                  object_id,
+                  reply.manifest());
+
+          callback(false);
+          return;
+        }
+
+        if (!reply.task_spec()
+                 .has_recovery_manifest()) {
+          TryRecoveryWitnessHolders(
+              object_id,
+              return_index,
+              manifest,
+              witness_index + 1,
+              std::move(callback));
+          return;
+        }
+
+        rpc::TaskSpec replay_task_proto;
+        replay_task_proto.CopyFrom(
+            reply.task_spec());
+
+        // Always replay using the witness's latest retained manifest.
+        replay_task_proto
+            .mutable_recovery_manifest()
+            ->CopyFrom(reply.manifest());
+
+        rpc::RecoveryManifest *replay_manifest =
+            replay_task_proto
+                .mutable_recovery_manifest();
+
+        const int32_t max_recovery_attempts =
+            replay_manifest
+                ->max_recovery_attempts();
+
+        if (max_recovery_attempts >= 0 &&
+            replay_manifest->recovery_attempt() >=
+                static_cast<uint32_t>(
+                    max_recovery_attempts)) {
+          callback(false);
+          return;
+        }
+
+        // Match PrepareTaskReplay() semantics used by the
+        // current recovery-succession path.
+        replay_manifest->set_recovery_attempt(
+            replay_manifest->recovery_attempt() + 1);
+
+        auto replacement_ref =
+            StartRecoveryReplay(
+                std::move(replay_task_proto),
+                return_index);
+
+        if (!replacement_ref.has_value()) {
+          callback(false);
+          return;
+        }
+
+        const rpc::ObjectReference &replacement =
+            replacement_ref.value();
+
+        if (replacement.object_id() !=
+            object_id.Binary()) {
+          callback(false);
+          return;
+        }
+
+        // This requesting CoreWorker is the acting owner for the
+        // baseline replay.
+        reference_counter_->AddBorrowedObject(
+            object_id,
+            ObjectID::Nil(),
+            replacement.owner_address());
+
+        if (replacement.has_recovery_metadata()) {
+          recovery_succession_manager_
+              ->RegisterBorrowedObject(
+                  object_id,
+                  replacement.recovery_metadata());
+        }
+
+        if (future_resolver_ != nullptr) {
+          future_resolver_->ResolveFutureAsync(
+              object_id,
+              replacement.owner_address());
+        }
+
+        RAY_LOG(INFO)
+            .WithField(object_id)
+            << "Witness-as-holder baseline recovery "
+               "accepted using witness index "
+            << witness_index;
 
         callback(true);
       });
@@ -6616,7 +6817,7 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     });
 
 
-    
+
   }
 }
 

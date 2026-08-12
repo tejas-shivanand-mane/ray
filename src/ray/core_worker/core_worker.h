@@ -1607,7 +1607,7 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     const rpc::RecoveryManifest &manifest,
     RecoveryWitnessPublishCallback callback,
     const rpc::TaskSpec *task_spec = nullptr);
-    
+
   void FinishRecoveryHolderAdmission(
     std::string reservation_id,
     TaskID task_id,
@@ -1628,12 +1628,28 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   void RecoverBorrowedObject(const ObjectID &object_id, RecoveryAttemptCallback callback);
 
+
+  std::optional<rpc::ObjectReference> StartRecoveryReplay(
+      rpc::TaskSpec replay_task_proto,
+      uint32_t return_index);
+
+  void TryRecoveryWitnessHolders(
+      const ObjectID &object_id,
+      uint32_t return_index,
+      const rpc::RecoveryManifest &manifest,
+      size_t witness_index,
+      RecoveryAttemptCallback callback);
+
+
   void TryRecoveryHolders(const ObjectID &object_id,
                           uint32_t return_index,
                           const rpc::RecoveryManifest &manifest,
                           size_t holder_index,
                           bool witness_lookup_attempted,
                           RecoveryAttemptCallback callback);
+
+
+
 
   /// Resolve a raylet RPC client by node id. Should be used to only get a temporary RPC
   /// client, since the retryable GRPC client relies on clients going out of scope to
