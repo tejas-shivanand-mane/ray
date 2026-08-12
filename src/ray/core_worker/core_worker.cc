@@ -5241,6 +5241,26 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     rpc::RecoveryManifest provisional_manifest;
     provisional_manifest.CopyFrom(latest_manifest);
 
+    // TEST ONLY: deterministically make the holder's own witness
+    // confirmation unavailable. The requester may still have obtained the
+    // holder manifest from a real witness; this hook verifies that the
+    // requester alone cannot vouch for a provisional holder.
+    if (RayConfig::instance()
+            .recovery_succession_test_fail_holder_witness_confirmation()) {
+      RAY_LOG(WARNING)
+          .WithField(TaskID::FromBinary(request.task_id()))
+          << "TEST ONLY: suppressing provisional holder witness confirmation";
+
+      reply->set_result(
+          rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
+
+      send_reply_callback(
+          Status::OK(),
+          nullptr,
+          nullptr);
+      return;
+    }
+
     LookupRecoveryManifestFromWitnesses(
         provisional_manifest,
         [this,

@@ -231,6 +231,13 @@ RAY_CONFIG(bool, enable_recovery_succession_profiling, false)
 /// then hard-kills the owner node. Default false; never enable in production.
 RAY_CONFIG(bool, recovery_succession_test_fail_after_witness_ack, false)
 
+/// TEST ONLY: when a provisionally installed recovery holder receives a
+/// recovery request, suppress its independent compact-witness confirmation.
+///
+/// This is used by Benchmark 15 to prove that a requester's cached manifest
+/// cannot by itself promote a provisional holder. Default false.
+RAY_CONFIG(bool, recovery_succession_test_fail_holder_witness_confirmation, false)
+
 
 /// Whether to re-populate plasma memory. This avoids memory allocation failures
 /// at runtime (SIGBUS errors creating new objects), however it will use more memory
