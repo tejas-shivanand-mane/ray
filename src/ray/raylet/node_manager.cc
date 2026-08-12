@@ -445,30 +445,7 @@ void NodeManager::HandleGetRecoveryWitness(
     rpc::GetRecoveryWitnessRequest request,
     rpc::GetRecoveryWitnessReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
-
-  if (!request.claim_recovery()) {
-    {
-      absl::MutexLock lock(&recovery_witness_mutex_);
-
-      const auto manifest_it =
-          recovery_witness_manifests_.find(task_id);
-
-      if (manifest_it == recovery_witness_manifests_.end()) {
-        reply->set_found(false);
-      } else {
-        reply->set_found(true);
-        reply->mutable_manifest()->CopyFrom(
-            manifest_it->second);
-
-        reply->set_claim_result(
-            rpc::GetRecoveryWitnessReply::CLAIM_NOT_REQUESTED);
-      }
-    }
-
-    send_reply_callback(Status::OK(), nullptr, nullptr);
-    return;
-  }
-
+  // Recovery succession must be enabled, and the task ID must be valid.
   if (!RayConfig::instance().enable_recovery_succession() ||
       request.task_id().size() != TaskID::Size()) {
     reply->set_found(false);
@@ -479,16 +456,74 @@ void NodeManager::HandleGetRecoveryWitness(
   const TaskID task_id =
       TaskID::FromBinary(request.task_id());
 
+  // --------------------------------------------------------------------------
+  // Existing recovery-succession compact-witness lookup.
+  //
+  // claim_recovery defaults to false, so the normal recovery-succession
+  // implementation follows this path exactly. No baseline claim state is read
+  // or modified here.
+  // --------------------------------------------------------------------------
+  if (!request.claim_recovery()) {
+    {
+      absl::MutexLock lock(&recovery_witness_mutex_);
+
+      const auto manifest_it =
+          recovery_witness_manifests_.find(task_id);
+
+      if (manifest_it ==
+          recovery_witness_manifests_.end()) {
+        reply->set_found(false);
+      } else {
+        reply->set_found(true);
+
+        reply->mutable_manifest()->CopyFrom(
+            manifest_it->second);
+
+        reply->set_claim_result(
+            rpc::GetRecoveryWitnessReply::
+                CLAIM_NOT_REQUESTED);
+      }
+    }
+
+    send_reply_callback(
+        Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  // --------------------------------------------------------------------------
+  // Everything below this point is baseline-specific.
+  // --------------------------------------------------------------------------
   const bool baseline_enabled =
       RayConfig::instance().enable_recovery_succession() &&
       RayConfig::instance()
           .enable_recovery_witness_holder_baseline();
 
+  // A recovery claim must never be accepted when the baseline is disabled.
+  if (!baseline_enabled ||
+      !request.has_claimant_address() ||
+      request.claimant_address()
+              .worker_id()
+              .size() != WorkerID::Size() ||
+      request.claimant_address()
+              .node_id()
+              .size() != NodeID::Size()) {
+    reply->set_found(false);
+    reply->set_claim_result(
+        rpc::GetRecoveryWitnessReply::
+            CLAIM_INVALID);
+
+    send_reply_callback(
+        Status::OK(), nullptr, nullptr);
+    return;
+  }
+
   const auto same_worker =
       [](const rpc::Address &left,
          const rpc::Address &right) {
-        return left.worker_id() == right.worker_id() &&
-               left.node_id() == right.node_id();
+        return left.worker_id() ==
+                   right.worker_id() &&
+               left.node_id() ==
+                   right.node_id();
       };
 
   {
@@ -500,165 +535,135 @@ void NodeManager::HandleGetRecoveryWitness(
     if (manifest_it ==
         recovery_witness_manifests_.end()) {
       reply->set_found(false);
-      send_reply_callback(
-          Status::OK(), nullptr, nullptr);
-      return;
-    }
+    } else {
+      reply->set_found(true);
 
-    reply->set_found(true);
-
-    rpc::RecoveryManifest &stored_manifest =
-        manifest_it->second;
-
-    reply->mutable_manifest()->CopyFrom(
-        stored_manifest);
-
-    // Normal compact-witness lookup.
-    if (!request.claim_recovery()) {
-      reply->set_claim_result(
-          rpc::GetRecoveryWitnessReply::
-              CLAIM_NOT_REQUESTED);
-
-      if (baseline_enabled) {
-        const auto task_spec_it =
-            recovery_witness_task_specs_.find(task_id);
-
-        if (task_spec_it !=
-            recovery_witness_task_specs_.end()) {
-          reply->mutable_task_spec()->CopyFrom(
-              task_spec_it->second);
-        }
-      }
-
-      send_reply_callback(
-          Status::OK(), nullptr, nullptr);
-      return;
-    }
-
-    // Claims are valid only for the baseline.
-    if (!baseline_enabled ||
-        !request.has_claimant_address() ||
-        request.claimant_address()
-                .worker_id()
-                .size() != WorkerID::Size() ||
-        request.claimant_address()
-                .node_id()
-                .size() != NodeID::Size()) {
-      reply->set_claim_result(
-          rpc::GetRecoveryWitnessReply::
-              CLAIM_INVALID);
-
-      send_reply_callback(
-          Status::OK(), nullptr, nullptr);
-      return;
-    }
-
-    if (stored_manifest.tombstoned()) {
-      reply->set_claim_result(
-          rpc::GetRecoveryWitnessReply::
-              CLAIM_TOMBSTONED);
-
-      send_reply_callback(
-          Status::OK(), nullptr, nullptr);
-      return;
-    }
-
-    auto task_spec_it =
-        recovery_witness_task_specs_.find(task_id);
-
-    if (task_spec_it ==
-        recovery_witness_task_specs_.end()) {
-      reply->set_claim_result(
-          rpc::GetRecoveryWitnessReply::
-              CLAIM_INVALID);
-
-      send_reply_callback(
-          Status::OK(), nullptr, nullptr);
-      return;
-    }
-
-    // A replay has already been claimed.
-    auto claim_it =
-        recovery_witness_claims_.find(task_id);
-
-    if (claim_it !=
-        recovery_witness_claims_.end()) {
-      reply->mutable_acting_owner()->CopyFrom(
-          claim_it->second.acting_owner);
-
-      // Idempotent retry by the same claimant.
-      if (same_worker(
-              claim_it->second.acting_owner,
-              request.claimant_address())) {
-        reply->set_claim_result(
-            rpc::GetRecoveryWitnessReply::
-                CLAIM_GRANTED);
-
-        reply->mutable_task_spec()->CopyFrom(
-            task_spec_it->second);
-      } else {
-        // Another borrower already owns replay responsibility.
-        reply->set_claim_result(
-            rpc::GetRecoveryWitnessReply::
-                CLAIM_ALREADY_GRANTED);
-      }
+      rpc::RecoveryManifest &stored_manifest =
+          manifest_it->second;
 
       reply->mutable_manifest()->CopyFrom(
           stored_manifest);
 
-      send_reply_callback(
-          Status::OK(), nullptr, nullptr);
-      return;
+      // A tombstoned task must never be replayed.
+      if (stored_manifest.tombstoned()) {
+        reply->set_claim_result(
+            rpc::GetRecoveryWitnessReply::
+                CLAIM_TOMBSTONED);
+      } else {
+        auto task_spec_it =
+            recovery_witness_task_specs_.find(
+                task_id);
+
+        if (task_spec_it ==
+            recovery_witness_task_specs_.end()) {
+          // This witness does not contain the complete lineage
+          // required by the baseline.
+          reply->set_claim_result(
+              rpc::GetRecoveryWitnessReply::
+                  CLAIM_INVALID);
+        } else {
+          auto claim_it =
+              recovery_witness_claims_.find(
+                  task_id);
+
+          if (claim_it !=
+              recovery_witness_claims_.end()) {
+            // --------------------------------------------------------------
+            // Recovery has already been claimed at this witness.
+            // --------------------------------------------------------------
+            reply->mutable_acting_owner()->CopyFrom(
+                claim_it->second.acting_owner);
+
+            if (same_worker(
+                    claim_it->second.acting_owner,
+                    request.claimant_address())) {
+              // Idempotent retry from the worker that already owns
+              // the recovery claim.
+              reply->set_claim_result(
+                  rpc::GetRecoveryWitnessReply::
+                      CLAIM_GRANTED);
+
+              reply->mutable_task_spec()->CopyFrom(
+                  task_spec_it->second);
+            } else {
+              // A different worker already owns replay responsibility.
+              reply->set_claim_result(
+                  rpc::GetRecoveryWitnessReply::
+                      CLAIM_ALREADY_GRANTED);
+            }
+
+            reply->mutable_manifest()->CopyFrom(
+                stored_manifest);
+          } else {
+            // --------------------------------------------------------------
+            // No existing claim. Check the recovery-attempt limit before
+            // atomically granting a new claim.
+            // --------------------------------------------------------------
+            const int32_t max_recovery_attempts =
+                stored_manifest
+                    .max_recovery_attempts();
+
+            if (max_recovery_attempts >= 0 &&
+                stored_manifest
+                        .recovery_attempt() >=
+                    static_cast<uint32_t>(
+                        max_recovery_attempts)) {
+              reply->set_claim_result(
+                  rpc::GetRecoveryWitnessReply::
+                      CLAIM_RETRY_LIMIT_EXCEEDED);
+            } else {
+              // ------------------------------------------------------------
+              // Grant the claim.
+              //
+              // recovery_witness_mutex_ protects both the recovery-attempt
+              // increment and claim creation, making these operations atomic
+              // with respect to concurrent borrowers contacting this witness.
+              // ------------------------------------------------------------
+              stored_manifest.set_recovery_attempt(
+                  stored_manifest
+                      .recovery_attempt() +
+                  1);
+
+              // Keep the retained full TaskSpec synchronized with the
+              // authoritative manifest stored at this witness.
+              task_spec_it->second
+                  .mutable_recovery_manifest()
+                  ->CopyFrom(stored_manifest);
+
+              RecoveryWitnessClaimState
+                  claim_state;
+
+              claim_state.acting_owner.CopyFrom(
+                  request.claimant_address());
+
+              claim_state.recovery_attempt =
+                  stored_manifest
+                      .recovery_attempt();
+
+              recovery_witness_claims_[task_id] =
+                  std::move(claim_state);
+
+              reply->set_claim_result(
+                  rpc::GetRecoveryWitnessReply::
+                      CLAIM_GRANTED);
+
+              reply->mutable_acting_owner()
+                  ->CopyFrom(
+                      request
+                          .claimant_address());
+
+              reply->mutable_manifest()
+                  ->CopyFrom(
+                      stored_manifest);
+
+              reply->mutable_task_spec()
+                  ->CopyFrom(
+                      task_spec_it->second);
+            }
+          }
+        }
+      }
     }
-
-    const int32_t max_recovery_attempts =
-        stored_manifest.max_recovery_attempts();
-
-    if (max_recovery_attempts >= 0 &&
-        stored_manifest.recovery_attempt() >=
-            static_cast<uint32_t>(
-                max_recovery_attempts)) {
-      reply->set_claim_result(
-          rpc::GetRecoveryWitnessReply::
-              CLAIM_RETRY_LIMIT_EXCEEDED);
-
-      send_reply_callback(
-          Status::OK(), nullptr, nullptr);
-      return;
-    }
-
-    // This block is protected by recovery_witness_mutex_, so
-    // claim creation and recovery_attempt increment are atomic.
-    stored_manifest.set_recovery_attempt(
-        stored_manifest.recovery_attempt() + 1);
-
-    task_spec_it->second
-        .mutable_recovery_manifest()
-        ->CopyFrom(stored_manifest);
-
-    RecoveryWitnessClaimState claim_state;
-
-    claim_state.acting_owner.CopyFrom(
-        request.claimant_address());
-
-    claim_state.recovery_attempt =
-        stored_manifest.recovery_attempt();
-
-    recovery_witness_claims_[task_id] =
-        std::move(claim_state);
-
-    reply->set_claim_result(
-        rpc::GetRecoveryWitnessReply::
-            CLAIM_GRANTED);
-
-    reply->mutable_acting_owner()->CopyFrom(
-        request.claimant_address());
-
-    reply->mutable_manifest()->CopyFrom(
-        stored_manifest);
-
-    reply->mutable_task_spec()->CopyFrom(
-        task_spec_it->second);
   }
 
   send_reply_callback(
