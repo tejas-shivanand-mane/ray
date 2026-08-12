@@ -200,6 +200,12 @@ RAY_CONFIG(int64_t, max_lineage_bytes, 1024 * 1024 * 1024)
 /// When false, Ray uses the official owner-based recovery behavior unchanged.
 RAY_CONFIG(bool, enable_recovery_succession, false)
 
+/// When true, use the witness-as-holder baseline instead of the
+/// dynamic recovery-succession holder formation algorithm.
+///
+/// This flag has an effect only when enable_recovery_succession=true.
+RAY_CONFIG(bool, enable_recovery_witness_holder_baseline, false)
+
 RAY_CONFIG(uint32_t, recovery_succession_target_holder_count, 2)
 
 /// Number of node-distinct raylets that retain the latest compact recovery

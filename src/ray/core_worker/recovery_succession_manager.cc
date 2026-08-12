@@ -663,6 +663,12 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
     const rpc::RecoveryManifest &manifest,
     bool already_stores_task_spec,
     std::vector<CandidateReport> *reports) {
+
+  if (RayConfig::instance().enable_recovery_succession() &&
+      RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    return;
+  }
+
   if (reports == nullptr || manifest.task_id().empty()) {
     return;
   }

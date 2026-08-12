@@ -2098,6 +2098,11 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// Distributed recovery succession state. Null when the feature is disabled.
   std::shared_ptr<RecoverySuccessionManager> recovery_succession_manager_;
 
+  /// Selects the witness-as-holder baseline implementation.
+  ///
+  /// This can be true only when recovery succession itself is enabled.
+  const bool recovery_witness_holder_baseline_enabled_;
+
   absl::flat_hash_set<TaskID> recovery_tombstones_in_flight_;
 
   /// Manages recovery of objects stored in remote plasma nodes.

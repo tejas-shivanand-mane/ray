@@ -407,7 +407,11 @@ CoreWorker::CoreWorker(
       object_info_subscriber_(std::move(object_info_subscriber)),
       lease_request_rate_limiter_(std::move(lease_request_rate_limiter)),
       normal_task_submitter_(std::move(normal_task_submitter)),
-      recovery_succession_enabled_(RayConfig::instance().enable_recovery_succession()),
+      recovery_succession_enabled_(
+          RayConfig::instance().enable_recovery_succession()),
+      recovery_witness_holder_baseline_enabled_(
+          recovery_succession_enabled_ &&
+          RayConfig::instance().enable_recovery_witness_holder_baseline()),
       recovery_succession_manager_(nullptr),
       object_recovery_manager_(std::move(object_recovery_manager)),
       actor_manager_(std::move(actor_manager)),
@@ -4530,6 +4534,7 @@ void CoreWorker::HandleReportRecoveryCandidate(
     rpc::ReportRecoveryCandidateReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
   if (!recovery_succession_enabled_ ||
+      recovery_witness_holder_baseline_enabled_ ||
       recovery_succession_manager_ == nullptr) {
     reply->set_result(
         rpc::ReportRecoveryCandidateReply::DISABLED);
@@ -4687,7 +4692,9 @@ void CoreWorker::HandleInstallRecoveryHolder(rpc::InstallRecoveryHolderRequest r
                                              rpc::SendReplyCallback send_reply_callback) {
   reply->set_reservation_id(request.reservation_id());
 
-  if (!recovery_succession_enabled_ || recovery_succession_manager_ == nullptr) {
+  if (!recovery_succession_enabled_ ||
+    recovery_witness_holder_baseline_enabled_ ||
+    recovery_succession_manager_ == nullptr) {
     reply->set_stored(false);
 
     send_reply_callback(Status::OK(), nullptr, nullptr);
@@ -4985,6 +4992,16 @@ void CoreWorker::RecoverBorrowedObject(const ObjectID &object_id,
     callback(false);
     return;
   }
+
+  // The witness-as-holder baseline has its own recovery path.
+  // Patch 1 only isolates the modes; baseline recovery is added later.
+  if (recovery_succession_enabled_ &&
+      recovery_witness_holder_baseline_enabled_) {
+    callback(false);
+    return;
+  }
+
+
 
   // Try the cached fixed manifest first. Witnesses are only
   // consulted if every cached entry is exhausted.
