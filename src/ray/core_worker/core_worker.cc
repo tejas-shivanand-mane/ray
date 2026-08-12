@@ -4841,6 +4841,30 @@ void CoreWorker::FinishRecoveryHolderAdmission(
           return;
         }
 
+        // TEST ONLY.
+        //
+        // At this point a real witness ACK has already made
+        // proposed_manifest discoverable during recovery, while a newly
+        // installed candidate is still provisional
+        // (manifest_committed == false). Inject a failure here so the
+        // correctness benchmark can deterministically kill the owner in the
+        // exact post-witness / pre-candidate-commit window.
+        if (candidate_needs_commit_rpc &&
+            RayConfig::instance()
+                .recovery_succession_test_fail_after_witness_ack()) {
+          RAY_LOG(WARNING).WithField(task_id)
+              << "TEST ONLY: injected recovery succession failure after "
+                 "witness ACK before candidate commit";
+
+          send_reply_callback(
+              Status::IOError(
+                  "Injected recovery succession failure after witness ACK "
+                  "before candidate commit"),
+              nullptr,
+              nullptr);
+          return;
+        }
+
         rpc::RecoveryManifest committed_manifest;
 
         if (!manager->CommitHolderAdmission(

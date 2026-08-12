@@ -221,6 +221,16 @@ RAY_CONFIG(uint32_t, recovery_succession_witness_count, 2)
 /// protobuf-size measurements are performed.
 RAY_CONFIG(bool, enable_recovery_succession_profiling, false)
 
+/// TEST ONLY: deterministically expose the crash window after a compact
+/// witness has acknowledged the proposed holder manifest but before the
+/// candidate has received/applied CommitRecoveryManifest.
+///
+/// When enabled, FinishRecoveryHolderAdmission returns an injected RPC error
+/// immediately after successful witness publication, before owner-side
+/// CommitHolderAdmission and before the candidate commit RPC. The benchmark
+/// then hard-kills the owner node. Default false; never enable in production.
+RAY_CONFIG(bool, recovery_succession_test_fail_after_witness_ack, false)
+
 
 /// Whether to re-populate plasma memory. This avoids memory allocation failures
 /// at runtime (SIGBUS errors creating new objects), however it will use more memory
