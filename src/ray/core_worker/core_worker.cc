@@ -6548,45 +6548,75 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
 
     witness_client->UpdateRecoveryWitness(
-        std::move(request),
-        [state, witness_count, callback](
-            const Status &status, rpc::UpdateRecoveryWitnessReply &&reply) mutable {
-          bool report_success = false;
-          bool report_failure = false;
+    std::move(request),
+    [state, witness_count, require_all_witnesses, callback](
+        const Status &status,
+        rpc::UpdateRecoveryWitnessReply &&reply) mutable {
+      bool report_success = false;
+      bool report_failure = false;
 
-          std::optional<rpc::RecoveryManifest> newest_manifest;
+      std::optional<rpc::RecoveryManifest> newest_manifest;
 
-          {
-            absl::MutexLock lock(&state->mutex);
+      {
+        absl::MutexLock lock(&state->mutex);
 
-            ++state->completed;
+        ++state->completed;
 
-            if (reply.has_latest_manifest()) {
-              if (!state->newest_manifest.has_value() ||
-                  CompareRecoveryManifestVersions(reply.latest_manifest(),
-                                                  state->newest_manifest.value()) > 0) {
-                state->newest_manifest = reply.latest_manifest();
+        const bool this_witness_stored =
+            status.ok() && reply.stored();
+
+        if (this_witness_stored) {
+          ++state->stored_count;
+        }
+
+        if (reply.has_latest_manifest()) {
+          if (!state->newest_manifest.has_value() ||
+              CompareRecoveryManifestVersions(
+                  reply.latest_manifest(),
+                  state->newest_manifest.value()) > 0) {
+            state->newest_manifest =
+                reply.latest_manifest();
+          }
+        }
+
+        if (!state->callback_sent) {
+          if (require_all_witnesses) {
+            // Witness-as-holder baseline:
+            // wait until every selected witness has replied.
+            if (state->completed == witness_count) {
+              state->callback_sent = true;
+
+              if (state->stored_count == witness_count) {
+                report_success = true;
+              } else {
+                newest_manifest = state->newest_manifest;
+                report_failure = true;
               }
             }
-
-            // One witness acknowledgement is enough for the
-            // lightweight advertised-confirmation rule.
-            if (!state->callback_sent && status.ok() && reply.stored()) {
+          } else {
+            // Existing recovery succession:
+            // one compact-witness acknowledgement is sufficient.
+            if (this_witness_stored) {
               state->callback_sent = true;
               report_success = true;
-            } else if (!state->callback_sent && state->completed == witness_count) {
+            } else if (state->completed == witness_count) {
               state->callback_sent = true;
               newest_manifest = state->newest_manifest;
               report_failure = true;
             }
           }
+        }
+      }
 
-          if (report_success) {
-            callback(true, std::nullopt);
-          } else if (report_failure) {
-            callback(false, std::move(newest_manifest));
-          }
-        });
+      if (report_success) {
+        callback(true, std::nullopt);
+      } else if (report_failure) {
+        callback(false, std::move(newest_manifest));
+      }
+    });
+
+
+    
   }
 }
 
