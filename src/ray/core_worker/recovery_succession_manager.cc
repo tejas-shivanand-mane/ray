@@ -1281,4 +1281,91 @@ void RecoverySuccessionManager::RecordHolderAdmissionLatency(
   }
 }
 
+
+void RecoverySuccessionManager::RecordTaskArgumentMetadataLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  ++profile_.task_argument_metadata_calls;
+  profile_.task_argument_metadata_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordInitialManifestBuild(
+    uint64_t latency_ns,
+    uint64_t manifest_bytes) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  ++profile_.initial_manifest_build_count;
+  profile_.initial_manifest_build_time_ns += latency_ns;
+  profile_.initial_manifest_bytes += manifest_bytes;
+}
+
+void RecoverySuccessionManager::RecordWitnessSelectionLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  ++profile_.witness_selection_count;
+  profile_.witness_selection_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordWitnessGcsQueryLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  ++profile_.witness_gcs_query_count;
+  profile_.witness_gcs_query_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordTaskSpecManifestAttachLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  ++profile_.task_spec_manifest_attach_count;
+  profile_.task_spec_manifest_attach_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordRegisterOwnedTaskLatency(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  ++profile_.register_owned_task_count;
+  profile_.register_owned_task_time_ns += latency_ns;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 }  // namespace ray::core

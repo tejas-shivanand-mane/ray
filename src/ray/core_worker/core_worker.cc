@@ -1158,6 +1158,46 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
   result["frozen_commits"] =
       profile.frozen_commits;
 
+
+
+
+
+  result["task_argument_metadata_calls"] =
+      profile.task_argument_metadata_calls;
+  result["task_argument_metadata_time_ns"] =
+      profile.task_argument_metadata_time_ns;
+
+  result["initial_manifest_build_count"] =
+      profile.initial_manifest_build_count;
+  result["initial_manifest_build_time_ns"] =
+      profile.initial_manifest_build_time_ns;
+  result["initial_manifest_bytes"] =
+      profile.initial_manifest_bytes;
+
+  result["witness_selection_count"] =
+      profile.witness_selection_count;
+  result["witness_selection_time_ns"] =
+      profile.witness_selection_time_ns;
+
+  result["witness_gcs_query_count"] =
+      profile.witness_gcs_query_count;
+  result["witness_gcs_query_time_ns"] =
+      profile.witness_gcs_query_time_ns;
+
+  result["task_spec_manifest_attach_count"] =
+      profile.task_spec_manifest_attach_count;
+  result["task_spec_manifest_attach_time_ns"] =
+      profile.task_spec_manifest_attach_time_ns;
+
+  result["register_owned_task_count"] =
+      profile.register_owned_task_count;
+  result["register_owned_task_time_ns"] =
+      profile.register_owned_task_time_ns;
+
+
+
+
+
   return result.dump();
 }
 
@@ -2543,9 +2583,23 @@ void CoreWorker::BuildCommonTaskSpec(
     builder.AddArg(*arg);
   }
 
-  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
-    recovery_succession_manager_->PopulateTaskArgumentMetadata(builder.MutableMessage());
+  if (recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr) {
+    if (recovery_succession_profiling_enabled_) {
+      const uint64_t start_ns = RecoveryProfileNowNs();
+
+      recovery_succession_manager_->PopulateTaskArgumentMetadata(
+          builder.MutableMessage());
+
+      recovery_succession_manager_
+          ->RecordTaskArgumentMetadataLatency(
+              RecoveryProfileNowNs() - start_ns);
+    } else {
+      recovery_succession_manager_->PopulateTaskArgumentMetadata(
+          builder.MutableMessage());
+    }
   }
+
 }
 
 void CoreWorker::PrestartWorkers(const std::string &serialized_runtime_env_info,
@@ -2634,14 +2688,55 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             scheduling_strategy,
                             root_detached_actor_id);
 
-  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr &&
-      RecoverySuccessionManager::IsEligibleTask(builder.GetMessage())) {
-    rpc::RecoveryManifest manifest = recovery_succession_manager_->BuildInitialManifest(
-        task_id, worker_context_->GetCurrentJobID(), max_retries);
+  if (recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
+      RecoverySuccessionManager::IsEligibleTask(
+          builder.GetMessage())) {
+
+    uint64_t manifest_start_ns = 0;
+
+    if (recovery_succession_profiling_enabled_) {
+      manifest_start_ns = RecoveryProfileNowNs();
+    }
+
+    rpc::RecoveryManifest manifest =
+        recovery_succession_manager_->BuildInitialManifest(
+            task_id,
+            worker_context_->GetCurrentJobID(),
+            max_retries);
+
+    if (manifest_start_ns != 0) {
+      recovery_succession_manager_->RecordInitialManifestBuild(
+          RecoveryProfileNowNs() - manifest_start_ns,
+          static_cast<uint64_t>(manifest.ByteSizeLong()));
+    }
+
+    uint64_t witness_start_ns = 0;
+
+    if (recovery_succession_profiling_enabled_) {
+      witness_start_ns = RecoveryProfileNowNs();
+    }
 
     PopulateRecoveryWitnesses(&manifest);
 
+    if (witness_start_ns != 0) {
+      recovery_succession_manager_->RecordWitnessSelectionLatency(
+          RecoveryProfileNowNs() - witness_start_ns);
+    }
+
+    uint64_t attach_start_ns = 0;
+
+    if (recovery_succession_profiling_enabled_) {
+      attach_start_ns = RecoveryProfileNowNs();
+    }
+
     builder.SetRecoveryManifest(manifest);
+
+    if (attach_start_ns != 0) {
+      recovery_succession_manager_
+          ->RecordTaskSpecManifestAttachLatency(
+              RecoveryProfileNowNs() - attach_start_ns);
+    }
   }
 
   TaskSpecification task_spec = std::move(builder).ConsumeAndBuild();
@@ -2650,9 +2745,24 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   returned_refs = task_manager_->AddPendingTask(
       task_spec.CallerAddress(), task_spec, CurrentCallSite(), max_retries);
 
-  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr &&
+  if (recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
       task_spec.GetMessage().has_recovery_manifest()) {
-    recovery_succession_manager_->RegisterOwnedTask(task_spec, &returned_refs);
+
+    if (recovery_succession_profiling_enabled_) {
+      const uint64_t start_ns = RecoveryProfileNowNs();
+
+      recovery_succession_manager_->RegisterOwnedTask(
+          task_spec,
+          &returned_refs);
+
+      recovery_succession_manager_->RecordRegisterOwnedTaskLatency(
+          RecoveryProfileNowNs() - start_ns);
+    } else {
+      recovery_succession_manager_->RegisterOwnedTask(
+          task_spec,
+          &returned_refs);
+    }
   }
 
   if (recovery_succession_enabled_ &&
@@ -6918,8 +7028,21 @@ std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
     return {};
   }
 
+    uint64_t gcs_query_start_ns = 0;
+
+  if (recovery_succession_profiling_enabled_ &&
+      recovery_succession_manager_ != nullptr) {
+    gcs_query_start_ns = RecoveryProfileNowNs();
+  }
+
   auto nodes_result = gcs_client_->Nodes().GetAllNoCache(
-      /*timeout_ms=*/5000, rpc::GcsNodeInfo::ALIVE);
+      /*timeout_ms=*/5000,
+      rpc::GcsNodeInfo::ALIVE);
+
+  if (gcs_query_start_ns != 0) {
+    recovery_succession_manager_->RecordWitnessGcsQueryLatency(
+        RecoveryProfileNowNs() - gcs_query_start_ns);
+  }
 
   if (!nodes_result.ok()) {
     RAY_LOG(WARNING).WithField(task_id)

@@ -90,6 +90,29 @@ class RecoverySuccessionManager {
     uint64_t max_generation = 0;
     uint64_t max_non_owner_holders = 0;
     uint64_t frozen_commits = 0;
+
+    // Recovery work performed before any downstream holder admission.
+    uint64_t task_argument_metadata_calls = 0;
+    uint64_t task_argument_metadata_time_ns = 0;
+
+    uint64_t initial_manifest_build_count = 0;
+    uint64_t initial_manifest_build_time_ns = 0;
+    uint64_t initial_manifest_bytes = 0;
+
+    uint64_t witness_selection_count = 0;
+    uint64_t witness_selection_time_ns = 0;
+
+    uint64_t witness_gcs_query_count = 0;
+    uint64_t witness_gcs_query_time_ns = 0;
+
+    uint64_t task_spec_manifest_attach_count = 0;
+    uint64_t task_spec_manifest_attach_time_ns = 0;
+
+    uint64_t register_owned_task_count = 0;
+    uint64_t register_owned_task_time_ns = 0;
+
+
+
   };
 
 
@@ -120,7 +143,19 @@ class RecoverySuccessionManager {
   void RecordHolderAdmissionLatency(uint64_t latency_ns);
 
 
+  void RecordTaskArgumentMetadataLatency(uint64_t latency_ns);
 
+  void RecordInitialManifestBuild(
+      uint64_t latency_ns,
+      uint64_t manifest_bytes);
+
+  void RecordWitnessSelectionLatency(uint64_t latency_ns);
+
+  void RecordWitnessGcsQueryLatency(uint64_t latency_ns);
+
+  void RecordTaskSpecManifestAttachLatency(uint64_t latency_ns);
+
+  void RecordRegisterOwnedTaskLatency(uint64_t latency_ns);
 
 
 
