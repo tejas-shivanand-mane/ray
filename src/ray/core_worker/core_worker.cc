@@ -4895,55 +4895,13 @@ void CoreWorker::FinishRecoveryHolderAdmission(
             << committed_manifest.succession_size()
             << " total members";
 
-        // Only a candidate that received InstallRecoveryHolder needs an
-        // explicit commit RPC. Existing holders do not need every newer
-        // generation during the normal execution path.
-        if (candidate_needs_commit_rpc) {
-          rpc::CommitRecoveryManifestRequest commit_request;
-          commit_request.mutable_manifest()->CopyFrom(
-              committed_manifest);
-
-          auto candidate_client =
-              core_worker_client_pool_->GetOrConnect(
-                  candidate_address);
-
-
-          uint64_t commit_start_ns = 0;
-
-          if (recovery_succession_profiling_enabled_) {
-            manager->RecordHolderCommitRpcSent(
-                static_cast<uint64_t>(
-                    committed_manifest.ByteSizeLong()));
-
-            commit_start_ns = RecoveryProfileNowNs();
-          }
-
-
-
-          candidate_client->CommitRecoveryManifest(
-              std::move(commit_request),
-              [manager, task_id, commit_start_ns](
-                  const Status &commit_status,
-                  rpc::CommitRecoveryManifestReply &&commit_reply) {
-
-
-                if (commit_start_ns != 0) {
-                  manager->RecordHolderCommitRpcLatency(
-                      RecoveryProfileNowNs() -
-                      commit_start_ns);
-                }
-
-
-                static_cast<void>(commit_reply);
-
-                if (!commit_status.ok()) {
-                  RAY_LOG(WARNING).WithField(task_id)
-                      << "Failed to commit recovery manifest "
-                      << "to newly admitted holder: "
-                      << commit_status;
-                }
-              });
-        }
+        // Patch 4B-2: do not send an explicit CommitRecoveryManifest RPC.
+        //
+        // The normal ReportRecoveryCandidate reply already carries the
+        // committed manifest, and the candidate applies that manifest in its
+        // report callback. If the reply is lost after witness publication, the
+        // holder remains provisional and can independently confirm the
+        // witnessed manifest during recovery.
 
         send_reply_callback(Status::OK(), nullptr, nullptr);
         

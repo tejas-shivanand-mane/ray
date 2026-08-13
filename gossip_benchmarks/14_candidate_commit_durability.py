@@ -21,7 +21,7 @@ Cases
 -----
 1. fully_committed_control
    Fault injection disabled.
-   H1 is fully committed before owner failure.
+   H1 is fully committed by the owner before owner failure.
    Expected: recovery succeeds.
 
 2. after_witness_before_candidate_commit
@@ -401,10 +401,9 @@ def run_one(
         else:
             profile = wait_for_profile(
                 owner,
-                lambda p: (
-                    int(p.get("holder_admissions_committed", 0)) >= 1
-                    and int(p.get("holder_commit_rpcs_completed", 0)) >= 1
-                ),
+                lambda p: int(
+                    p.get("holder_admissions_committed", 0)
+                ) >= 1,
                 args.admission_timeout_seconds,
                 "fully committed H1",
             )
