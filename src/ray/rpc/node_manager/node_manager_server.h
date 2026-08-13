@@ -69,6 +69,7 @@ class ServerCallFactory;
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(CancelLocalTask)                \
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(FreeLocalObjects)               \
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(UpdateRecoveryWitness)          \
+    RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(UpdateRecoveryWitnessBatch)     \
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(GetRecoveryWitness)
 
 /// Interface of the `NodeManagerService`, see `src/ray/protobuf/node_manager.proto`.
@@ -218,6 +219,11 @@ class NodeManagerServiceHandler {
     virtual void HandleUpdateRecoveryWitness(
         UpdateRecoveryWitnessRequest request,
         UpdateRecoveryWitnessReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
+    virtual void HandleUpdateRecoveryWitnessBatch(
+        UpdateRecoveryWitnessBatchRequest request,
+        UpdateRecoveryWitnessBatchReply *reply,
         SendReplyCallback send_reply_callback) = 0;
 
     virtual void HandleGetRecoveryWitness(
