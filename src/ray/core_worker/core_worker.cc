@@ -1320,6 +1320,132 @@ Status CoreWorker::GetOwnerAddress(const ObjectID &object_id,
   return Status::OK();
 }
 
+
+bool CoreWorker::TryPopulateRecoveryMetadataForObject(
+    const ObjectID &object_id,
+    rpc::RecoveryObjectMetadata *metadata) const {
+  if (metadata == nullptr || !recovery_succession_enabled_ ||
+      recovery_succession_manager_ == nullptr) {
+    return false;
+  }
+
+  // Fast path after the first export/borrow.
+  if (recovery_succession_manager_->PopulateRecoveryMetadata(
+          object_id, metadata)) {
+    return true;
+  }
+
+  // Preserve witness-as-holder baseline semantics exactly.
+  if (recovery_witness_holder_baseline_enabled_) {
+    return false;
+  }
+
+  const TaskID task_id = object_id.TaskId();
+  auto task_spec_opt = task_manager_->GetTaskSpec(task_id);
+  if (!task_spec_opt.has_value()) {
+    return false;
+  }
+
+  const TaskSpecification &task_spec = task_spec_opt.value();
+  const rpc::TaskSpec &task_proto = task_spec.GetMessage();
+
+  if (!RecoverySuccessionManager::IsEligibleTask(task_proto) ||
+      task_proto.task_id().empty()) {
+    return false;
+  }
+
+  // Protect only static task returns, never ray.put() objects or actor handles.
+  bool is_static_return = false;
+  for (size_t return_index = 0; return_index < task_spec.NumReturns();
+       ++return_index) {
+    if (task_spec.ReturnId(return_index) == object_id) {
+      is_static_return = true;
+      break;
+    }
+  }
+
+  if (!is_static_return) {
+    return false;
+  }
+
+  uint64_t manifest_start_ns = 0;
+  if (recovery_succession_profiling_enabled_) {
+    manifest_start_ns = RecoveryProfileNowNs();
+  }
+
+  rpc::RecoveryManifest manifest =
+      recovery_succession_manager_->BuildInitialManifest(
+          task_id, task_spec.JobId(), task_proto.max_retries());
+
+  if (manifest_start_ns != 0) {
+    recovery_succession_manager_->RecordInitialManifestBuild(
+        RecoveryProfileNowNs() - manifest_start_ns,
+        static_cast<uint64_t>(manifest.ByteSizeLong()));
+  }
+
+  uint64_t witness_start_ns = 0;
+  if (recovery_succession_profiling_enabled_) {
+    witness_start_ns = RecoveryProfileNowNs();
+  }
+
+  PopulateRecoveryWitnesses(&manifest);
+
+  if (witness_start_ns != 0) {
+    recovery_succession_manager_->RecordWitnessSelectionLatency(
+        RecoveryProfileNowNs() - witness_start_ns);
+  }
+
+  uint64_t register_start_ns = 0;
+  if (recovery_succession_profiling_enabled_) {
+    register_start_ns = RecoveryProfileNowNs();
+  }
+
+  const bool initialized_now =
+      recovery_succession_manager_->RegisterOwnedTaskLazy(task_spec, manifest);
+
+  if (register_start_ns != 0 && initialized_now) {
+    recovery_succession_manager_->RecordRegisterOwnedTaskLatency(
+        RecoveryProfileNowNs() - register_start_ns);
+  }
+
+  // If another thread won the initialization race, its metadata is visible
+  // here once RegisterOwnedTaskLazy returns.
+  return recovery_succession_manager_->PopulateRecoveryMetadata(
+      object_id, metadata);
+}
+
+void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
+    rpc::TaskSpec *task_spec) const {
+  if (task_spec == nullptr || !recovery_succession_enabled_ ||
+      recovery_succession_manager_ == nullptr ||
+      recovery_witness_holder_baseline_enabled_) {
+    return;
+  }
+
+  rpc::RecoveryObjectMetadata ignored_metadata;
+
+  for (const rpc::TaskArg &arg : task_spec->args()) {
+    if (arg.has_object_ref() && !arg.object_ref().object_id().empty()) {
+      const ObjectID object_id =
+          ObjectID::FromBinary(arg.object_ref().object_id());
+      ignored_metadata.Clear();
+      TryPopulateRecoveryMetadataForObject(object_id, &ignored_metadata);
+    }
+
+    for (const rpc::ObjectReference &nested_ref :
+         arg.nested_inlined_refs()) {
+      if (nested_ref.object_id().empty()) {
+        continue;
+      }
+
+      const ObjectID nested_id =
+          ObjectID::FromBinary(nested_ref.object_id());
+      ignored_metadata.Clear();
+      TryPopulateRecoveryMetadataForObject(nested_id, &ignored_metadata);
+    }
+  }
+}
+
 std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
     const std::vector<ObjectID> &object_ids) const {
   std::vector<rpc::ObjectReference> refs;
@@ -1339,7 +1465,7 @@ std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
     if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
       rpc::RecoveryObjectMetadata metadata;
 
-      if (recovery_succession_manager_->PopulateRecoveryMetadata(object_id, &metadata)) {
+      if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
         ref.mutable_recovery_metadata()->CopyFrom(metadata);
       }
     }
@@ -1381,7 +1507,7 @@ Status CoreWorker::GetOwnershipInfo(const ObjectID &object_id,
   if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
     rpc::RecoveryObjectMetadata metadata;
 
-    if (recovery_succession_manager_->PopulateRecoveryMetadata(object_id, &metadata)) {
+    if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
       object_status.mutable_recovery_metadata()->CopyFrom(metadata);
     }
   }
@@ -2660,7 +2786,10 @@ void CoreWorker::BuildCommonTaskSpec(
   }
 
   if (recovery_succession_enabled_ &&
-      recovery_succession_manager_ != nullptr) {
+      recovery_succession_manager_ != nullptr &&
+      !args.empty()) {
+    EnsureRecoverySuccessionForTaskArguments(builder.MutableMessage());
+
     if (recovery_succession_profiling_enabled_) {
       const uint64_t start_ns = RecoveryProfileNowNs();
 
@@ -2765,6 +2894,7 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             root_detached_actor_id);
 
   if (recovery_succession_enabled_ &&
+      recovery_witness_holder_baseline_enabled_ &&
       recovery_succession_manager_ != nullptr &&
       RecoverySuccessionManager::IsEligibleTask(
           builder.GetMessage())) {
@@ -4549,7 +4679,10 @@ void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
     return;
   }
 
-  if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+  if (recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
+      RecoverySuccessionManager::CarriesRecoveryMetadata(
+          request.task_spec())) {
     auto candidate_reports =
         recovery_succession_manager_->RegisterExecutorTask(request.task_spec());
 
@@ -4700,7 +4833,7 @@ void CoreWorker::HandleGetObjectStatus(rpc::GetObjectStatusRequest request,
   if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
     rpc::RecoveryObjectMetadata metadata;
 
-    if (recovery_succession_manager_->PopulateRecoveryMetadata(object_id, &metadata)) {
+    if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
       reply->mutable_recovery_metadata()->CopyFrom(metadata);
     }
   }
@@ -4761,7 +4894,7 @@ void CoreWorker::PopulateObjectStatus(const ObjectID &object_id,
 
       const ObjectID nested_object_id = ObjectID::FromBinary(nested_ref.object_id());
 
-      if (recovery_succession_manager_->PopulateRecoveryMetadata(nested_object_id,
+      if (TryPopulateRecoveryMetadataForObject(nested_object_id,
                                                                  &metadata)) {
         serialized_ref->mutable_recovery_metadata()->CopyFrom(metadata);
       }

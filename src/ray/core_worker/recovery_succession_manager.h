@@ -167,14 +167,28 @@ class RecoverySuccessionManager {
   /// Returns true when recovery succession supports the task.
   static bool IsEligibleTask(const rpc::TaskSpec &task_spec);
 
+  /// Returns true only when a task actually carries Recovery Succession
+  /// state: either its own recovery manifest or recovery metadata on one of
+  /// its ObjectRef arguments.
+  static bool CarriesRecoveryMetadata(const rpc::TaskSpec &task_spec);
+
   /// Creates the initial manifest owned by this CoreWorker.
   rpc::RecoveryManifest BuildInitialManifest(const TaskID &task_id,
                                              const JobID &job_id,
                                              int32_t max_retries) const;
 
   /// Records a newly submitted task and attaches metadata to its return refs.
+  /// This eager entry point is retained for the witness-as-holder baseline.
   void RegisterOwnedTask(const TaskSpecification &task_spec,
                          std::vector<rpc::ObjectReference> *returned_refs);
+
+  /// Lazily installs owner recovery state after a task return is actually
+  /// exported/borrowed. The TaskSpec does not need to already carry a
+  /// recovery_manifest; this stores a private replayable copy with the
+  /// supplied manifest attached and creates metadata for all static returns.
+  /// Returns true only if this call performed the initialization.
+  bool RegisterOwnedTaskLazy(const TaskSpecification &task_spec,
+                             const rpc::RecoveryManifest &manifest);
 
   /// Records a received TaskSpec and returns candidate reports that should be
   /// sent to the coordinators of the received task and its dependencies.

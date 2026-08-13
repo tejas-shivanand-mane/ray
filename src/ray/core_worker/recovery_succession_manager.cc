@@ -74,6 +74,27 @@ bool RecoverySuccessionManager::IsEligibleTask(const rpc::TaskSpec &task_spec) {
          !task_spec.streaming_generator() && task_spec.max_retries() != 0;
 }
 
+bool RecoverySuccessionManager::CarriesRecoveryMetadata(
+    const rpc::TaskSpec &task_spec) {
+  if (task_spec.has_recovery_manifest()) {
+    return true;
+  }
+
+  for (const rpc::TaskArg &arg : task_spec.args()) {
+    if (arg.has_object_ref() && arg.object_ref().has_recovery_metadata()) {
+      return true;
+    }
+
+    for (const rpc::ObjectReference &nested_ref : arg.nested_inlined_refs()) {
+      if (nested_ref.has_recovery_metadata()) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
     const TaskID &task_id, const JobID &job_id, int32_t max_retries) const {
   rpc::RecoveryManifest manifest;
@@ -148,6 +169,70 @@ void RecoverySuccessionManager::RegisterOwnedTask(
 
     returned_ref.mutable_recovery_metadata()->CopyFrom(metadata);
   }
+}
+
+
+bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
+    const TaskSpecification &task_spec,
+    const rpc::RecoveryManifest &manifest) {
+  const rpc::TaskSpec &task_proto = task_spec.GetMessage();
+
+  if (task_proto.task_id().empty() || manifest.task_id().empty() ||
+      task_proto.task_id() != manifest.task_id()) {
+    return false;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto existing_it = task_states_.find(task_id);
+  if (existing_it != task_states_.end()) {
+    if (existing_it->second.manifest.tombstoned()) {
+      return false;
+    }
+
+    // Another serialization thread already activated this task.
+    if (existing_it->second.task_spec.has_value()) {
+      return false;
+    }
+
+    // Avoid overwriting any unexpected partially-created state.
+    return false;
+  }
+
+  TaskRecoveryState task_state;
+  task_state.manifest.CopyFrom(manifest);
+
+  rpc::TaskSpec stored_task_spec;
+  stored_task_spec.CopyFrom(task_proto);
+  stored_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
+
+  task_state.task_spec = std::move(stored_task_spec);
+  task_state.manifest_committed = true;
+
+  task_states_[task_id] = std::move(task_state);
+
+  // Static return IDs are deterministic. Initialize metadata for every return
+  // so the first exported return activates protection for the whole task.
+  for (size_t return_index = 0; return_index < task_spec.NumReturns();
+       ++return_index) {
+    const ObjectID object_id = task_spec.ReturnId(return_index);
+
+    if (object_id.IsNil()) {
+      continue;
+    }
+
+    rpc::RecoveryObjectMetadata metadata;
+    metadata.set_task_id(task_proto.task_id());
+    metadata.set_return_index(static_cast<uint32_t>(return_index));
+    metadata.mutable_manifest()->CopyFrom(manifest);
+
+    object_recovery_metadata_[object_id] = metadata;
+    task_object_ids_[task_id].insert(object_id);
+  }
+
+  return true;
 }
 
 std::vector<RecoverySuccessionManager::CandidateReport>

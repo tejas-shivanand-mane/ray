@@ -1611,6 +1611,17 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// Adds selected witnesses to a newly created owner manifest.
   void PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) const;
 
+  /// Populates metadata if already active; otherwise lazily initializes
+  /// Recovery Succession for an eligible task return owned by this CoreWorker.
+  bool TryPopulateRecoveryMetadataForObject(
+      const ObjectID &object_id,
+      rpc::RecoveryObjectMetadata *metadata) const;
+
+  /// Lazily activate eligible owned returns that are actually being exported
+  /// as arguments of another task.
+  void EnsureRecoverySuccessionForTaskArguments(
+      rpc::TaskSpec *task_spec) const;
+
   using RecoveryWitnessPublishCallback =
       std::function<void(bool, std::optional<rpc::RecoveryManifest>)>;
 
