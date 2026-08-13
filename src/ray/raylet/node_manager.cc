@@ -441,6 +441,28 @@ void NodeManager::HandleUpdateRecoveryWitness(
   send_reply_callback(Status::OK(), nullptr, nullptr);
 }
 
+void NodeManager::HandleUpdateRecoveryWitnessBatch(
+    rpc::UpdateRecoveryWitnessBatchRequest request,
+    rpc::UpdateRecoveryWitnessBatchReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  // Reuse the single-update implementation so batching cannot diverge from
+  // the existing validation/versioning/baseline semantics. The single-item
+  // handler is synchronous; its send callback only marks that logical item
+  // complete, so a no-op callback is sufficient inside this outer RPC.
+  for (int i = 0; i < request.updates_size(); ++i) {
+    rpc::UpdateRecoveryWitnessRequest item_request;
+    item_request.Swap(request.mutable_updates(i));
+
+    auto *item_reply = reply->add_replies();
+    HandleUpdateRecoveryWitness(
+        std::move(item_request),
+        item_reply,
+        [](Status, std::function<void()>, std::function<void()>) {});
+  }
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
 void NodeManager::HandleGetRecoveryWitness(
     rpc::GetRecoveryWitnessRequest request,
     rpc::GetRecoveryWitnessReply *reply,

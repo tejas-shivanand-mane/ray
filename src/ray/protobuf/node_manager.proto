@@ -482,6 +482,17 @@ message UpdateRecoveryWitnessReply {
   optional RecoveryManifest latest_manifest = 2;
 }
 
+// Batches independent logical witness updates that target the same raylet.
+// Each element has exactly the same semantics as UpdateRecoveryWitnessRequest.
+message UpdateRecoveryWitnessBatchRequest {
+  repeated UpdateRecoveryWitnessRequest updates = 1;
+}
+
+// Replies are returned in the same order as UpdateRecoveryWitnessBatchRequest.updates.
+message UpdateRecoveryWitnessBatchReply {
+  repeated UpdateRecoveryWitnessReply replies = 1;
+}
+
 message GetRecoveryWitnessRequest {
   bytes task_id = 1;
 
@@ -665,6 +676,11 @@ service NodeManagerService {
   // Idempotent. No voting, locking, or admission decision is performed.
   rpc UpdateRecoveryWitness(UpdateRecoveryWitnessRequest)
       returns (UpdateRecoveryWitnessReply);
+
+  // Transport-only batching for compact recovery witness updates.
+  // No voting, locking, or holder-admission decision is performed here.
+  rpc UpdateRecoveryWitnessBatch(UpdateRecoveryWitnessBatchRequest)
+      returns (UpdateRecoveryWitnessBatchReply);
 
   // Returns the latest compact manifest stored for a task.
   rpc GetRecoveryWitness(GetRecoveryWitnessRequest)

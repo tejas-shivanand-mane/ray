@@ -14,6 +14,7 @@
 
 #include "ray/raylet_rpc_client/raylet_client.h"
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <set>
@@ -580,12 +581,103 @@ void RayletClient::FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request)
 void RayletClient::UpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest &&request,
     const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) {
-  INVOKE_RPC_CALL(NodeManagerService,
-                  UpdateRecoveryWitness,
-                  request,
-                  callback,
-                  grpc_client_,
-                  /*method_timeout_ms=*/-1);
+  // Keep the witness-as-holder baseline on the original one-request RPC path.
+  // Those requests can contain a full TaskSpec and are not the compact normal
+  // Recovery Succession traffic targeted by Patch 4B-3.
+  if (request.has_task_spec()) {
+    INVOKE_RPC_CALL(NodeManagerService,
+                    UpdateRecoveryWitness,
+                    request,
+                    callback,
+                    grpc_client_,
+                    /*method_timeout_ms=*/-1);
+    return;
+  }
+
+  PendingRecoveryWitnessUpdate item{std::move(request), callback};
+  auto state = recovery_witness_batch_state_;
+  std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch;
+
+  {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (state->in_flight) {
+      state->pending.emplace_back(std::move(item));
+      return;
+    }
+
+    state->in_flight = true;
+    batch = std::make_shared<std::vector<PendingRecoveryWitnessUpdate>>();
+    batch->reserve(1);
+    batch->emplace_back(std::move(item));
+  }
+
+  DispatchRecoveryWitnessBatch(state, grpc_client_, std::move(batch));
+}
+
+void RayletClient::DispatchRecoveryWitnessBatch(
+    std::shared_ptr<RecoveryWitnessBatchState> state,
+    std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client,
+    std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch) {
+  RAY_CHECK(batch != nullptr && !batch->empty());
+
+  rpc::UpdateRecoveryWitnessBatchRequest request;
+  for (const auto &item : *batch) {
+    request.add_updates()->CopyFrom(item.request);
+  }
+
+  INVOKE_RPC_CALL(
+      NodeManagerService,
+      UpdateRecoveryWitnessBatch,
+      request,
+      [state, grpc_client, batch](
+          const Status &status,
+          rpc::UpdateRecoveryWitnessBatchReply &&reply) mutable {
+        const bool reply_shape_ok =
+            !status.ok() ||
+            static_cast<size_t>(reply.replies_size()) == batch->size();
+
+        if (status.ok() && !reply_shape_ok) {
+          RAY_LOG(ERROR)
+              << "Recovery witness batch reply size mismatch: sent="
+              << batch->size() << " received=" << reply.replies_size();
+        }
+
+        for (size_t i = 0; i < batch->size(); ++i) {
+          rpc::UpdateRecoveryWitnessReply item_reply;
+          if (status.ok() && reply_shape_ok) {
+            item_reply.Swap(reply.mutable_replies(static_cast<int>(i)));
+          }
+          // Transport failures retain their non-OK status. A malformed
+          // successful batch reply yields the default stored=false item reply,
+          // which safely fails that logical witness update.
+          (*batch)[i].callback(status, std::move(item_reply));
+        }
+
+        auto next_batch =
+            std::make_shared<std::vector<PendingRecoveryWitnessUpdate>>();
+        {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          const size_t count = std::min(
+              RayletClient::kRecoveryWitnessBatchMaxSize,
+              state->pending.size());
+
+          if (count == 0) {
+            state->in_flight = false;
+            return;
+          }
+
+          next_batch->reserve(count);
+          for (size_t i = 0; i < count; ++i) {
+            next_batch->emplace_back(std::move(state->pending.front()));
+            state->pending.pop_front();
+          }
+        }
+
+        RayletClient::DispatchRecoveryWitnessBatch(
+            state, grpc_client, std::move(next_batch));
+      },
+      grpc_client,
+      /*method_timeout_ms=*/-1);
 }
 
 void RayletClient::GetRecoveryWitness(

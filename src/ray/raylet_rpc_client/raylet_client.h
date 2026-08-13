@@ -16,7 +16,9 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -186,6 +188,31 @@ class RayletClient : public RayletClientInterface {
   void GetRecoveryWitness(
       rpc::GetRecoveryWitnessRequest &&request,
       const rpc::ClientCallback<rpc::GetRecoveryWitnessReply> &callback) override;
+
+ private:
+  struct PendingRecoveryWitnessUpdate {
+    rpc::UpdateRecoveryWitnessRequest request;
+    rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> callback;
+  };
+
+  struct RecoveryWitnessBatchState {
+    std::mutex mutex;
+    std::deque<PendingRecoveryWitnessUpdate> pending;
+    bool in_flight = false;
+  };
+
+  // At inflight=64 this cap is large enough to collapse queue pressure while
+  // keeping individual batch messages modest. There is intentionally no
+  // timer: an idle connection sends its first update immediately.
+  static constexpr size_t kRecoveryWitnessBatchMaxSize = 32;
+
+  static void DispatchRecoveryWitnessBatch(
+      std::shared_ptr<RecoveryWitnessBatchState> state,
+      std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client,
+      std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch);
+
+  std::shared_ptr<RecoveryWitnessBatchState> recovery_witness_batch_state_ =
+      std::make_shared<RecoveryWitnessBatchState>();
 
  protected:
   /// gRPC client to the NodeManagerService.

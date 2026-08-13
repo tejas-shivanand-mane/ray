@@ -358,6 +358,12 @@ class NodeManager : public rpc::NodeManagerServiceHandler,
       rpc::UpdateRecoveryWitnessReply *reply,
       rpc::SendReplyCallback send_reply_callback) override;
 
+  /// Applies a transport batch of independent compact witness updates.
+  void HandleUpdateRecoveryWitnessBatch(
+      rpc::UpdateRecoveryWitnessBatchRequest request,
+      rpc::UpdateRecoveryWitnessBatchReply *reply,
+      rpc::SendReplyCallback send_reply_callback) override;
+
   /// Returns the latest compact recovery manifest stored for a task.
   void HandleGetRecoveryWitness(
       rpc::GetRecoveryWitnessRequest request,
