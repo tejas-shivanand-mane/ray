@@ -625,10 +625,7 @@ void RayletClient::DispatchRecoveryWitnessBatch(
     request.add_updates()->CopyFrom(item.request);
   }
 
-  INVOKE_RPC_CALL(
-      NodeManagerService,
-      UpdateRecoveryWitnessBatch,
-      request,
+  auto batch_callback =
       [state, grpc_client, batch](
           const Status &status,
           rpc::UpdateRecoveryWitnessBatchReply &&reply) mutable {
@@ -675,9 +672,14 @@ void RayletClient::DispatchRecoveryWitnessBatch(
 
         RayletClient::DispatchRecoveryWitnessBatch(
             state, grpc_client, std::move(next_batch));
-      },
-      grpc_client,
-      /*method_timeout_ms=*/-1);
+      };
+
+  INVOKE_RPC_CALL(NodeManagerService,
+                  UpdateRecoveryWitnessBatch,
+                  request,
+                  batch_callback,
+                  grpc_client,
+                  /*method_timeout_ms=*/-1);
 }
 
 void RayletClient::GetRecoveryWitness(
