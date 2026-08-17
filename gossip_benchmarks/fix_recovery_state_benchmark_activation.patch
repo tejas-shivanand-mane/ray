@@ -1,0 +1,33 @@
+diff --git a/gossip_benchmarks/18_recovery_state_amplification.py b/gossip_benchmarks/18_recovery_state_amplification.py
+--- a/gossip_benchmarks/18_recovery_state_amplification.py
++++ b/gossip_benchmarks/18_recovery_state_amplification.py
+@@ -446,16 +446,23 @@
+                 num_cpus=1,
+             ).remote(request_id, *padding)
+             for request_id in range(args.task_count)
+         ]
+ 
+-        # Ensure producer tasks themselves have completed.  The driver owns the
+-        # refs, so this does not add a downstream recovery holder.
+-        values = ray.get(refs)
+-        if values != list(range(args.task_count)):
+-            raise RuntimeError("producer output validation failed")
+-
++        # IMPORTANT: do NOT ray.get(refs) here.
++        #
++        # Recovery Succession uses lazy activation: the producer task is
++        # protected when its returned ObjectRef is first exported/serialized to
++        # a downstream borrower.  Waiting for every producer result before the
++        # first export can let normal task-lineage cleanup happen first, leaving
++        # no recoverable producer TaskSpec to activate.
++        #
++        # Submitting the first consumer stage below serializes the original refs
++        # while the producer lineage is still recoverable.  ray.get() on the
++        # consumer results then naturally waits for both producer completion and
++        # downstream consumption.
++        #
+         # Shallow-wide direct-owner borrowing:
+         # each stage gets the same original refs directly from the driver.
+         for stage in range(borrower_count):
+             touched = ray.get(
+                 [
