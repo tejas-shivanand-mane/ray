@@ -28,9 +28,12 @@ failure, provided at least one succession holder survives.
 Failure frontier
 ----------------
 For each run the benchmark optionally pre-kills K borrower nodes (default
-K=0,1,2,3), then kills:
-    1. the dedicated owner node, and
-    2. the dedicated producer/result node.
+K=0,1,2,3), then kills the node that co-locates:
+    1. the ObjectRef owner, and
+    2. the original producer/executor/result.
+
+This matches the repository's already-tested owner_and_executor_node failure
+mode while still forcing lineage-based replay.
 
 After pre-killing K borrower nodes, recovery is demanded only by application
 borrowers that are still alive and already hold the corresponding ObjectRef.
@@ -50,10 +53,10 @@ This produces a cost/useful-availability comparison:
 Important result-object choice
 ------------------------------
 Producer outputs are deliberately larger than Ray's normal direct-call inline
-threshold (default here: 512 KiB). The owner only waits with fetch_local=False,
-and the benchmark kills both owner and producer/result nodes before recovery.
-This is intended to force actual replay rather than accidentally serving a
-surviving original value. Post-failure producer START markers verify replay.
+threshold (default here: 512 KiB). Producer tasks execute on the same failure
+node as the ObjectRef owner, the owner waits with fetch_local=False, and that
+single node is removed before recovery. Thus ownership state and the original
+result disappear together. Post-failure producer START markers verify replay.
 
 No C++ changes are required. The benchmark relies on the existing profiling
 counters and on the lazy baseline implementation.
@@ -379,9 +382,12 @@ def make_remote_types():
                 task_spec_padding_bytes,
                 inline_chunk_bytes,
             )
+            # Recovery replay must be allowed to leave the original execution
+            # node after that node fails. CoreWorker intentionally clears only
+            # *soft* node affinity during StartRecoveryReplay().
             strategy = NodeAffinitySchedulingStrategy(
                 node_id=self.producer_node_id,
-                soft=False,
+                soft=True,
             )
             self.refs = [
                 produce.options(
@@ -495,16 +501,12 @@ def start_cluster(
         include_dashboard=False,
     )
 
+    # Co-locate owner and original producer/result on one failure node.
+    # This mirrors the already-tested owner_and_executor_node benchmark mode.
     owner_node = c.add_node(
-        num_cpus=1,
-        object_store_memory=object_store_bytes,
-        resources={"owner_node": 1},
-    )
-
-    producer_node = c.add_node(
         num_cpus=args.producer_cpus,
         object_store_memory=object_store_bytes,
-        resources={"producer_node": 1},
+        resources={"owner_node": 1},
     )
 
     borrower_nodes = [
@@ -516,7 +518,7 @@ def start_cluster(
         for i in range(args.borrower_nodes)
     ]
 
-    return c, owner_node, producer_node, borrower_nodes
+    return c, owner_node, borrower_nodes
 
 
 def get_owner_profile(owner) -> dict[str, Any]:
@@ -733,7 +735,7 @@ def run_one(
     )
 
     try:
-        c, owner_node, producer_node, borrower_nodes = start_cluster(
+        c, owner_node, borrower_nodes = start_cluster(
             method,
             args,
         )
@@ -744,7 +746,8 @@ def run_one(
             include_dashboard=False,
         )
 
-        expected_nodes = 3 + args.borrower_nodes
+        # head + one owner/producer failure node + borrower nodes
+        expected_nodes = 2 + args.borrower_nodes
         wait_for_cluster(
             ray,
             expected_nodes,
@@ -756,7 +759,7 @@ def run_one(
         owner = Owner.options(
             resources={"owner_node": 0.01},
             num_cpus=0,
-        ).remote(producer_node.node_id)
+        ).remote(owner_node.node_id)
 
         borrowers = [
             Borrower.options(
@@ -893,21 +896,19 @@ def run_one(
             killed_set,
         )
 
-        # Destroy both ownership state and all original result data.
+        # Destroy ownership state and the original producer/result together.
+        # This is the same failure shape as the repository's proven
+        # owner_and_executor_node benchmark mode.
         failure_wall_ns = time.time_ns()
         failure_perf = time.perf_counter()
 
         c.remove_node(owner_node, allow_graceful=False)
-        c.remove_node(producer_node, allow_graceful=False)
 
         owner_dead = wait_node_dead(
             owner_node.node_id,
             args.node_death_timeout_seconds,
         )
-        producer_dead = wait_node_dead(
-            producer_node.node_id,
-            args.node_death_timeout_seconds,
-        )
+        producer_dead = owner_dead
 
         # Select one surviving application borrower for every object that
         # still has live demand. For B<=R, each such borrower is itself one of
@@ -1004,6 +1005,9 @@ def run_one(
             ),
             "owner_node_dead_confirmed": int(owner_dead),
             "producer_node_dead_confirmed": int(producer_dead),
+            "owner_and_executor_node_dead_confirmed": int(
+                owner_dead and producer_dead
+            ),
             "live_demand_objects": len(requesters),
             "live_demand_fraction_of_activated": safe_div(
                 len(requesters),
@@ -1442,10 +1446,15 @@ def plot_results(args: argparse.Namespace) -> None:
                 if r["method"] == method
                 and int(r["prekill_borrower_nodes"]) == k
             )
+            y = float(row["recovery_latency_p95_s_mean"])
+            e = float(row["recovery_latency_p95_s_ci95"])
+            if math.isnan(y):
+                continue
             xs.append(k)
-            ys.append(float(row["recovery_latency_p95_s_mean"]))
-            es.append(float(row["recovery_latency_p95_s_ci95"]))
-        plt.errorbar(xs, ys, yerr=es, marker="o", capsize=3, label=label)
+            ys.append(y)
+            es.append(0.0 if math.isnan(e) else e)
+        if xs:
+            plt.errorbar(xs, ys, yerr=es, marker="o", capsize=3, label=label)
 
     plt.xlabel("Borrower/holder nodes failed before owner failure")
     plt.ylabel("p95 failure-to-result latency (s)")
@@ -1473,7 +1482,8 @@ def plot_results(args: argparse.Namespace) -> None:
 
     plt.xlabel("Failure-to-result latency (s)")
     plt.ylabel("CDF")
-    plt.legend()
+    if plt.gca().lines:
+        plt.legend()
     plt.tight_layout()
     plt.savefig(plotdir / "recovery_latency_cdf.png", dpi=200)
     plt.close()
@@ -1513,7 +1523,8 @@ def plot_results(args: argparse.Namespace) -> None:
     plt.ylabel(f"Recovery success with K={severe_k} pre-failed holders (%)")
     plt.xticks(fanouts)
     plt.ylim(0, 105)
-    plt.legend()
+    if plt.gca().lines:
+        plt.legend()
     plt.tight_layout()
     plt.savefig(plotdir / "success_by_fanout.png", dpi=200)
     plt.close()
@@ -1571,7 +1582,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument("--task-work-ms", type=float, default=1.0)
-    p.add_argument("--producer-cpus", type=int, default=4)
+    p.add_argument(
+        "--producer-cpus",
+        type=int,
+        default=4,
+        help="CPUs on the co-located owner+producer failure node.",
+    )
     p.add_argument("--producer-cpus-per-task", type=float, default=1.0)
 
     p.add_argument("--witness-count", type=int, default=2)
