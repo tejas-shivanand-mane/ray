@@ -7,7 +7,7 @@ members and batches of protected outputs.
 Two timings are recorded:
   native_formation_time_s
     Succession: beginning of holder admission -> all manifests committed.
-    Baseline: beginning of submission -> all full TaskSpecs installed on witnesses.
+    Baseline: first downstream export -> all full TaskSpecs installed on witnesses.
   protection_ready_time_s
     Method-neutral: beginning of task submission -> requested protection is ready.
 
@@ -77,11 +77,19 @@ def run_one(args, method: Method, n: int, trial: int) -> dict[str, Any]:
         refs = [produce.options(resources={"producer_node": .01}, num_cpus=1).remote(i, args.payload_bytes) for i in range(n)]
 
         if method.key == "witness_baseline":
+            # Lazy baseline activation begins on the first real downstream export.
+            # This actor is the application borrower that triggers activation; the
+            # fixed R recovery copies are still stored on selected witness-holders.
+            native_start = time.perf_counter()
+            if ray.get(holders[0].hold_many.remote(refs)) != n:
+                raise RuntimeError("baseline activation borrower did not retain all refs")
+
             needle = "Installed full TaskSpec on all witness-holder baseline nodes"
             if len(wait_for_log(logs, needle, args.formation_timeout_seconds, min_count=n)) < n:
                 raise RuntimeError(f"baseline protection did not become ready for all {n} tasks")
+
+            native = time.perf_counter() - native_start
             protection_ready = time.perf_counter() - submit_start
-            native = protection_ready
         else:
             # Keep submission outside the native holder-admission timing, matching
             # the original paper definition, but include it in protection_ready.

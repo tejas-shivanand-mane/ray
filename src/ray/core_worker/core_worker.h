@@ -1612,7 +1612,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   void PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) const;
 
   /// Populates metadata if already active; otherwise lazily initializes
-  /// Recovery Succession for an eligible task return owned by this CoreWorker.
+  /// Recovery Succession or the fixed witness-holder baseline for an eligible
+  /// task return owned by this CoreWorker.
   bool TryPopulateRecoveryMetadataForObject(
       const ObjectID &object_id,
       rpc::RecoveryObjectMetadata *metadata) const;
@@ -1628,7 +1629,7 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   void PublishRecoveryManifestToWitnesses(
     const rpc::RecoveryManifest &manifest,
     RecoveryWitnessPublishCallback callback,
-    const rpc::TaskSpec *task_spec = nullptr);
+    const rpc::TaskSpec *task_spec = nullptr) const;
 
   void FinishRecoveryHolderAdmission(
     std::string reservation_id,

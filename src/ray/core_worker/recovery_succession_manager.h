@@ -177,8 +177,8 @@ class RecoverySuccessionManager {
                                              const JobID &job_id,
                                              int32_t max_retries) const;
 
-  /// Records a newly submitted task and attaches metadata to its return refs.
-  /// This eager entry point is retained for the witness-as-holder baseline.
+  /// Records a task whose TaskSpec already carries a recovery manifest and
+  /// attaches metadata to its return refs. This path is also used by recovery replay.
   void RegisterOwnedTask(const TaskSpecification &task_spec,
                          std::vector<rpc::ObjectReference> *returned_refs);
 

@@ -1335,10 +1335,8 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
     return true;
   }
 
-  // Preserve witness-as-holder baseline semantics exactly.
-  if (recovery_witness_holder_baseline_enabled_) {
-    return false;
-  }
+  // Both Succession and the fixed witness-holder baseline are activated
+  // lazily on the first real export/borrow of an eligible task return.
 
   const TaskID task_id = object_id.TaskId();
   auto task_spec_opt = task_manager_->GetTaskSpec(task_id);
@@ -1408,6 +1406,62 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
         RecoveryProfileNowNs() - register_start_ns);
   }
 
+  if (initialized_now && recovery_witness_holder_baseline_enabled_) {
+    const uint32_t target_holder_count =
+        RayConfig::instance().recovery_succession_target_holder_count();
+
+    RAY_CHECK_EQ(
+        static_cast<uint32_t>(manifest.witness_raylets_size()),
+        target_holder_count)
+        << "Lazy witness-holder baseline requires exactly "
+        << target_holder_count
+        << " independent full-lineage witnesses, but only "
+        << manifest.witness_raylets_size()
+        << " were selected.";
+
+    RAY_CHECK_EQ(manifest.witness_count(), target_holder_count);
+
+    // The original task was submitted without recovery metadata. Attach the
+    // lazily-created manifest only to the private copy sent to baseline holders.
+    rpc::TaskSpec baseline_task_spec;
+    baseline_task_spec.CopyFrom(task_proto);
+    baseline_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
+
+    const uint64_t publish_start_ns =
+        recovery_succession_profiling_enabled_
+            ? RecoveryProfileNowNs()
+            : 0;
+
+    PublishRecoveryManifestToWitnesses(
+        manifest,
+        [manager = recovery_succession_manager_,
+         task_id,
+         publish_start_ns](
+            bool stored,
+            std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
+          if (publish_start_ns != 0) {
+            manager->RecordWitnessPublishLatency(
+                RecoveryProfileNowNs() - publish_start_ns);
+          }
+
+          if (!stored) {
+            RAY_LOG(FATAL)
+                .WithField(task_id)
+                << "Lazy witness-holder baseline failed to install "
+                << "the full TaskSpec on every configured holder."
+                << (newer_manifest.has_value()
+                        ? " A newer witness manifest was observed."
+                        : "");
+          }
+
+          RAY_LOG(INFO)
+              .WithField(task_id)
+              << "Installed full TaskSpec on all "
+                 "witness-holder baseline nodes";
+        },
+        &baseline_task_spec);
+  }
+
   // If another thread won the initialization race, its metadata is visible
   // here once RegisterOwnedTaskLazy returns.
   return recovery_succession_manager_->PopulateRecoveryMetadata(
@@ -1417,8 +1471,7 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
     rpc::TaskSpec *task_spec) const {
   if (task_spec == nullptr || !recovery_succession_enabled_ ||
-      recovery_succession_manager_ == nullptr ||
-      recovery_witness_holder_baseline_enabled_) {
+      recovery_succession_manager_ == nullptr) {
     return;
   }
 
@@ -2893,58 +2946,6 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             scheduling_strategy,
                             root_detached_actor_id);
 
-  if (recovery_succession_enabled_ &&
-      recovery_witness_holder_baseline_enabled_ &&
-      recovery_succession_manager_ != nullptr &&
-      RecoverySuccessionManager::IsEligibleTask(
-          builder.GetMessage())) {
-
-    uint64_t manifest_start_ns = 0;
-
-    if (recovery_succession_profiling_enabled_) {
-      manifest_start_ns = RecoveryProfileNowNs();
-    }
-
-    rpc::RecoveryManifest manifest =
-        recovery_succession_manager_->BuildInitialManifest(
-            task_id,
-            worker_context_->GetCurrentJobID(),
-            max_retries);
-
-    if (manifest_start_ns != 0) {
-      recovery_succession_manager_->RecordInitialManifestBuild(
-          RecoveryProfileNowNs() - manifest_start_ns,
-          static_cast<uint64_t>(manifest.ByteSizeLong()));
-    }
-
-    uint64_t witness_start_ns = 0;
-
-    if (recovery_succession_profiling_enabled_) {
-      witness_start_ns = RecoveryProfileNowNs();
-    }
-
-    PopulateRecoveryWitnesses(&manifest);
-
-    if (witness_start_ns != 0) {
-      recovery_succession_manager_->RecordWitnessSelectionLatency(
-          RecoveryProfileNowNs() - witness_start_ns);
-    }
-
-    uint64_t attach_start_ns = 0;
-
-    if (recovery_succession_profiling_enabled_) {
-      attach_start_ns = RecoveryProfileNowNs();
-    }
-
-    builder.SetRecoveryManifest(manifest);
-
-    if (attach_start_ns != 0) {
-      recovery_succession_manager_
-          ->RecordTaskSpecManifestAttachLatency(
-              RecoveryProfileNowNs() - attach_start_ns);
-    }
-  }
-
   TaskSpecification task_spec = std::move(builder).ConsumeAndBuild();
   RAY_LOG(DEBUG) << "Submitting normal task " << task_spec.DebugString();
   std::vector<rpc::ObjectReference> returned_refs;
@@ -2970,73 +2971,6 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
           &returned_refs);
     }
   }
-
-  if (recovery_succession_enabled_ &&
-      recovery_witness_holder_baseline_enabled_ &&
-      task_spec.GetMessage().has_recovery_manifest()) {
-    rpc::RecoveryManifest baseline_manifest;
-    baseline_manifest.CopyFrom(
-        task_spec.GetMessage().recovery_manifest());
-
-    const uint32_t target_holder_count =
-    RayConfig::instance()
-        .recovery_succession_target_holder_count();
-
-    RAY_CHECK_EQ(
-        static_cast<uint32_t>(
-            baseline_manifest.witness_raylets_size()),
-        target_holder_count)
-        << "Witness-holder baseline requires exactly "
-        << target_holder_count
-        << " independent full-lineage witnesses, but only "
-        << baseline_manifest.witness_raylets_size()
-        << " were selected.";
-
-    RAY_CHECK_EQ(
-        baseline_manifest.witness_count(),
-        target_holder_count);
-
-    rpc::TaskSpec baseline_task_spec;
-    baseline_task_spec.CopyFrom(
-        task_spec.GetMessage());
-
-    const TaskID baseline_task_id =
-        task_spec.TaskId();
-
-    PublishRecoveryManifestToWitnesses(
-        baseline_manifest,
-        [this,
-        baseline_task_id,
-        task_spec = std::move(task_spec)](
-            bool stored,
-            std::optional<rpc::RecoveryManifest>
-                newer_manifest) mutable {
-              if (!stored) {
-                RAY_LOG(FATAL)
-                    .WithField(baseline_task_id)
-                    << "Witness-holder baseline failed to install "
-                    << "the full TaskSpec on every configured holder.";
-              }
-
-              RAY_LOG(INFO)
-                  .WithField(baseline_task_id)
-                  << "Installed full TaskSpec on all "
-                    "witness-holder baseline nodes";
-
-              io_service_.post(
-                  [this,
-                  task_spec = std::move(task_spec)]() mutable {
-                    normal_task_submitter_->SubmitTask(
-                        std::move(task_spec));
-                  },
-                  "CoreWorker.SubmitTaskBaseline");
-        },
-        &baseline_task_spec);
-
-    return returned_refs;
-  }
-
-
 
   io_service_.post(
       [this, task_spec = std::move(task_spec)]() mutable {
@@ -7448,7 +7382,7 @@ void CoreWorker::PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) cons
 void CoreWorker::PublishRecoveryManifestToWitnesses(
     const rpc::RecoveryManifest &manifest,
     RecoveryWitnessPublishCallback callback,
-    const rpc::TaskSpec *task_spec) {
+    const rpc::TaskSpec *task_spec) const {
 
   const bool require_all_witnesses =
     task_spec != nullptr;
