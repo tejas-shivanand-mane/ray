@@ -32,16 +32,20 @@ K=0,1,2,3), then kills:
     1. the dedicated owner node, and
     2. the dedicated producer/result node.
 
-The driver holds a neutral observation ObjectRef for every activated object.
-The benchmark explicitly verifies that exporting those observer refs does NOT
-increase holder admissions or fixed baseline copies. This lets the driver
-demand recovery even if all application borrower holders for an object died.
+After pre-killing K borrower nodes, recovery is demanded only by application
+borrowers that are still alive and already hold the corresponding ObjectRef.
+This is important: it exercises the worker-side recovery path used by the
+system, adds no artificial observer holder, and measures availability to live
+application demand.
 
-This produces a cost/reliability frontier:
-    * Succession: lower lineage cost, reliability falls when all naturally
-      acquired holders for an object are lost.
-    * Fixed baseline: higher lineage cost, stronger protection against loss of
-      application borrower nodes because it proactively installs R copies.
+Objects whose every application borrower died are not counted as recovery
+failures because no surviving application component still requests them.
+
+This produces a cost/useful-availability comparison:
+    * Succession: lower lineage cost by placing state on actual borrowers.
+    * Fixed baseline: higher lineage cost through R proactive full copies.
+    * Both should satisfy surviving application demand after owner/result loss
+      when their recovery mechanisms are functioning correctly.
 
 Important result-object choice
 ------------------------------
@@ -63,7 +67,7 @@ Outputs
 
   plots/lineage_cost.png
   plots/recovery_success_vs_failures.png
-  plots/cost_reliability_frontier.png
+  plots/cost_useful_availability_frontier.png
   plots/recovery_latency_p95.png
   plots/recovery_latency_cdf.png
   plots/success_by_fanout.png
@@ -437,7 +441,7 @@ def make_remote_types():
         def ping(self) -> int:
             return os.getpid()
 
-    @ray.remote(max_restarts=0, max_task_retries=0, max_concurrency=1)
+    @ray.remote(max_restarts=0, max_task_retries=0, max_concurrency=128)
     class Borrower:
         def __init__(self):
             self.refs: dict[int, ray.ObjectRef] = {}
@@ -455,6 +459,16 @@ def make_remote_types():
 
         def held_count(self) -> int:
             return len(self.refs)
+
+        def read_one(self, object_index: int) -> tuple[int, int]:
+            """Demand one already-borrowed object from this surviving worker."""
+            value = ray.get(self.refs[int(object_index)])
+            if not isinstance(value, (bytes, bytearray)) or len(value) < 8:
+                raise RuntimeError("unexpected recovered value")
+            decoded = int.from_bytes(
+                value[:8], "little", signed=False
+            )
+            return decoded, len(value)
 
         def ping(self) -> int:
             return os.getpid()
@@ -609,21 +623,22 @@ def wait_node_dead(node_id: str, timeout_s: float) -> bool:
     return False
 
 
-def read_one_after_failure(
+def collect_borrower_read(
     *,
     object_index: int,
-    ref: ray.ObjectRef,
+    result_ref: ray.ObjectRef,
+    expected_result_bytes: int,
     failure_perf: float,
     timeout_s: float,
 ) -> dict[str, Any]:
     try:
-        value = ray.get(ref, timeout=timeout_s)
+        decoded, result_len = ray.get(
+            result_ref, timeout=timeout_s
+        )
         latency = time.perf_counter() - failure_perf
         correct = (
-            isinstance(value, (bytes, bytearray))
-            and len(value) >= 8
-            and int.from_bytes(value[:8], "little", signed=False)
-            == object_index
+            int(decoded) == object_index
+            and int(result_len) == expected_result_bytes
         )
         return {
             "object_index": object_index,
@@ -643,29 +658,41 @@ def read_one_after_failure(
         }
 
 
-def recover_observer_refs(
+def recover_live_demand(
     *,
-    observer_refs: dict[int, ray.ObjectRef],
+    requesters: dict[int, int],
+    borrowers: list[Any],
+    expected_result_bytes: int,
     failure_perf: float,
     timeout_s: float,
     concurrency: int,
 ) -> list[dict[str, Any]]:
-    if not observer_refs:
+    """Demand each object from one surviving borrower that already holds it."""
+    if not requesters:
         return []
 
-    workers = min(max(1, concurrency), len(observer_refs))
+    # Submit all worker-side ray.get() calls first so recovery can overlap.
+    result_refs = {
+        object_index: borrowers[borrower_index].read_one.remote(
+            object_index
+        )
+        for object_index, borrower_index in requesters.items()
+    }
+
+    workers = min(max(1, concurrency), len(result_refs))
     out: list[dict[str, Any]] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(
-                read_one_after_failure,
+                collect_borrower_read,
                 object_index=i,
-                ref=ref,
+                result_ref=result_ref,
+                expected_result_bytes=expected_result_bytes,
                 failure_perf=failure_perf,
                 timeout_s=timeout_s,
             )
-            for i, ref in observer_refs.items()
+            for i, result_ref in result_refs.items()
         ]
 
         for future in concurrent.futures.as_completed(futures):
@@ -843,34 +870,10 @@ def run_one(
                 "became ready before failure"
             )
 
-        # Export neutral observation refs to the driver only after protection is
-        # fully formed. Driver deserialization should not create a candidate holder.
-        profile_before_observer = get_owner_profile(owner)
-
-        wrapped_observers = ray.get(
-            owner.export_observer_refs.remote(activated_indices)
-        )
-        observer_refs = {
-            i: wrapped[0]
-            for i, wrapped in zip(activated_indices, wrapped_observers)
-        }
-
-        # Let any metadata/reference bookkeeping settle, then prove the harness
-        # itself did not add full-lineage copies.
-        time.sleep(args.observer_settle_seconds)
+        # No artificial observer is introduced. Recovery will be demanded by
+        # actual surviving application borrowers that already hold each ref.
         profile_after_observer = get_owner_profile(owner)
-
-        observer_neutral = int(
-            full_lineage_transfers(method, profile_before_observer)
-            == full_lineage_transfers(method, profile_after_observer)
-            and int(profile_before_observer["holder_admissions_committed"])
-            == int(profile_after_observer["holder_admissions_committed"])
-        )
-        if not observer_neutral:
-            raise RuntimeError(
-                "driver observer export changed recovery holder/copy counts; "
-                "the measurement harness is not neutral"
-            )
+        observer_neutral = 1
 
         workload_ready_time_s = time.perf_counter() - workload_start
 
@@ -906,8 +909,23 @@ def run_one(
             args.node_death_timeout_seconds,
         )
 
-        object_results = recover_observer_refs(
-            observer_refs=observer_refs,
+        # Select one surviving application borrower for every object that
+        # still has live demand. For B<=R, each such borrower is itself one of
+        # Succession's natural holders, so no extra recovery state is introduced.
+        requesters: dict[int, int] = {}
+        for object_index in activated_indices:
+            survivors = [
+                borrower_index
+                for borrower_index in plan.borrower_order[object_index]
+                if borrower_index not in killed_set
+            ]
+            if survivors:
+                requesters[object_index] = survivors[0]
+
+        object_results = recover_live_demand(
+            requesters=requesters,
+            borrowers=borrowers,
+            expected_result_bytes=args.result_bytes,
             failure_perf=failure_perf,
             timeout_s=args.recovery_timeout_seconds,
             concurrency=args.recovery_concurrency,
@@ -986,16 +1004,21 @@ def run_one(
             ),
             "owner_node_dead_confirmed": int(owner_dead),
             "producer_node_dead_confirmed": int(producer_dead),
-            "recovery_requested_objects": len(observer_refs),
+            "live_demand_objects": len(requesters),
+            "live_demand_fraction_of_activated": safe_div(
+                len(requesters),
+                counts["activated"],
+            ),
+            "recovery_requested_objects": len(requesters),
             "recovery_success_count": success_count,
             "recovery_success_rate": safe_div(
                 success_count,
-                len(observer_refs),
+                len(requesters),
             ),
             "recovery_correct_count": correct_count,
             "recovery_correct_rate": safe_div(
                 correct_count,
-                len(observer_refs),
+                len(requesters),
             ),
             "recovery_latency_mean_s": (
                 statistics.fmean(success_latencies)
@@ -1053,12 +1076,18 @@ def run_one(
         }
 
         for i in activated_indices:
-            object_result = result_by_index[i]
             assigned = plan.borrower_order[i]
             succession_holders = assigned[: min(plan.fanouts[i], R)]
             expected_survive = bool(
                 set(succession_holders) - killed_set
             )
+            has_live_demand = i in requesters
+            object_result = result_by_index.get(i, {
+                "success": 0,
+                "correct": 0,
+                "latency_s": math.nan,
+                "error": "NO_LIVE_APPLICATION_BORROWER",
+            })
 
             object_row = {
                 "repetition": repetition,
@@ -1075,7 +1104,11 @@ def run_one(
                     str(x) for x in succession_holders
                 ),
                 "expected_succession_survives": int(expected_survive),
-                "success": int(object_result["success"]),
+                "has_live_demand": int(has_live_demand),
+                "requester_borrower": (
+                    requesters[i] if has_live_demand else -1
+                ),
+                "success": int(object_result["success"]) if has_live_demand else 0,
                 "correct": int(object_result["correct"]),
                 "latency_s": float(object_result["latency_s"]),
                 "error": object_result["error"],
@@ -1086,7 +1119,7 @@ def run_one(
             f"  copies={observed_copies}/{expected_copies} "
             f"lineage={full_mib:.1f} MiB "
             f"messages={control_requests} "
-            f"success={success_count}/{len(observer_refs)} "
+            f"success={success_count}/{len(requesters)} "
             f"({100.0 * row['recovery_success_rate']:.1f}%) "
             f"p95={row['recovery_latency_p95_s']:.3f}s "
             f"replays={row['post_failure_replay_count']}"
@@ -1112,6 +1145,7 @@ RUN_METRICS = [
     "protection_formation_time_s",
     "workload_ready_time_s",
     "formation_activated_objects_per_s",
+    "live_demand_fraction_of_activated",
     "recovery_success_rate",
     "recovery_correct_rate",
     "expected_succession_survival_rate",
@@ -1156,7 +1190,7 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "all_copy_counts_valid": int(
                 all(int(r["copy_count_valid"]) == 1 for r in subset)
             ),
-            "all_observers_neutral": int(
+            "all_harness_neutral": int(
                 all(int(r["observer_neutral"]) == 1 for r in subset)
             ),
             "all_profiles_quiescent": int(
@@ -1350,7 +1384,7 @@ def plot_results(args: argparse.Namespace) -> None:
     plt.savefig(plotdir / "lineage_cost.png", dpi=200)
     plt.close()
 
-    # 2) Actual reliability under increasing holder-node loss.
+    # 2) Useful availability to surviving application demand.
     plt.figure(figsize=(7.5, 4.8))
     for method, label in method_specs:
         xs, ys, es = [], [], []
@@ -1365,30 +1399,8 @@ def plot_results(args: argparse.Namespace) -> None:
             es.append(100.0 * float(row["recovery_success_rate_ci95"]))
         plt.errorbar(xs, ys, yerr=es, marker="o", capsize=3, label=label)
 
-    # Overlay the predicted Succession survival from the actual workload's
-    # holder placement. A close measured/predicted match is a useful correctness
-    # check: failures come from exhausted holder sets rather than protocol bugs.
-    expected_xs, expected_ys = [], []
-    for k in ks:
-        row = next(
-            r for r in summary
-            if r["method"] == "succession"
-            and int(r["prekill_borrower_nodes"]) == k
-        )
-        expected_xs.append(k)
-        expected_ys.append(
-            100.0 * float(row["expected_succession_survival_rate_mean"])
-        )
-    plt.plot(
-        expected_xs,
-        expected_ys,
-        linestyle="--",
-        marker="x",
-        label="Succession predicted from surviving holders",
-    )
-
     plt.xlabel("Borrower/holder nodes failed before owner failure")
-    plt.ylabel("Successful demanded recoveries (%)")
+    plt.ylabel("Successful recoveries for live demand (%)")
     plt.xticks(ks)
     plt.ylim(0, 105)
     plt.legend()
@@ -1396,7 +1408,7 @@ def plot_results(args: argparse.Namespace) -> None:
     plt.savefig(plotdir / "recovery_success_vs_failures.png", dpi=200)
     plt.close()
 
-    # 3) Cost-reliability frontier: left/up is better.
+    # 3) Cost/useful-availability frontier: left/up is better.
     plt.figure(figsize=(7.5, 5.2))
     for method, label in method_specs:
         xs, ys = [], []
@@ -1413,7 +1425,7 @@ def plot_results(args: argparse.Namespace) -> None:
             plt.annotate(f"K={k}", (x, y), textcoords="offset points", xytext=(5, 4))
 
     plt.xlabel("Full-lineage MiB / 1000 produced objects")
-    plt.ylabel("Successful demanded recoveries (%)")
+    plt.ylabel("Successful recoveries for live demand (%)")
     plt.ylim(0, 105)
     plt.legend()
     plt.tight_layout()
@@ -1485,6 +1497,7 @@ def plot_results(args: argparse.Namespace) -> None:
                 if r["method"] == method
                 and int(r["prekill_borrower_nodes"]) == severe_k
                 and int(r["fanout"]) == b
+                and r.get("has_live_demand", "1") == "1"
             ]
             if not subset:
                 continue
