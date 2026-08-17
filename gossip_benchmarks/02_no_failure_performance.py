@@ -346,7 +346,6 @@ def run(args: argparse.Namespace) -> None:
     write_csv(root / "benchmark_timeseries.csv", ts_rows)
     write_csv(root / "benchmark_summary.csv", summarize(run_rows))
 
-
 def plot(args: argparse.Namespace) -> None:
     import matplotlib.pyplot as plt
 
@@ -354,28 +353,124 @@ def plot(args: argparse.Namespace) -> None:
     rows = read_csv(root / "benchmark_summary.csv")
     plot_dir = root / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
-    payloads = sorted({(int(r["payload_bytes"]), r["payload_name"]) for r in rows})
-    method_order = methods()
+
+    payloads = sorted(
+        {(int(r["payload_bytes"]), r["payload_name"]) for r in rows}
+    )
 
     for metric, ci_col, ylabel, filename in [
-        ("throughput_mean_rps", "throughput_ci95_rps", "Completed pipelines / s", "throughput_all_payloads.png"),
-        ("p95_latency_mean_ms", "p95_latency_ci95_ms", "P95 end-to-end latency (ms)", "p95_latency_all_payloads.png"),
+        (
+            "throughput_mean_rps",
+            "throughput_ci95_rps",
+            "Completed pipelines / s",
+            "throughput_all_payloads.png",
+        ),
+        (
+            "p95_latency_mean_ms",
+            "p95_latency_ci95_ms",
+            "P95 end-to-end latency (ms)",
+            "p95_latency_all_payloads.png",
+        ),
     ]:
         plt.figure(figsize=(10.5, 5.5))
-        for payload_bytes, payload_name in payloads:
-            xs, ys, es = [], [], []
-            for idx, method in enumerate(method_order):
-                found = [r for r in rows if r["payload_name"] == payload_name and r["method_label"] == method.label]
-                if not found:
-                    continue
-                xs.append(idx)
-                ys.append(float(found[0][metric]))
-                es.append(float(found[0][ci_col]))
-            plt.errorbar(xs, ys, yerr=es, marker="o", capsize=3, label=f"{payload_name} ({payload_bytes} B)")
-        plt.xticks(range(len(method_order)), [m.label for m in method_order], rotation=35, ha="right")
+
+        # Use one color per payload and distinguish the two recovery
+        # approaches using line style.
+        default_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+        for payload_idx, (payload_bytes, payload_name) in enumerate(payloads):
+            color = default_colors[payload_idx % len(default_colors)]
+
+            # ----------------------------------------------------------
+            # Disabled reference at R=0.
+            # ----------------------------------------------------------
+            disabled_row = [
+                r
+                for r in rows
+                if r["payload_name"] == payload_name
+                and r["method"] == "disabled"
+            ]
+
+            if not disabled_row:
+                continue
+
+            disabled_y = float(disabled_row[0][metric])
+            disabled_e = float(disabled_row[0][ci_col])
+
+            # ----------------------------------------------------------
+            # Succession R=1..4.
+            # ----------------------------------------------------------
+            succession_x = [0]
+            succession_y = [disabled_y]
+            succession_e = [disabled_e]
+
+            for r_value in range(1, 5):
+                found = [
+                    r
+                    for r in rows
+                    if r["payload_name"] == payload_name
+                    and r["method"] == "succession"
+                    and int(r["holders"]) == r_value
+                ]
+
+                if found:
+                    succession_x.append(r_value)
+                    succession_y.append(float(found[0][metric]))
+                    succession_e.append(float(found[0][ci_col]))
+
+            plt.errorbar(
+                succession_x,
+                succession_y,
+                yerr=succession_e,
+                marker="o",
+                linestyle="-",
+                capsize=3,
+                color=color,
+                label=f"{payload_name} Succession",
+            )
+
+            # ----------------------------------------------------------
+            # Witness baseline R=1..4.
+            # Same x positions as Succession.
+            # ----------------------------------------------------------
+            baseline_x = [0]
+            baseline_y = [disabled_y]
+            baseline_e = [disabled_e]
+
+            for r_value in range(1, 5):
+                found = [
+                    r
+                    for r in rows
+                    if r["payload_name"] == payload_name
+                    and r["method"] == "witness_baseline"
+                    and int(r["holders"]) == r_value
+                ]
+
+                if found:
+                    baseline_x.append(r_value)
+                    baseline_y.append(float(found[0][metric]))
+                    baseline_e.append(float(found[0][ci_col]))
+
+            plt.errorbar(
+                baseline_x,
+                baseline_y,
+                yerr=baseline_e,
+                marker="s",
+                linestyle="--",
+                capsize=3,
+                color=color,
+                label=f"{payload_name} Witness baseline",
+            )
+
+        plt.xticks(
+            [0, 1, 2, 3, 4],
+            ["Disabled", "R=1", "R=2", "R=3", "R=4"],
+        )
+
+        plt.xlabel("Recovery redundancy")
         plt.ylabel(ylabel)
-        plt.xlabel("Recovery method / redundancy")
         plt.legend()
+        plt.grid(axis="y", alpha=0.25)
         plt.tight_layout()
         plt.savefig(plot_dir / filename, dpi=200)
         plt.close()
