@@ -34,7 +34,6 @@ namespace ray::core {
 
 /// Patch 4D: pipelined holder admission.
 /// Patch 4F: first-holder TaskSpec piggyback.
-/// Patch 4G: hot-path profiling and B1 ablations.
 /// Stores lineage, succession, and holder-admission state for the
 /// experimental recovery-succession implementation.
 class RecoverySuccessionManager {
@@ -124,37 +123,6 @@ class RecoverySuccessionManager {
     uint64_t register_owned_task_time_ns = 0;
 
 
-    // Patch 4G: synchronous hot-path costs. These are CPU/wall-clock durations
-    // spent inside the calling thread, not asynchronous control-RPC latency.
-    uint64_t recovery_metadata_lookup_calls = 0;
-    uint64_t recovery_metadata_lookup_hits = 0;
-    uint64_t recovery_metadata_lookup_time_ns = 0;
-
-    uint64_t ensure_task_arguments_calls = 0;
-    uint64_t ensure_task_arguments_time_ns = 0;
-
-    uint64_t register_executor_task_calls = 0;
-    uint64_t register_executor_task_time_ns = 0;
-    uint64_t register_executor_metadata_refs_seen = 0;
-    uint64_t register_executor_candidate_reports_built = 0;
-
-    uint64_t candidate_report_build_calls = 0;
-    uint64_t candidate_reports_built = 0;
-    uint64_t candidate_report_build_time_ns = 0;
-
-    uint64_t candidate_queue_calls = 0;
-    uint64_t candidate_queue_time_ns = 0;
-
-    // Candidate-report transport. logical_reports counts individual tasks;
-    // physical_rpcs counts actual single/batched gRPCs.
-    uint64_t candidate_rpc_logical_reports_sent = 0;
-    uint64_t candidate_rpc_logical_reports_completed = 0;
-    uint64_t candidate_rpc_physical_rpcs_sent = 0;
-    uint64_t candidate_rpc_physical_rpcs_completed = 0;
-    uint64_t candidate_rpc_request_bytes_sent = 0;
-    uint64_t candidate_rpc_time_ns = 0;
-
-
 
   };
 
@@ -199,13 +167,6 @@ class RecoverySuccessionManager {
   void RecordTaskSpecManifestAttachLatency(uint64_t latency_ns);
 
   void RecordRegisterOwnedTaskLatency(uint64_t latency_ns);
-
-
-  // Patch 4G hot-path profiling.
-  void RecordEnsureTaskArgumentsLatency(uint64_t latency_ns);
-  void RecordCandidateQueueLatency(uint64_t latency_ns);
-  void RecordCandidateRpcSent(uint64_t logical_reports, uint64_t request_bytes);
-  void RecordCandidateRpcLatency(uint64_t logical_reports, uint64_t latency_ns);
 
 
 
@@ -394,7 +355,7 @@ class RecoverySuccessionManager {
 
   mutable absl::Mutex mutex_;
 
-  mutable RecoverySuccessionProfile profile_ ABSL_GUARDED_BY(mutex_);
+  RecoverySuccessionProfile profile_ ABSL_GUARDED_BY(mutex_);
 
   /// Recovery state indexed by the original task ID.
   absl::flat_hash_map<TaskID, TaskRecoveryState> task_states_ ABSL_GUARDED_BY(mutex_);

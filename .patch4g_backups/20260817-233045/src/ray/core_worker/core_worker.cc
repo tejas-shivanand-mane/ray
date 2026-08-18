@@ -64,7 +64,6 @@ namespace ray::core {
 // Patch 4E: batched recovery control RPCs.
 // Patch 4E-1: first-holder candidate-report fast path.
 // Patch 4F: first-holder TaskSpec piggyback.
-// Patch 4G: hot-path profiling and B1 ablations.
 
 namespace {
 // Default capacity for serialization caches.
@@ -189,16 +188,6 @@ uint64_t RecoveryProfileNowNs() {
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
           .count());
-}
-
-const std::string &RecoveryBenchmarkAblationMode() {
-  static const std::string mode =
-      RayConfig::instance().recovery_succession_benchmark_ablation_mode();
-  RAY_CHECK(mode == "full" || mode == "no_piggyback" ||
-            mode == "metadata_only" || mode == "piggyback_no_candidate" ||
-            mode == "candidate_rpc_no_admit")
-      << "Unknown recovery_succession_benchmark_ablation_mode=" << mode;
-  return mode;
 }
 
 int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
@@ -1301,34 +1290,6 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.register_owned_task_time_ns;
 
 
-  result["recovery_metadata_lookup_calls"] = profile.recovery_metadata_lookup_calls;
-  result["recovery_metadata_lookup_hits"] = profile.recovery_metadata_lookup_hits;
-  result["recovery_metadata_lookup_time_ns"] = profile.recovery_metadata_lookup_time_ns;
-  result["ensure_task_arguments_calls"] = profile.ensure_task_arguments_calls;
-  result["ensure_task_arguments_time_ns"] = profile.ensure_task_arguments_time_ns;
-  result["register_executor_task_calls"] = profile.register_executor_task_calls;
-  result["register_executor_task_time_ns"] = profile.register_executor_task_time_ns;
-  result["register_executor_metadata_refs_seen"] =
-      profile.register_executor_metadata_refs_seen;
-  result["register_executor_candidate_reports_built"] =
-      profile.register_executor_candidate_reports_built;
-  result["candidate_report_build_calls"] = profile.candidate_report_build_calls;
-  result["candidate_reports_built"] = profile.candidate_reports_built;
-  result["candidate_report_build_time_ns"] = profile.candidate_report_build_time_ns;
-  result["candidate_queue_calls"] = profile.candidate_queue_calls;
-  result["candidate_queue_time_ns"] = profile.candidate_queue_time_ns;
-  result["candidate_rpc_logical_reports_sent"] =
-      profile.candidate_rpc_logical_reports_sent;
-  result["candidate_rpc_logical_reports_completed"] =
-      profile.candidate_rpc_logical_reports_completed;
-  result["candidate_rpc_physical_rpcs_sent"] =
-      profile.candidate_rpc_physical_rpcs_sent;
-  result["candidate_rpc_physical_rpcs_completed"] =
-      profile.candidate_rpc_physical_rpcs_completed;
-  result["candidate_rpc_request_bytes_sent"] =
-      profile.candidate_rpc_request_bytes_sent;
-  result["candidate_rpc_time_ns"] = profile.candidate_rpc_time_ns;
-
 
 
 
@@ -1533,8 +1494,6 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
     return;
   }
 
-  const uint64_t patch4g_start_ns =
-      recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
   rpc::RecoveryObjectMetadata ignored_metadata;
 
   for (const rpc::TaskArg &arg : task_spec->args()) {
@@ -1556,11 +1515,6 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
       ignored_metadata.Clear();
       TryPopulateRecoveryMetadataForObject(nested_id, &ignored_metadata);
     }
-  }
-
-  if (patch4g_start_ns != 0) {
-    recovery_succession_manager_->RecordEnsureTaskArgumentsLatency(
-        RecoveryProfileNowNs() - patch4g_start_ns);
   }
 }
 
@@ -5128,16 +5082,6 @@ void CoreWorker::QueueRecoveryCandidateReport(
   }
 
   const TaskID task_id = TaskID::FromBinary(request.task_id());
-  const uint64_t patch4g_queue_start_ns =
-      recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
-  auto patch4g_manager = recovery_succession_manager_;
-  absl::Cleanup patch4g_queue_profile =
-      [patch4g_manager, patch4g_queue_start_ns] {
-        if (patch4g_manager != nullptr && patch4g_queue_start_ns != 0) {
-          patch4g_manager->RecordCandidateQueueLatency(
-              RecoveryProfileNowNs() - patch4g_queue_start_ns);
-        }
-      };
 
   // Preserve deterministic failure-injection semantics. A batch has one gRPC
   // status for all logical items, so the post-witness/pre-commit test continues
@@ -5156,21 +5100,10 @@ void CoreWorker::QueueRecoveryCandidateReport(
       first_holder_candidate) {
     auto manager = recovery_succession_manager_;
     auto client = core_worker_client_pool_->GetOrConnect(coordinator_address);
-    const uint64_t patch4g_rpc_start_ns =
-        recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
-    if (patch4g_rpc_start_ns != 0) {
-      manager->RecordCandidateRpcSent(
-          1, static_cast<uint64_t>(request.ByteSizeLong()));
-    }
     client->ReportRecoveryCandidate(
         std::move(request),
-        [manager, task_id, patch4g_rpc_start_ns](
-            const Status &status,
-            rpc::ReportRecoveryCandidateReply &&candidate_reply) {
-          if (patch4g_rpc_start_ns != 0) {
-            manager->RecordCandidateRpcLatency(
-                1, RecoveryProfileNowNs() - patch4g_rpc_start_ns);
-          }
+        [manager, task_id](const Status &status,
+                           rpc::ReportRecoveryCandidateReply &&candidate_reply) {
           if (!status.ok()) {
             RAY_LOG(DEBUG).WithField(task_id)
                 << "Recovery candidate report failed: " << status;
@@ -5273,21 +5206,10 @@ void CoreWorker::FlushRecoveryCandidateReportBatch(
     rpc::ReportRecoveryCandidateRequest single_request;
     single_request.Swap(&items.front().request);
 
-    const uint64_t patch4g_rpc_start_ns =
-        recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
-    if (patch4g_rpc_start_ns != 0) {
-      manager->RecordCandidateRpcSent(
-          1, static_cast<uint64_t>(single_request.ByteSizeLong()));
-    }
     client->ReportRecoveryCandidate(
         std::move(single_request),
-        [manager, task_id, patch4g_rpc_start_ns](
-            const Status &status,
-            rpc::ReportRecoveryCandidateReply &&candidate_reply) {
-          if (patch4g_rpc_start_ns != 0) {
-            manager->RecordCandidateRpcLatency(
-                1, RecoveryProfileNowNs() - patch4g_rpc_start_ns);
-          }
+        [manager, task_id](const Status &status,
+                           rpc::ReportRecoveryCandidateReply &&candidate_reply) {
           if (!status.ok()) {
             RAY_LOG(DEBUG).WithField(task_id)
                 << "Recovery candidate report failed: " << status;
@@ -5320,25 +5242,11 @@ void CoreWorker::FlushRecoveryCandidateReportBatch(
   RAY_LOG(DEBUG) << "Patch 4E sending candidate batch with "
                  << task_ids.size() << " logical reports";
 
-  const uint64_t patch4g_rpc_start_ns =
-      recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
-  if (patch4g_rpc_start_ns != 0) {
-    manager->RecordCandidateRpcSent(
-        static_cast<uint64_t>(task_ids.size()),
-        static_cast<uint64_t>(batch_request.ByteSizeLong()));
-  }
   client->ReportRecoveryCandidateBatch(
       std::move(batch_request),
-      [manager,
-       task_ids = std::move(task_ids),
-       patch4g_rpc_start_ns](
+      [manager, task_ids = std::move(task_ids)](
           const Status &status,
           rpc::ReportRecoveryCandidateBatchReply &&batch_reply) mutable {
-        if (patch4g_rpc_start_ns != 0) {
-          manager->RecordCandidateRpcLatency(
-              static_cast<uint64_t>(task_ids.size()),
-              RecoveryProfileNowNs() - patch4g_rpc_start_ns);
-        }
         if (!status.ok()) {
           RAY_LOG(DEBUG) << "Recovery candidate batch failed: " << status;
           return;
@@ -5394,26 +5302,10 @@ CoreWorker::PrepareRecoveryCandidateAdmission(
     return std::nullopt;
   }
 
-  auto manager = recovery_succession_manager_;
-
-  // Patch 4G BENCHMARK ONLY: preserve candidate-report construction and the
-  // physical RPC, but stop before holder reservation, install, or witness work.
-  // This mode intentionally does not provide recovery durability.
-  if (RecoveryBenchmarkAblationMode() == "candidate_rpc_no_admit") {
-    if (recovery_succession_profiling_enabled_) {
-      manager->RecordCandidateReport(false);
-    }
-    reply->set_result(rpc::ReportRecoveryCandidateReply::NO_SLOT);
-    if (request.has_cached_manifest()) {
-      reply->mutable_latest_manifest()->CopyFrom(request.cached_manifest());
-    }
-    send_reply_callback(Status::OK(), nullptr, nullptr);
-    return std::nullopt;
-  }
-
   const uint64_t admission_start_ns =
       recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
 
+  auto manager = recovery_succession_manager_;
   RecoverySuccessionManager::HolderAdmissionPlan admission_plan;
   rpc::RecoveryManifest latest_manifest;
 

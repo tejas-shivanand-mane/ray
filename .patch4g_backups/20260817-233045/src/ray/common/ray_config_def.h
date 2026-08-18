@@ -221,16 +221,6 @@ RAY_CONFIG(uint32_t, recovery_succession_witness_count, 2)
 /// protobuf-size measurements are performed.
 RAY_CONFIG(bool, enable_recovery_succession_profiling, false)
 
-/// Patch 4G BENCHMARK ONLY. Selects a diagnostic B1 ablation. Production and
-/// correctness runs must use the default "full" mode.
-/// Supported values:
-///   full                    - ordinary Patch-4F behavior
-///   no_piggyback            - full admission, but H1 uses InstallRecoveryHolder
-///   metadata_only           - compact metadata propagation; no TaskSpec piggyback/report
-///   piggyback_no_candidate  - metadata + H1 TaskSpec sidecar; no candidate report
-///   candidate_rpc_no_admit  - metadata + candidate RPC; owner replies NO_SLOT
-RAY_CONFIG(std::string, recovery_succession_benchmark_ablation_mode, "full")
-
 /// TEST ONLY: deterministically expose the crash window after a compact
 /// witness has acknowledged the proposed holder manifest but before the
 /// candidate has received/applied CommitRecoveryManifest.

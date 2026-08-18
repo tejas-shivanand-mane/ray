@@ -14,7 +14,6 @@
 
 #include "ray/core_worker/recovery_succession_manager.h"
 #include "ray/common/ray_config.h"
-#include "absl/cleanup/cleanup.h"
 #include <cstddef>
 #include <utility>
 #include <chrono>
@@ -24,7 +23,6 @@ namespace ray::core {
 
 // Patch 4D: pipelined holder admission.
 // Patch 4F: first-holder TaskSpec piggyback.
-// Patch 4G: hot-path profiling and B1 ablations.
 
 namespace {
 
@@ -89,16 +87,6 @@ void ClearFirstHolderTaskSpecPiggybacks(rpc::TaskSpec *task_spec) {
       }
     }
   }
-}
-
-const std::string &RecoveryBenchmarkAblationMode() {
-  static const std::string mode =
-      RayConfig::instance().recovery_succession_benchmark_ablation_mode();
-  RAY_CHECK(mode == "full" || mode == "no_piggyback" ||
-            mode == "metadata_only" || mode == "piggyback_no_candidate" ||
-            mode == "candidate_rpc_no_admit")
-      << "Unknown recovery_succession_benchmark_ablation_mode=" << mode;
-  return mode;
 }
 
 }  // namespace
@@ -284,7 +272,6 @@ bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
 
 std::vector<RecoverySuccessionManager::CandidateReport>
 RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) {
-  const auto patch4g_start = std::chrono::steady_clock::now();
   std::vector<std::pair<ObjectID, rpc::RecoveryObjectMetadata>> received_metadata;
 
   auto collect_metadata = [&received_metadata](const rpc::ObjectReference &object_ref) {
@@ -443,18 +430,6 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
         metadata.manifest(),
         piggyback_task_ids.contains(metadata_task_id),
         &reports);
-  }
-
-  if (profiling_enabled_) {
-    ++profile_.register_executor_task_calls;
-    profile_.register_executor_task_time_ns += static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - patch4g_start)
-            .count());
-    profile_.register_executor_metadata_refs_seen +=
-        static_cast<uint64_t>(received_metadata.size());
-    profile_.register_executor_candidate_reports_built +=
-        static_cast<uint64_t>(reports.size());
   }
 
   return reports;
@@ -932,28 +907,17 @@ bool RecoverySuccessionManager::PopulateRecoveryMetadata(
     return false;
   }
 
-  const auto patch4g_start = std::chrono::steady_clock::now();
   absl::MutexLock lock(&mutex_);
 
   const auto metadata_it = object_recovery_metadata_.find(object_id);
-  const bool hit = metadata_it != object_recovery_metadata_.end();
 
-  if (hit) {
-    metadata->CopyFrom(metadata_it->second);
+  if (metadata_it == object_recovery_metadata_.end()) {
+    return false;
   }
 
-  if (profiling_enabled_) {
-    ++profile_.recovery_metadata_lookup_calls;
-    if (hit) {
-      ++profile_.recovery_metadata_lookup_hits;
-    }
-    profile_.recovery_metadata_lookup_time_ns += static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - patch4g_start)
-            .count());
-  }
+  metadata->CopyFrom(metadata_it->second);
 
-  return hit;
+  return true;
 }
 
 void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
@@ -982,16 +946,6 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     // Keep the witness-as-holder baseline unchanged.
     if (RayConfig::instance().enable_recovery_witness_holder_baseline() ||
         out->task_id().empty() || !out->has_manifest()) {
-      return;
-    }
-
-    // Patch 4G benchmark ablations that isolate compact metadata and/or the
-    // candidate RPC must not put the full TaskSpec on PushTask. no_piggyback
-    // recreates the pre-4F H1 transport while keeping full admission semantics.
-    const std::string &patch4g_mode = RecoveryBenchmarkAblationMode();
-    if (patch4g_mode == "metadata_only" ||
-        patch4g_mode == "candidate_rpc_no_admit" ||
-        patch4g_mode == "no_piggyback") {
       return;
     }
 
@@ -1074,28 +1028,6 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
     const rpc::RecoveryManifest &manifest,
     bool already_stores_task_spec,
     std::vector<CandidateReport> *reports) {
-  const auto patch4g_start = std::chrono::steady_clock::now();
-  const size_t patch4g_reports_before = reports == nullptr ? 0 : reports->size();
-  absl::Cleanup patch4g_profile = [this, patch4g_start, patch4g_reports_before, reports] {
-    if (!profiling_enabled_) {
-      return;
-    }
-    ++profile_.candidate_report_build_calls;
-    profile_.candidate_report_build_time_ns += static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - patch4g_start)
-            .count());
-    if (reports != nullptr && reports->size() > patch4g_reports_before) {
-      profile_.candidate_reports_built +=
-          static_cast<uint64_t>(reports->size() - patch4g_reports_before);
-    }
-  };
-
-  const std::string &patch4g_mode = RecoveryBenchmarkAblationMode();
-  if (patch4g_mode == "metadata_only" ||
-      patch4g_mode == "piggyback_no_candidate") {
-    return;
-  }
 
   if (RayConfig::instance().enable_recovery_succession() &&
       RayConfig::instance().enable_recovery_witness_holder_baseline()) {
@@ -1844,48 +1776,6 @@ void RecoverySuccessionManager::RecordRegisterOwnedTaskLatency(
 
   ++profile_.register_owned_task_count;
   profile_.register_owned_task_time_ns += latency_ns;
-}
-
-
-void RecoverySuccessionManager::RecordEnsureTaskArgumentsLatency(
-    uint64_t latency_ns) {
-  if (!profiling_enabled_) {
-    return;
-  }
-  absl::MutexLock lock(&mutex_);
-  ++profile_.ensure_task_arguments_calls;
-  profile_.ensure_task_arguments_time_ns += latency_ns;
-}
-
-void RecoverySuccessionManager::RecordCandidateQueueLatency(uint64_t latency_ns) {
-  if (!profiling_enabled_) {
-    return;
-  }
-  absl::MutexLock lock(&mutex_);
-  ++profile_.candidate_queue_calls;
-  profile_.candidate_queue_time_ns += latency_ns;
-}
-
-void RecoverySuccessionManager::RecordCandidateRpcSent(
-    uint64_t logical_reports, uint64_t request_bytes) {
-  if (!profiling_enabled_) {
-    return;
-  }
-  absl::MutexLock lock(&mutex_);
-  profile_.candidate_rpc_logical_reports_sent += logical_reports;
-  ++profile_.candidate_rpc_physical_rpcs_sent;
-  profile_.candidate_rpc_request_bytes_sent += request_bytes;
-}
-
-void RecoverySuccessionManager::RecordCandidateRpcLatency(
-    uint64_t logical_reports, uint64_t latency_ns) {
-  if (!profiling_enabled_) {
-    return;
-  }
-  absl::MutexLock lock(&mutex_);
-  profile_.candidate_rpc_logical_reports_completed += logical_reports;
-  ++profile_.candidate_rpc_physical_rpcs_completed;
-  profile_.candidate_rpc_time_ns += latency_ns;
 }
 
 
