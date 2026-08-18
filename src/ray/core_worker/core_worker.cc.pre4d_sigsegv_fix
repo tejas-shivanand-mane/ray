@@ -4989,7 +4989,7 @@ void CoreWorker::FinishRecoveryHolderAdmission(
 
   PublishRecoveryManifestToWitnesses(
       state->proposed_manifest,
-      [this, manager, state, witness_publish_start_ns](
+      [this, manager, state = std::move(state), witness_publish_start_ns](
           bool witness_stored,
           std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
         if (witness_publish_start_ns != 0) {
