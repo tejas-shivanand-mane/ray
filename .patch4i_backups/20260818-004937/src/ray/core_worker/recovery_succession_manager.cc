@@ -26,7 +26,6 @@ namespace ray::core {
 // Patch 4F: first-holder TaskSpec piggyback.
 // Patch 4G: hot-path profiling and B1 ablations.
 // Patch 4H: compact task-argument recovery metadata.
-// Patch 4I: TaskSpec-level recovery argument sidecar.
 
 namespace {
 
@@ -89,16 +88,6 @@ void ClearFirstHolderTaskSpecPiggybacks(rpc::TaskSpec *task_spec) {
       if (nested_ref.has_recovery_metadata()) {
         nested_ref.mutable_recovery_metadata()->clear_first_holder_task_spec();
       }
-    }
-  }
-
-  // Patch 4I sidecars are part of the downstream TaskSpec's dependency
-  // recovery description and therefore must survive replay. Only the nested
-  // full-lineage piggyback is transport-only and must be stripped.
-  for (rpc::RecoveryTaskArgumentMetadata &entry :
-       *task_spec->mutable_recovery_argument_metadata()) {
-    if (entry.has_recovery_metadata()) {
-      entry.mutable_recovery_metadata()->clear_first_holder_task_spec();
     }
   }
 }
@@ -235,27 +224,6 @@ bool ExpandTaskArgumentRecoveryMetadata(
   return true;
 }
 
-
-// Patch 4I TaskSpec-level sidecar expansion. Reuse the Patch-4H expansion
-// logic through a local synthetic ObjectReference so all downstream manager
-// state continues to see the exact ordinary RecoveryObjectMetadata shape.
-bool ExpandTaskSidecarRecoveryMetadata(
-    const rpc::RecoveryTaskArgumentMetadata &entry,
-    rpc::RecoveryObjectMetadata *expanded) {
-  if (expanded == nullptr || entry.object_id().empty() ||
-      !entry.has_recovery_metadata()) {
-    return false;
-  }
-
-  rpc::ObjectReference synthetic_ref;
-  synthetic_ref.set_object_id(entry.object_id());
-  if (entry.has_owner_address()) {
-    synthetic_ref.mutable_owner_address()->CopyFrom(entry.owner_address());
-  }
-  synthetic_ref.mutable_recovery_metadata()->CopyFrom(entry.recovery_metadata());
-  return ExpandTaskArgumentRecoveryMetadata(synthetic_ref, expanded);
-}
-
 const std::string &RecoveryBenchmarkAblationMode() {
   static const std::string mode =
       RayConfig::instance().recovery_succession_benchmark_ablation_mode();
@@ -280,12 +248,10 @@ bool RecoverySuccessionManager::IsEligibleTask(const rpc::TaskSpec &task_spec) {
 
 bool RecoverySuccessionManager::CarriesRecoveryMetadata(
     const rpc::TaskSpec &task_spec) {
-  if (task_spec.has_recovery_manifest() ||
-      task_spec.recovery_argument_metadata_size() > 0) {
+  if (task_spec.has_recovery_manifest()) {
     return true;
   }
 
-  // Backward compatibility for TaskSpecs created by pre-4I workers/tests.
   for (const rpc::TaskArg &arg : task_spec.args()) {
     if (arg.has_object_ref() && arg.object_ref().has_recovery_metadata()) {
       return true;
@@ -453,61 +419,28 @@ std::vector<RecoverySuccessionManager::CandidateReport>
 RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) {
   const auto patch4g_start = std::chrono::steady_clock::now();
   std::vector<std::pair<ObjectID, rpc::RecoveryObjectMetadata>> received_metadata;
-  absl::flat_hash_set<ObjectID> received_object_ids;
 
-  auto append_metadata = [&received_metadata, &received_object_ids](
-                             const ObjectID &object_id,
-                             rpc::RecoveryObjectMetadata metadata) {
-    if (!received_object_ids.insert(object_id).second) {
+  auto collect_metadata = [&received_metadata](const rpc::ObjectReference &object_ref) {
+    if (object_ref.object_id().empty() || !object_ref.has_recovery_metadata()) {
       return;
-    }
-    received_metadata.emplace_back(object_id, std::move(metadata));
-  };
-
-  // Patch 4I primary path: one TaskSpec-level sidecar per unique dependency.
-  for (const rpc::RecoveryTaskArgumentMetadata &entry :
-       task_spec.recovery_argument_metadata()) {
-    if (entry.object_id().size() != ObjectID::Size()) {
-      continue;
     }
 
     rpc::RecoveryObjectMetadata metadata;
-    if (!ExpandTaskSidecarRecoveryMetadata(entry, &metadata)) {
-      continue;
+    if (!ExpandTaskArgumentRecoveryMetadata(object_ref, &metadata)) {
+      return;
     }
 
-    append_metadata(ObjectID::FromBinary(entry.object_id()), std::move(metadata));
-  }
-
-  // Backward-compatible path for pre-4I TaskSpecs. A TaskSpec-level entry wins
-  // if both representations are present for the same ObjectID.
-  auto collect_legacy_metadata =
-      [&received_object_ids, &append_metadata](const rpc::ObjectReference &object_ref) {
-        if (object_ref.object_id().empty() || !object_ref.has_recovery_metadata() ||
-            object_ref.object_id().size() != ObjectID::Size()) {
-          return;
-        }
-
-        const ObjectID object_id = ObjectID::FromBinary(object_ref.object_id());
-        if (received_object_ids.contains(object_id)) {
-          return;
-        }
-
-        rpc::RecoveryObjectMetadata metadata;
-        if (!ExpandTaskArgumentRecoveryMetadata(object_ref, &metadata)) {
-          return;
-        }
-
-        append_metadata(object_id, std::move(metadata));
-      };
+    received_metadata.emplace_back(ObjectID::FromBinary(object_ref.object_id()),
+                                   std::move(metadata));
+  };
 
   for (const rpc::TaskArg &arg : task_spec.args()) {
     if (arg.has_object_ref()) {
-      collect_legacy_metadata(arg.object_ref());
+      collect_metadata(arg.object_ref());
     }
 
     for (const rpc::ObjectReference &nested_ref : arg.nested_inlined_refs()) {
-      collect_legacy_metadata(nested_ref);
+      collect_metadata(nested_ref);
     }
   }
 
@@ -1169,92 +1102,47 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
 
   absl::MutexLock lock(&mutex_);
 
-  // This field is transport-only. Rebuilding it from manager state also makes
-  // this method idempotent if task construction revisits the same TaskSpec.
-  task_spec->clear_recovery_argument_metadata();
-  absl::flat_hash_set<ObjectID> attached_object_ids;
-
-  auto populate_one = [this, task_spec, &attached_object_ids](
-                          const ObjectID &object_id,
-                          rpc::ObjectReference *object_ref) {
-    if (object_ref == nullptr || object_id.IsNil()) {
+  auto populate_one = [this](const ObjectID &object_id,
+                             rpc::ObjectReference *object_ref) {
+    if (object_ref == nullptr) {
       return;
     }
-
-    // A legacy/pre-4I ObjectRef may already carry recovery metadata. Save it
-    // as a compatibility fallback, then make the ObjectReference ordinary on
-    // the TaskSpec wire path.
-    rpc::RecoveryObjectMetadata legacy_transport;
-    const bool had_legacy_transport = object_ref->has_recovery_metadata();
-    if (had_legacy_transport) {
-      legacy_transport.CopyFrom(object_ref->recovery_metadata());
-    }
-    object_ref->clear_recovery_metadata();
-
-    // One sidecar per unique dependency even if the same ObjectRef appears in
-    // multiple direct/nested argument positions.
-    if (attached_object_ids.contains(object_id)) {
-      return;
-    }
-
-    rpc::RecoveryObjectMetadata legacy_expanded;
-    const rpc::RecoveryObjectMetadata *source = nullptr;
 
     const auto metadata_it = object_recovery_metadata_.find(object_id);
-    if (metadata_it != object_recovery_metadata_.end()) {
-      source = &metadata_it->second;
-    } else if (had_legacy_transport) {
-      rpc::ObjectReference synthetic_ref;
-      synthetic_ref.set_object_id(object_id.Binary());
-      if (object_ref->has_owner_address()) {
-        synthetic_ref.mutable_owner_address()->CopyFrom(object_ref->owner_address());
-      }
-      synthetic_ref.mutable_recovery_metadata()->CopyFrom(legacy_transport);
-      if (ExpandTaskArgumentRecoveryMetadata(synthetic_ref, &legacy_expanded)) {
-        source = &legacy_expanded;
-      }
-    }
-
-    if (source == nullptr || source->task_id().empty() || !source->has_manifest()) {
+    if (metadata_it == object_recovery_metadata_.end()) {
       return;
     }
 
-    rpc::RecoveryTaskArgumentMetadata *entry =
-        task_spec->add_recovery_argument_metadata();
-    entry->set_object_id(object_id.Binary());
-    if (object_ref->has_owner_address()) {
-      entry->mutable_owner_address()->CopyFrom(object_ref->owner_address());
+    const rpc::RecoveryObjectMetadata &source = metadata_it->second;
+    if (source.task_id().empty() || !source.has_manifest()) {
+      return;
     }
 
-    rpc::RecoveryObjectMetadata *out = entry->mutable_recovery_metadata();
+    rpc::RecoveryObjectMetadata *out = object_ref->mutable_recovery_metadata();
     bool compact_transport = false;
 
-    // Keep witness-as-holder baseline semantics and representation unchanged.
+    // Keep the witness-as-holder baseline byte-for-byte on its old full
+    // metadata path. Patch 4H targets ordinary dynamic Succession only.
     if (RayConfig::instance().enable_recovery_witness_holder_baseline()) {
-      out->CopyFrom(*source);
+      out->CopyFrom(source);
       out->clear_first_holder_task_spec();
       out->clear_compact_manifest();
-    } else if (entry->has_owner_address()) {
+    } else {
       compact_transport = WriteCompactTaskArgumentRecoveryMetadata(
-          *source, source->manifest(), entry->owner_address(), out);
+          source, source.manifest(), object_ref->owner_address(), out);
       if (!compact_transport) {
-        out->CopyFrom(*source);
+        // Safety fallback: transport the complete old metadata rather than
+        // guessing an owner/succession representation.
+        out->CopyFrom(source);
         out->clear_first_holder_task_spec();
         out->clear_compact_manifest();
       }
-    } else {
-      // Safety fallback: a full manifest does not need owner reconstruction.
-      out->CopyFrom(*source);
-      out->clear_first_holder_task_spec();
-      out->clear_compact_manifest();
     }
-
-    attached_object_ids.insert(object_id);
 
     if (profiling_enabled_) {
       ++profile_.task_argument_metadata_refs_attached;
       profile_.task_argument_metadata_full_bytes_equivalent +=
-          static_cast<uint64_t>(source->ByteSizeLong());
+          static_cast<uint64_t>(source.ByteSizeLong());
       profile_.task_argument_metadata_transport_bytes +=
           static_cast<uint64_t>(out->ByteSizeLong());
       if (compact_transport) {
@@ -1264,7 +1152,6 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       }
     }
 
-    // Keep the witness-as-holder baseline unchanged.
     if (RayConfig::instance().enable_recovery_witness_holder_baseline()) {
       return;
     }
@@ -1279,7 +1166,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       return;
     }
 
-    const TaskID producer_task_id = TaskID::FromBinary(source->task_id());
+    const TaskID producer_task_id = TaskID::FromBinary(source.task_id());
     const auto task_it = task_states_.find(producer_task_id);
     if (task_it == task_states_.end()) {
       return;
@@ -1295,7 +1182,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
         state.manifest.tombstoned() ||
         state.manifest.frozen() ||
         state.manifest.succession_size() != 1 ||
-        state.manifest.task_id() != source->task_id()) {
+        state.manifest.task_id() != source.task_id()) {
       return;
     }
 
@@ -1310,13 +1197,13 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       return;
     }
 
-    // Pair the piggybacked lineage with the manager's exact current manifest.
-    // If compact encoding cannot faithfully reproduce rank 0, retain the old
-    // full-manifest fallback rather than weakening recovery semantics.
-    if (!entry->has_owner_address() ||
-        !WriteCompactTaskArgumentRecoveryMetadata(
-            *source, state.manifest, entry->owner_address(), out)) {
-      out->CopyFrom(*source);
+    // The manager state may have advanced since source was last updated.
+    // Rebuild the compact seed from the exact manifest paired with the
+    // piggybacked lineage. If compact encoding is unexpectedly unavailable,
+    // fall back to a full manifest before adding the sidecar.
+    if (!WriteCompactTaskArgumentRecoveryMetadata(
+            source, state.manifest, object_ref->owner_address(), out)) {
+      out->CopyFrom(source);
       out->mutable_manifest()->CopyFrom(state.manifest);
       out->clear_first_holder_task_spec();
       out->clear_compact_manifest();
@@ -1349,15 +1236,14 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
   };
 
   for (rpc::TaskArg &arg : *task_spec->mutable_args()) {
-    if (arg.has_object_ref() && !arg.object_ref().object_id().empty() &&
-        arg.object_ref().object_id().size() == ObjectID::Size()) {
-      populate_one(ObjectID::FromBinary(arg.object_ref().object_id()),
-                   arg.mutable_object_ref());
+    if (arg.has_object_ref() && !arg.object_ref().object_id().empty()) {
+      populate_one(
+          ObjectID::FromBinary(arg.object_ref().object_id()),
+          arg.mutable_object_ref());
     }
 
     for (rpc::ObjectReference &nested_ref : *arg.mutable_nested_inlined_refs()) {
-      if (nested_ref.object_id().empty() ||
-          nested_ref.object_id().size() != ObjectID::Size()) {
+      if (nested_ref.object_id().empty()) {
         continue;
       }
       populate_one(ObjectID::FromBinary(nested_ref.object_id()), &nested_ref);

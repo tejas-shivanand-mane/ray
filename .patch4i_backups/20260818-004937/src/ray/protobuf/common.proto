@@ -632,13 +632,6 @@ message TaskSpec {
 
   optional RecoveryManifest recovery_manifest = 47;
 
-  // Patch 4I transport-only dependency recovery sidecars. Entries are
-  // deduplicated by object_id by the sender and consumed by CoreWorker before
-  // task execution. Retained/replayed TaskSpecs keep compact dependency state,
-  // but nested first-holder TaskSpec piggybacks are stripped.
-  repeated RecoveryTaskArgumentMetadata recovery_argument_metadata = 48;
-
-
 
 }
 
@@ -1249,14 +1242,4 @@ message RecoveryObjectMetadata {
   // Patch 4H transport-only compact manifest seed. When present, the full
   // manifest field is intentionally omitted from the TaskSpec argument.
   RecoveryObjectTransportManifest compact_manifest = 5;
-}
-
-// Patch 4I: transport recovery metadata once per unique dependency at the
-// enclosing TaskSpec level instead of embedding it in ObjectReference. This
-// keeps the ordinary ObjectReference hot path free of Recovery Succession
-// fields while preserving all information required by the receiver.
-message RecoveryTaskArgumentMetadata {
-  bytes object_id = 1;
-  Address owner_address = 2;
-  RecoveryObjectMetadata recovery_metadata = 3;
 }
