@@ -29,6 +29,7 @@ namespace ray::core {
 // Patch 4I: TaskSpec-level recovery argument sidecar.
 // Patch 4J: task-centric recovery state.
 // Patch 4K: full mode uses async holder install; no H1 TaskSpec piggyback.
+// Patch 4L: retain one owner TaskSpec copy until returned refs truly die.
 
 namespace {
 
@@ -420,6 +421,116 @@ bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
   return true;
 }
 
+
+void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
+    const TaskSpecification &task_spec,
+    const std::vector<rpc::ObjectReference> &returned_refs) {
+  const rpc::TaskSpec &task_proto = task_spec.GetMessage();
+
+  if (task_proto.task_id().empty() ||
+      task_proto.has_recovery_manifest() ||
+      !IsEligibleTask(task_proto)) {
+    return;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
+
+  OwnerRetainedTaskState retained;
+  retained.task_spec.CopyFrom(task_proto);
+  ClearFirstHolderTaskSpecPiggybacks(&retained.task_spec);
+
+  for (const rpc::ObjectReference &returned_ref : returned_refs) {
+    if (returned_ref.object_id().size() != ObjectID::Size()) {
+      continue;
+    }
+
+    const ObjectID object_id = ObjectID::FromBinary(returned_ref.object_id());
+    if (object_id.TaskId() != task_id) {
+      continue;
+    }
+
+    retained.live_return_ids.insert(object_id);
+  }
+
+  if (retained.live_return_ids.empty()) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  auto existing = owner_retained_tasks_.find(task_id);
+  if (existing == owner_retained_tasks_.end()) {
+    owner_retained_tasks_[task_id] = std::move(retained);
+    return;
+  }
+
+  for (const ObjectID &object_id : retained.live_return_ids) {
+    existing->second.live_return_ids.insert(object_id);
+  }
+}
+
+bool RecoverySuccessionManager::GetRetainedOwnerTaskSpec(
+    const TaskID &task_id,
+    rpc::TaskSpec *task_spec) const {
+  if (task_spec == nullptr || task_id.IsNil()) {
+    return false;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  const auto it = owner_retained_tasks_.find(task_id);
+  if (it == owner_retained_tasks_.end() ||
+      it->second.live_return_ids.empty()) {
+    return false;
+  }
+
+  task_spec->CopyFrom(it->second.task_spec);
+  return true;
+}
+
+bool RecoverySuccessionManager::OwnerTaskHasLiveReturns(
+    const TaskID &task_id) const {
+  if (task_id.IsNil()) {
+    return false;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  const auto it = owner_retained_tasks_.find(task_id);
+  return it != owner_retained_tasks_.end() &&
+         !it->second.live_return_ids.empty();
+}
+
+bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
+    const ObjectID &object_id) {
+  if (object_id.IsNil()) {
+    return false;
+  }
+
+  const TaskID task_id = object_id.TaskId();
+
+  absl::MutexLock lock(&mutex_);
+
+  auto retained_it = owner_retained_tasks_.find(task_id);
+  if (retained_it == owner_retained_tasks_.end()) {
+    return false;
+  }
+
+  if (retained_it->second.live_return_ids.erase(object_id) == 0) {
+    return false;
+  }
+
+  if (!retained_it->second.live_return_ids.empty()) {
+    return false;
+  }
+
+  owner_retained_tasks_.erase(retained_it);
+
+  const auto task_it = task_states_.find(task_id);
+  return task_it != task_states_.end() &&
+         !task_it->second.manifest.tombstoned();
+}
+
+
 std::vector<RecoverySuccessionManager::CandidateReport>
 RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) {
   const auto patch4g_start = std::chrono::steady_clock::now();
@@ -809,10 +920,21 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   plan->candidate_already_stores_task_spec = request.already_stores_task_spec();
 
   if (!plan->candidate_already_stores_task_spec) {
-    const rpc::TaskSpec *lineage_task_spec =
-        task_it->second.task_spec.has_value()
-            ? &task_it->second.task_spec.value()
-            : owner_task_spec;
+    const rpc::TaskSpec *lineage_task_spec = nullptr;
+
+    if (task_it->second.task_spec.has_value()) {
+      lineage_task_spec = &task_it->second.task_spec.value();
+    } else if (owner_task_spec != nullptr) {
+      lineage_task_spec = owner_task_spec;
+    } else {
+      // Patch 4L: TaskManager may have legitimately dropped ordinary lineage
+      // while the application still owns a return ObjectRef.
+      const auto retained_it = owner_retained_tasks_.find(task_id);
+      if (retained_it != owner_retained_tasks_.end() &&
+          !retained_it->second.live_return_ids.empty()) {
+        lineage_task_spec = &retained_it->second.task_spec;
+      }
+    }
 
     if (lineage_task_spec == nullptr ||
         lineage_task_spec->task_id() != task_id.Binary() ||
@@ -1580,8 +1702,21 @@ RecoverySuccessionManager::PrepareTaskReplay(
     return ReplayPreparationResult::TOMBSTONED;
   }
 
-  const rpc::TaskSpec *lineage_task_spec =
-      state.task_spec.has_value() ? &state.task_spec.value() : owner_task_spec;
+  const rpc::TaskSpec *lineage_task_spec = nullptr;
+
+  if (state.task_spec.has_value()) {
+    lineage_task_spec = &state.task_spec.value();
+  } else if (owner_task_spec != nullptr) {
+    lineage_task_spec = owner_task_spec;
+  } else {
+    // Patch 4L: owner replay may outlive TaskManager's ordinary lineage entry.
+    const auto retained_it = owner_retained_tasks_.find(task_id);
+    if (retained_it != owner_retained_tasks_.end() &&
+        !retained_it->second.live_return_ids.empty()) {
+      lineage_task_spec = &retained_it->second.task_spec;
+    }
+  }
+
   if (lineage_task_spec == nullptr ||
       lineage_task_spec->task_id() != task_id.Binary() ||
       !IsEligibleTask(*lineage_task_spec)) {

@@ -38,6 +38,7 @@ namespace ray::core {
 /// Patch 4H: compact task-argument recovery metadata.
 /// Patch 4I: TaskSpec-level recovery argument sidecar.
 /// Patch 4J: task-centric recovery state and on-demand owner lineage.
+/// Patch 4L: correctness-preserving retained owner lineage for late borrow.
 /// Stores lineage, succession, and holder-admission state for the
 /// experimental recovery-succession implementation.
 class RecoverySuccessionManager {
@@ -256,6 +257,24 @@ class RecoverySuccessionManager {
   bool RegisterOwnedTaskLazy(const TaskSpecification &task_spec,
                              const rpc::RecoveryManifest &manifest);
 
+  /// Patch 4L: retain one dormant owner TaskSpec copy while at least one static
+  /// return ObjectRef is truly in scope. This does not activate recovery or
+  /// construct a manifest.
+  void RetainOwnerTaskSpecForLazyRecovery(
+      const TaskSpecification &task_spec,
+      const std::vector<rpc::ObjectReference> &returned_refs);
+
+  /// Copies the retained owner TaskSpec if one is still live.
+  bool GetRetainedOwnerTaskSpec(const TaskID &task_id,
+                                rpc::TaskSpec *task_spec) const;
+
+  /// True while this owner task still has at least one live returned ObjectRef.
+  bool OwnerTaskHasLiveReturns(const TaskID &task_id) const;
+
+  /// Records actual ObjectRef deletion. Returns true iff this was the final
+  /// owner return and an activated recovery task should now be tombstoned.
+  bool HandleOwnerReturnRefDeleted(const ObjectID &object_id);
+
   /// Records a received TaskSpec and returns candidate reports that should be
   /// sent to the coordinators of the received task and its dependencies.
   std::vector<CandidateReport> RegisterExecutorTask(const rpc::TaskSpec &task_spec);
@@ -402,6 +421,11 @@ class RecoverySuccessionManager {
     bool provisional_piggyback_task_spec = false;
   };
 
+  struct OwnerRetainedTaskState {
+    rpc::TaskSpec task_spec;
+    absl::flat_hash_set<ObjectID> live_return_ids;
+  };
+
   struct BorrowedObjectRecoveryState {
     TaskID task_id;
     uint32_t return_index = 0;
@@ -435,6 +459,12 @@ class RecoverySuccessionManager {
 
   /// Recovery state indexed by the original task ID.
   absl::flat_hash_map<TaskID, TaskRecoveryState> task_states_ ABSL_GUARDED_BY(mutex_);
+
+  /// Patch 4L: one correctness-preserving owner TaskSpec copy retained
+  /// independently of TaskManager's ordinary lineage lifetime. Presence here
+  /// does not mean recovery has been activated.
+  absl::flat_hash_map<TaskID, OwnerRetainedTaskState> owner_retained_tasks_
+      ABSL_GUARDED_BY(mutex_);
 
   /// Recovery information for borrowed objects.
   absl::flat_hash_map<ObjectID, BorrowedObjectRecoveryState> borrowed_objects_

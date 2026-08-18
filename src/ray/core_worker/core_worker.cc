@@ -69,6 +69,7 @@ namespace ray::core {
 // Patch 4I: TaskSpec-level recovery argument sidecar.
 // Patch 4J: task-centric recovery state.
 // Patch 4K: batched H1 candidate/install path.
+// Patch 4L: correctness-preserving retained owner TaskSpec for late borrow.
 
 namespace {
 // Default capacity for serialization caches.
@@ -489,6 +490,13 @@ CoreWorker::CoreWorker(
           [this, task_id] {
             if (!recovery_succession_enabled_ ||
                 recovery_succession_manager_ == nullptr) {
+              return;
+            }
+
+            // Patch 4L: TaskManager lineage can be released after producer
+            // completion even while a returned ObjectRef is still in scope.
+            // Actual owner-return lifetime is authoritative for recovery cleanup.
+            if (recovery_succession_manager_->OwnerTaskHasLiveReturns(task_id)) {
               return;
             }
 
@@ -1422,8 +1430,17 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 
   const TaskID task_id = object_id.TaskId();
   auto task_spec_opt = task_manager_->GetTaskSpec(task_id);
+
   if (!task_spec_opt.has_value()) {
-    return false;
+    // Patch 4L: producer completion may have removed TaskManager's ordinary
+    // lineage even though the returned ObjectRef is still strongly live.
+    rpc::TaskSpec retained_task_spec;
+    if (!recovery_succession_manager_->GetRetainedOwnerTaskSpec(
+            task_id, &retained_task_spec)) {
+      return false;
+    }
+
+    task_spec_opt.emplace(std::move(retained_task_spec));
   }
 
   const TaskSpecification &task_spec = task_spec_opt.value();
@@ -3081,6 +3098,72 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   std::vector<rpc::ObjectReference> returned_refs;
   returned_refs = task_manager_->AddPendingTask(
       task_spec.CallerAddress(), task_spec, CurrentCallSite(), max_retries);
+
+  // Patch 4L: retain one correctness-preserving owner TaskSpec copy for
+  // eligible lazy-recovery tasks. This does NOT activate recovery: no manifest,
+  // witness, candidate, holder, or control RPC is created here.
+  if (recovery_succession_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
+      !task_spec.GetMessage().has_recovery_manifest() &&
+      RecoverySuccessionManager::IsEligibleTask(task_spec.GetMessage())) {
+    recovery_succession_manager_->RetainOwnerTaskSpecForLazyRecovery(
+        task_spec, returned_refs);
+
+    auto on_owner_return_deleted = [this](const ObjectID &deleted_object_id) {
+      if (!recovery_succession_enabled_ ||
+          recovery_succession_manager_ == nullptr) {
+        return;
+      }
+
+      const TaskID task_id = deleted_object_id.TaskId();
+
+      if (!recovery_succession_manager_->HandleOwnerReturnRefDeleted(
+              deleted_object_id)) {
+        return;
+      }
+
+      io_service_.post(
+          [this, task_id] {
+            if (!recovery_succession_enabled_ ||
+                recovery_succession_manager_ == nullptr) {
+              return;
+            }
+
+            auto tombstone =
+                recovery_succession_manager_->BuildTombstoneForTask(task_id);
+            if (!tombstone.has_value()) {
+              return;
+            }
+
+            if (!recovery_tombstones_in_flight_.insert(task_id).second) {
+              return;
+            }
+
+            RAY_LOG(INFO).WithField(task_id)
+                << "Owner return refs released; publishing recovery tombstone";
+
+            PublishRecoveryTombstone(std::move(tombstone.value()));
+          },
+          "CoreWorker.PublishRecoveryTombstone");
+    };
+
+    for (const rpc::ObjectReference &returned_ref : returned_refs) {
+      if (returned_ref.object_id().size() != ObjectID::Size()) {
+        continue;
+      }
+
+      const ObjectID object_id =
+          ObjectID::FromBinary(returned_ref.object_id());
+
+      const bool callback_added =
+          reference_counter_->AddObjectRefDeletedCallback(
+              object_id, on_owner_return_deleted);
+
+      if (!callback_added) {
+        on_owner_return_deleted(object_id);
+      }
+    }
+  }
 
   if (recovery_succession_enabled_ &&
       recovery_succession_manager_ != nullptr &&
