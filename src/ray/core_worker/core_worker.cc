@@ -3115,7 +3115,7 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
         return;
       }
 
-      const TaskID task_id = deleted_object_id.TaskId();
+      const TaskID deleted_task_id = deleted_object_id.TaskId();
 
       if (!recovery_succession_manager_->HandleOwnerReturnRefDeleted(
               deleted_object_id)) {
@@ -3123,23 +3123,23 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
       }
 
       io_service_.post(
-          [this, task_id] {
+          [this, deleted_task_id] {
             if (!recovery_succession_enabled_ ||
                 recovery_succession_manager_ == nullptr) {
               return;
             }
 
             auto tombstone =
-                recovery_succession_manager_->BuildTombstoneForTask(task_id);
+                recovery_succession_manager_->BuildTombstoneForTask(deleted_task_id);
             if (!tombstone.has_value()) {
               return;
             }
 
-            if (!recovery_tombstones_in_flight_.insert(task_id).second) {
+            if (!recovery_tombstones_in_flight_.insert(deleted_task_id).second) {
               return;
             }
 
-            RAY_LOG(INFO).WithField(task_id)
+            RAY_LOG(INFO).WithField(deleted_task_id)
                 << "Owner return refs released; publishing recovery tombstone";
 
             PublishRecoveryTombstone(std::move(tombstone.value()));
