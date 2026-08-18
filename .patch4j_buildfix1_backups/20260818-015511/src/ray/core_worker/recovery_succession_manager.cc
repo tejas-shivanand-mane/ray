@@ -1191,7 +1191,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
   task_spec->clear_recovery_argument_metadata();
   absl::flat_hash_set<ObjectID> attached_object_ids;
 
-  auto populate_one = [this, task_spec, &attached_object_ids, owner_task_specs](
+  auto populate_one = [this, task_spec, &attached_object_ids](
                           const ObjectID &object_id,
                           rpc::ObjectReference *object_ref) {
     if (object_ref == nullptr || object_id.IsNil()) {
@@ -1879,8 +1879,7 @@ void RecoverySuccessionManager::EraseTaskObjectMetadataLocked(
   for (auto it = borrowed_objects_.begin(); it != borrowed_objects_.end();) {
     if (it->second.task_id == task_id) {
       object_recovery_metadata_.erase(it->first);
-      const auto erase_it = it++;
-      borrowed_objects_.erase(erase_it);
+      it = borrowed_objects_.erase(it);
     } else {
       ++it;
     }
