@@ -35,7 +35,6 @@ namespace ray::core {
 /// Patch 4D: pipelined holder admission.
 /// Patch 4F: first-holder TaskSpec piggyback.
 /// Patch 4G: hot-path profiling and B1 ablations.
-/// Patch 4H: compact task-argument recovery metadata.
 /// Stores lineage, succession, and holder-admission state for the
 /// experimental recovery-succession implementation.
 class RecoverySuccessionManager {
@@ -107,14 +106,6 @@ class RecoverySuccessionManager {
     // Recovery work performed before any downstream holder admission.
     uint64_t task_argument_metadata_calls = 0;
     uint64_t task_argument_metadata_time_ns = 0;
-
-    // Patch 4H: base recovery metadata bytes attached to normal TaskSpec
-    // arguments, excluding the optional first-holder TaskSpec sidecar.
-    uint64_t task_argument_metadata_refs_attached = 0;
-    uint64_t task_argument_metadata_compact_refs = 0;
-    uint64_t task_argument_metadata_compact_fallbacks = 0;
-    uint64_t task_argument_metadata_full_bytes_equivalent = 0;
-    uint64_t task_argument_metadata_transport_bytes = 0;
 
     uint64_t initial_manifest_build_count = 0;
     uint64_t initial_manifest_build_time_ns = 0;
@@ -284,10 +275,6 @@ class RecoverySuccessionManager {
   /// Copies known recovery metadata into metadata.
   bool PopulateRecoveryMetadata(const ObjectID &object_id,
                                 rpc::RecoveryObjectMetadata *metadata) const;
-
-  /// Patch 4H no-copy fast path used by task-argument activation. This checks
-  /// whether metadata already exists without copying the full metadata proto.
-  bool HasRecoveryMetadata(const ObjectID &object_id) const;
 
   /// Adds recovery metadata to direct and nested ObjectRef arguments.
   /// Patch 4F may atomically claim the one-shot H1 TaskSpec piggyback, so this

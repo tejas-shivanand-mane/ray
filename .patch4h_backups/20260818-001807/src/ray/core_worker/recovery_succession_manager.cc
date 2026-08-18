@@ -25,7 +25,6 @@ namespace ray::core {
 // Patch 4D: pipelined holder admission.
 // Patch 4F: first-holder TaskSpec piggyback.
 // Patch 4G: hot-path profiling and B1 ablations.
-// Patch 4H: compact task-argument recovery metadata.
 
 namespace {
 
@@ -90,138 +89,6 @@ void ClearFirstHolderTaskSpecPiggybacks(rpc::TaskSpec *task_spec) {
       }
     }
   }
-}
-
-
-// Patch 4H sender-side compact encoding. This is intentionally restricted to
-// TaskSpec argument transport; internal recovery state still stores a complete
-// RecoveryManifest. If the standard ObjectReference owner cannot reproduce the
-// manifest's rank-0 owner exactly enough for recovery, return false and the
-// caller falls back to the old full metadata representation.
-bool WriteCompactTaskArgumentRecoveryMetadata(
-    const rpc::RecoveryObjectMetadata &source,
-    const rpc::RecoveryManifest &manifest,
-    const rpc::Address &object_owner,
-    rpc::RecoveryObjectMetadata *out) {
-  if (out == nullptr || source.task_id().empty() || manifest.task_id().empty() ||
-      source.task_id() != manifest.task_id() || !manifest.has_version()) {
-    return false;
-  }
-
-  const rpc::RecoveryHolder *owner = FindHolderByRank(manifest, 0);
-  if (owner == nullptr || object_owner.worker_id().empty() ||
-      !SameWorker(owner->address(), object_owner)) {
-    return false;
-  }
-
-  out->Clear();
-  out->set_return_index(source.return_index());
-
-  rpc::RecoveryObjectTransportManifest *compact = out->mutable_compact_manifest();
-  compact->set_target_holder_count(manifest.target_holder_count());
-  compact->set_witness_count(manifest.witness_count());
-  compact->set_generation(manifest.version().generation());
-  compact->set_frozen(manifest.frozen());
-  compact->set_tombstoned(manifest.tombstoned());
-  compact->set_recovery_attempt(manifest.recovery_attempt());
-  compact->set_max_recovery_attempts(manifest.max_recovery_attempts());
-
-  for (const rpc::Address &witness : manifest.witness_raylets()) {
-    compact->add_witness_raylets()->CopyFrom(witness);
-  }
-
-  // Ranks are fixed and contiguous in Recovery Succession. Rank 0 is already
-  // carried by ObjectReference.owner_address, so only H1..HR are transported.
-  for (const rpc::RecoveryHolder &holder : manifest.succession()) {
-    if (holder.rank() == 0) {
-      continue;
-    }
-    if (holder.rank() !=
-        static_cast<uint32_t>(compact->non_owner_holders_size() + 1)) {
-      out->Clear();
-      return false;
-    }
-    compact->add_non_owner_holders()->CopyFrom(holder.address());
-  }
-
-  return true;
-}
-
-// Patch 4H receiver-side expansion. Existing admission, witness confirmation,
-// replay, tombstone, and rollback code continues to consume the ordinary full
-// RecoveryManifest, so the compact representation never escapes this boundary.
-bool ExpandTaskArgumentRecoveryMetadata(
-    const rpc::ObjectReference &object_ref,
-    rpc::RecoveryObjectMetadata *expanded) {
-  if (expanded == nullptr || object_ref.object_id().empty() ||
-      !object_ref.has_recovery_metadata()) {
-    return false;
-  }
-
-  const rpc::RecoveryObjectMetadata &transport = object_ref.recovery_metadata();
-
-  // Backward-compatible/fallback path.
-  if (!transport.task_id().empty() && transport.has_manifest()) {
-    expanded->CopyFrom(transport);
-    expanded->clear_compact_manifest();
-    return true;
-  }
-
-  if (!transport.has_compact_manifest() || !object_ref.has_owner_address() ||
-      object_ref.owner_address().worker_id().empty() ||
-      object_ref.object_id().size() != ObjectID::Size()) {
-    return false;
-  }
-
-  const rpc::RecoveryObjectTransportManifest &compact =
-      transport.compact_manifest();
-  if (compact.generation() == 0) {
-    return false;
-  }
-
-  const ObjectID object_id = ObjectID::FromBinary(object_ref.object_id());
-  const TaskID task_id = object_id.TaskId();
-
-  expanded->Clear();
-  expanded->set_task_id(task_id.Binary());
-  expanded->set_return_index(transport.return_index());
-  if (!transport.first_holder_task_spec().empty()) {
-    expanded->set_first_holder_task_spec(transport.first_holder_task_spec());
-  }
-
-  rpc::RecoveryManifest *manifest = expanded->mutable_manifest();
-  manifest->set_task_id(task_id.Binary());
-  manifest->set_job_id(task_id.JobId().Binary());
-  manifest->set_target_holder_count(compact.target_holder_count());
-  manifest->set_witness_count(compact.witness_count());
-  manifest->mutable_version()->set_generation(compact.generation());
-  manifest->set_frozen(compact.frozen());
-  manifest->set_tombstoned(compact.tombstoned());
-  manifest->set_recovery_attempt(compact.recovery_attempt());
-  manifest->set_max_recovery_attempts(compact.max_recovery_attempts());
-
-  for (const rpc::Address &witness : compact.witness_raylets()) {
-    manifest->add_witness_raylets()->CopyFrom(witness);
-  }
-
-  rpc::RecoveryHolder *owner = manifest->add_succession();
-  owner->mutable_address()->CopyFrom(object_ref.owner_address());
-  owner->set_rank(0);
-  owner->set_failure_domain_id(object_ref.owner_address().node_id());
-
-  for (int i = 0; i < compact.non_owner_holders_size(); ++i) {
-    const rpc::Address &address = compact.non_owner_holders(i);
-    if (address.worker_id().empty()) {
-      expanded->Clear();
-      return false;
-    }
-    rpc::RecoveryHolder *holder = manifest->add_succession();
-    holder->mutable_address()->CopyFrom(address);
-    holder->set_rank(static_cast<uint32_t>(i + 1));
-    holder->set_failure_domain_id(address.node_id());
-  }
-
-  return true;
 }
 
 const std::string &RecoveryBenchmarkAblationMode() {
@@ -425,13 +292,14 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
       return;
     }
 
-    rpc::RecoveryObjectMetadata metadata;
-    if (!ExpandTaskArgumentRecoveryMetadata(object_ref, &metadata)) {
+    const rpc::RecoveryObjectMetadata &metadata = object_ref.recovery_metadata();
+
+    if (metadata.task_id().empty() || !metadata.has_manifest()) {
       return;
     }
 
     received_metadata.emplace_back(ObjectID::FromBinary(object_ref.object_id()),
-                                   std::move(metadata));
+                                   metadata);
   };
 
   for (const rpc::TaskArg &arg : task_spec.args()) {
@@ -1058,12 +926,6 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
   return true;
 }
 
-bool RecoverySuccessionManager::HasRecoveryMetadata(
-    const ObjectID &object_id) const {
-  absl::MutexLock lock(&mutex_);
-  return object_recovery_metadata_.contains(object_id);
-}
-
 bool RecoverySuccessionManager::PopulateRecoveryMetadata(
     const ObjectID &object_id, rpc::RecoveryObjectMetadata *metadata) const {
   if (metadata == nullptr) {
@@ -1113,46 +975,13 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       return;
     }
 
-    const rpc::RecoveryObjectMetadata &source = metadata_it->second;
-    if (source.task_id().empty() || !source.has_manifest()) {
-      return;
-    }
-
     rpc::RecoveryObjectMetadata *out = object_ref->mutable_recovery_metadata();
-    bool compact_transport = false;
+    out->CopyFrom(metadata_it->second);
+    out->clear_first_holder_task_spec();
 
-    // Keep the witness-as-holder baseline byte-for-byte on its old full
-    // metadata path. Patch 4H targets ordinary dynamic Succession only.
-    if (RayConfig::instance().enable_recovery_witness_holder_baseline()) {
-      out->CopyFrom(source);
-      out->clear_first_holder_task_spec();
-      out->clear_compact_manifest();
-    } else {
-      compact_transport = WriteCompactTaskArgumentRecoveryMetadata(
-          source, source.manifest(), object_ref->owner_address(), out);
-      if (!compact_transport) {
-        // Safety fallback: transport the complete old metadata rather than
-        // guessing an owner/succession representation.
-        out->CopyFrom(source);
-        out->clear_first_holder_task_spec();
-        out->clear_compact_manifest();
-      }
-    }
-
-    if (profiling_enabled_) {
-      ++profile_.task_argument_metadata_refs_attached;
-      profile_.task_argument_metadata_full_bytes_equivalent +=
-          static_cast<uint64_t>(source.ByteSizeLong());
-      profile_.task_argument_metadata_transport_bytes +=
-          static_cast<uint64_t>(out->ByteSizeLong());
-      if (compact_transport) {
-        ++profile_.task_argument_metadata_compact_refs;
-      } else if (!RayConfig::instance().enable_recovery_witness_holder_baseline()) {
-        ++profile_.task_argument_metadata_compact_fallbacks;
-      }
-    }
-
-    if (RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    // Keep the witness-as-holder baseline unchanged.
+    if (RayConfig::instance().enable_recovery_witness_holder_baseline() ||
+        out->task_id().empty() || !out->has_manifest()) {
       return;
     }
 
@@ -1166,7 +995,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       return;
     }
 
-    const TaskID producer_task_id = TaskID::FromBinary(source.task_id());
+    const TaskID producer_task_id = TaskID::FromBinary(out->task_id());
     const auto task_it = task_states_.find(producer_task_id);
     if (task_it == task_states_.end()) {
       return;
@@ -1182,7 +1011,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
         state.manifest.tombstoned() ||
         state.manifest.frozen() ||
         state.manifest.succession_size() != 1 ||
-        state.manifest.task_id() != source.task_id()) {
+        state.manifest.task_id() != out->task_id()) {
       return;
     }
 
@@ -1197,17 +1026,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       return;
     }
 
-    // The manager state may have advanced since source was last updated.
-    // Rebuild the compact seed from the exact manifest paired with the
-    // piggybacked lineage. If compact encoding is unexpectedly unavailable,
-    // fall back to a full manifest before adding the sidecar.
-    if (!WriteCompactTaskArgumentRecoveryMetadata(
-            source, state.manifest, object_ref->owner_address(), out)) {
-      out->CopyFrom(source);
-      out->mutable_manifest()->CopyFrom(state.manifest);
-      out->clear_first_holder_task_spec();
-      out->clear_compact_manifest();
-    }
+    out->mutable_manifest()->CopyFrom(state.manifest);
 
     const auto serialize_start = std::chrono::steady_clock::now();
     std::string serialized_task_spec;

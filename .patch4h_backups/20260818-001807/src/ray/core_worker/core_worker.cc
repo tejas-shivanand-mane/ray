@@ -65,7 +65,6 @@ namespace ray::core {
 // Patch 4E-1: first-holder candidate-report fast path.
 // Patch 4F: first-holder TaskSpec piggyback.
 // Patch 4G: hot-path profiling and B1 ablations.
-// Patch 4H: compact task-argument recovery metadata.
 
 namespace {
 // Default capacity for serialization caches.
@@ -1274,17 +1273,6 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
   result["task_argument_metadata_time_ns"] =
       profile.task_argument_metadata_time_ns;
 
-  result["task_argument_metadata_refs_attached"] =
-      profile.task_argument_metadata_refs_attached;
-  result["task_argument_metadata_compact_refs"] =
-      profile.task_argument_metadata_compact_refs;
-  result["task_argument_metadata_compact_fallbacks"] =
-      profile.task_argument_metadata_compact_fallbacks;
-  result["task_argument_metadata_full_bytes_equivalent"] =
-      profile.task_argument_metadata_full_bytes_equivalent;
-  result["task_argument_metadata_transport_bytes"] =
-      profile.task_argument_metadata_transport_bytes;
-
   result["initial_manifest_build_count"] =
       profile.initial_manifest_build_count;
   result["initial_manifest_build_time_ns"] =
@@ -1394,19 +1382,14 @@ Status CoreWorker::GetOwnerAddress(const ObjectID &object_id,
 bool CoreWorker::TryPopulateRecoveryMetadataForObject(
     const ObjectID &object_id,
     rpc::RecoveryObjectMetadata *metadata) const {
-  if (!recovery_succession_enabled_ ||
+  if (metadata == nullptr || !recovery_succession_enabled_ ||
       recovery_succession_manager_ == nullptr) {
     return false;
   }
 
-  // Patch 4H: callers that only need activation may pass nullptr. Avoid a
-  // complete RecoveryObjectMetadata/RecoveryManifest CopyFrom on that path.
-  if (metadata == nullptr) {
-    if (recovery_succession_manager_->HasRecoveryMetadata(object_id)) {
-      return true;
-    }
-  } else if (recovery_succession_manager_->PopulateRecoveryMetadata(
-                 object_id, metadata)) {
+  // Fast path after the first export/borrow.
+  if (recovery_succession_manager_->PopulateRecoveryMetadata(
+          object_id, metadata)) {
     return true;
   }
 
@@ -1539,9 +1522,6 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 
   // If another thread won the initialization race, its metadata is visible
   // here once RegisterOwnedTaskLazy returns.
-  if (metadata == nullptr) {
-    return recovery_succession_manager_->HasRecoveryMetadata(object_id);
-  }
   return recovery_succession_manager_->PopulateRecoveryMetadata(
       object_id, metadata);
 }
@@ -1555,11 +1535,14 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
 
   const uint64_t patch4g_start_ns =
       recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+  rpc::RecoveryObjectMetadata ignored_metadata;
+
   for (const rpc::TaskArg &arg : task_spec->args()) {
     if (arg.has_object_ref() && !arg.object_ref().object_id().empty()) {
       const ObjectID object_id =
           ObjectID::FromBinary(arg.object_ref().object_id());
-      TryPopulateRecoveryMetadataForObject(object_id, nullptr);
+      ignored_metadata.Clear();
+      TryPopulateRecoveryMetadataForObject(object_id, &ignored_metadata);
     }
 
     for (const rpc::ObjectReference &nested_ref :
@@ -1570,7 +1553,8 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
 
       const ObjectID nested_id =
           ObjectID::FromBinary(nested_ref.object_id());
-      TryPopulateRecoveryMetadataForObject(nested_id, nullptr);
+      ignored_metadata.Clear();
+      TryPopulateRecoveryMetadataForObject(nested_id, &ignored_metadata);
     }
   }
 

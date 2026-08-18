@@ -86,11 +86,6 @@ PROFILE_KEYS = [
     "frozen_commits",
     "task_argument_metadata_calls",
     "task_argument_metadata_time_ns",
-    "task_argument_metadata_refs_attached",
-    "task_argument_metadata_compact_refs",
-    "task_argument_metadata_compact_fallbacks",
-    "task_argument_metadata_full_bytes_equivalent",
-    "task_argument_metadata_transport_bytes",
     "initial_manifest_build_count",
     "initial_manifest_build_time_ns",
     "initial_manifest_bytes",
@@ -376,21 +371,6 @@ def add_derived(row: dict[str, Any], owner: dict[str, Any], borrower: dict[str, 
     row["owner_control_bytes_per_pipeline"] = (
         float(owner["task_spec_bytes_sent"] + owner["manifest_bytes_sent"] + borrower["candidate_rpc_request_bytes_sent"]) / tasks
     )
-    row["owner_metadata_full_equiv_bytes_per_pipeline"] = (
-        float(owner["task_argument_metadata_full_bytes_equivalent"]) / tasks
-    )
-    row["owner_metadata_transport_bytes_per_pipeline"] = (
-        float(owner["task_argument_metadata_transport_bytes"]) / tasks
-    )
-    full_meta_bytes = float(owner["task_argument_metadata_full_bytes_equivalent"])
-    row["owner_metadata_transport_ratio"] = (
-        float(owner["task_argument_metadata_transport_bytes"]) / full_meta_bytes
-        if full_meta_bytes > 0
-        else math.nan
-    )
-    row["owner_metadata_compact_fallbacks_per_pipeline"] = (
-        float(owner["task_argument_metadata_compact_fallbacks"]) / tasks
-    )
 
 
 def run_one(case: Case, repetition: int, args: argparse.Namespace) -> dict[str, Any]:
@@ -470,10 +450,6 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "owner_piggyback_copies_per_pipeline",
         "owner_install_rpcs_per_pipeline",
         "owner_control_bytes_per_pipeline",
-        "owner_metadata_full_equiv_bytes_per_pipeline",
-        "owner_metadata_transport_bytes_per_pipeline",
-        "owner_metadata_transport_ratio",
-        "owner_metadata_compact_fallbacks_per_pipeline",
     ]
 
     for case in cases():

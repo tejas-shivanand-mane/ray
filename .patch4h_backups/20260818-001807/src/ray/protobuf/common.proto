@@ -1206,28 +1206,6 @@ message RecoveryManifest {
   int32 max_recovery_attempts = 11;
 }
 
-
-// Patch 4H: compact transport form used only inside downstream TaskSpec
-// ObjectReference recovery metadata. Internal manager state and generic object
-// status/reference propagation may continue to use the full RecoveryManifest.
-//
-// task_id and job_id are derived from ObjectReference.object_id. The owner
-// (succession rank 0) is derived from ObjectReference.owner_address. Non-owner
-// ranks are contiguous and therefore implicit in non_owner_holders order. The
-// receiver expands this message back into the ordinary RecoveryManifest before
-// existing recovery/admission logic runs.
-message RecoveryObjectTransportManifest {
-  repeated Address non_owner_holders = 1;
-  repeated Address witness_raylets = 2;
-  uint32 target_holder_count = 3;
-  uint32 witness_count = 4;
-  uint64 generation = 5;
-  bool frozen = 6;
-  bool tombstoned = 7;
-  uint32 recovery_attempt = 8;
-  int32 max_recovery_attempts = 9;
-}
-
 message RecoveryObjectMetadata {
   bytes task_id = 1;
   uint32 return_index = 2;
@@ -1238,8 +1216,4 @@ message RecoveryObjectMetadata {
   // this before retaining/re-exporting ObjectRef metadata. Possessing these
   // bytes does NOT make the borrower a committed recovery holder.
   bytes first_holder_task_spec = 4;
-
-  // Patch 4H transport-only compact manifest seed. When present, the full
-  // manifest field is intentionally omitted from the TaskSpec argument.
-  RecoveryObjectTransportManifest compact_manifest = 5;
 }
