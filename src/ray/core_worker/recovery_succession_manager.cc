@@ -28,6 +28,7 @@ namespace ray::core {
 // Patch 4H: compact task-argument recovery metadata.
 // Patch 4I: TaskSpec-level recovery argument sidecar.
 // Patch 4J: task-centric recovery state.
+// Patch 4K: full mode uses async holder install; no H1 TaskSpec piggyback.
 
 namespace {
 
@@ -1292,7 +1293,8 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     const std::string &patch4g_mode = RecoveryBenchmarkAblationMode();
     if (patch4g_mode == "metadata_only" ||
         patch4g_mode == "candidate_rpc_no_admit" ||
-        patch4g_mode == "no_piggyback") {
+        patch4g_mode == "no_piggyback" ||
+        patch4g_mode == "full") {
       return;
     }
 

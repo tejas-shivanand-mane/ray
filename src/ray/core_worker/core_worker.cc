@@ -66,6 +66,9 @@ namespace ray::core {
 // Patch 4F: first-holder TaskSpec piggyback.
 // Patch 4G: hot-path profiling and B1 ablations.
 // Patch 4H: compact task-argument recovery metadata.
+// Patch 4I: TaskSpec-level recovery argument sidecar.
+// Patch 4J: task-centric recovery state.
+// Patch 4K: batched H1 candidate/install path.
 
 namespace {
 // Default capacity for serialization caches.
@@ -2930,9 +2933,11 @@ void CoreWorker::BuildCommonTaskSpec(
 
     absl::flat_hash_map<TaskID, rpc::TaskSpec> owner_recovery_task_specs;
     const std::string &recovery_mode = RecoveryBenchmarkAblationMode();
+    // Patch 4K: normal/full mode uses ordinary async holder installation.
+    // Only the explicit piggyback diagnostic needs a TaskManager TaskSpec
+    // during downstream TaskSpec construction.
     if (!recovery_witness_holder_baseline_enabled_ &&
-        (recovery_mode == "full" ||
-         recovery_mode == "piggyback_no_candidate")) {
+        recovery_mode == "piggyback_no_candidate") {
       absl::flat_hash_set<TaskID> seen_producers;
 
       auto maybe_prefetch = [this, &owner_recovery_task_specs, &seen_producers](
@@ -5203,17 +5208,25 @@ void CoreWorker::QueueRecoveryCandidateReport(
   // status for all logical items, so the post-witness/pre-commit test continues
   // to use the original single-item RPC path.
   //
-  // Patch 4E-1: also fast-path the first real holder (H1). When the cached
-  // succession contains only the owner, delaying this report for the 4E
-  // coalescing window adds latency/control-path pressure without batching
-  // multiple holders for this task. H2+ still use the normal 4E batching path.
+  // Patch 4K: H1 now uses the same physical coalescing path as H2+ in full
+  // mode. This does NOT change logical admission: every real borrower still
+  // contributes exactly one candidate report, and the owner performs the same
+  // reservation -> install -> witness -> ordered commit sequence. It only
+  // coalesces independent candidate RPCs, which also lets the existing batch
+  // server path coalesce the corresponding holder installs.
+  //
+  // Keep Patch-4E-1's old single-H1 behavior only in the explicit
+  // no_piggyback benchmark control so we can isolate the batching effect.
   const bool first_holder_candidate =
       !request.has_cached_manifest() ||
       request.cached_manifest().succession_size() <= 1;
+  const bool preserve_legacy_h1_fast_path =
+      first_holder_candidate &&
+      RecoveryBenchmarkAblationMode() == "no_piggyback";
 
   if (RayConfig::instance().recovery_succession_test_fail_after_witness_ack() ||
       coordinator_address.worker_id().empty() ||
-      first_holder_candidate) {
+      preserve_legacy_h1_fast_path) {
     auto manager = recovery_succession_manager_;
     auto client = core_worker_client_pool_->GetOrConnect(coordinator_address);
     const uint64_t patch4g_rpc_start_ns =

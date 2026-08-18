@@ -9,8 +9,8 @@ Cases:
   MetadataOnly              compact recovery metadata, no TaskSpec/candidate
   PiggybackNoCandidate      metadata + 4F TaskSpec sidecar, no candidate
   CandidateRpcNoAdmit       metadata + candidate RPC, owner immediately NO_SLOT
-  NoPiggyback               full recovery; H1 uses InstallRecoveryHolder
-  Full4J                    ordinary recovery with Patch-4I TaskSpec sidecar
+  NoPiggybackLegacyH1FastPath  4J no-piggyback with old single H1 candidate RPC
+  Full4K                       4J task-centric + no piggyback + batched H1 admission
 
 The three middle ablations intentionally weaken durability and are BENCHMARK ONLY.
 Default repetitions = 2 to keep iteration time reasonable.
@@ -150,8 +150,8 @@ def cases() -> list[Case]:
         Case("metadata_only", "MetadataOnly", True, "metadata_only"),
         Case("piggyback_no_candidate", "PiggybackNoCandidate", True, "piggyback_no_candidate"),
         Case("candidate_rpc_no_admit", "CandidateRpcNoAdmit", True, "candidate_rpc_no_admit"),
-        Case("no_piggyback", "NoPiggyback", True, "no_piggyback"),
-        Case("full", "Full4J", True, "full"),
+        Case("no_piggyback", "NoPiggybackLegacyH1FastPath", True, "no_piggyback"),
+        Case("full", "Full4K", True, "full"),
     ]
 
 
@@ -373,6 +373,13 @@ def add_derived(row: dict[str, Any], owner: dict[str, Any], borrower: dict[str, 
     row["borrower_candidate_queue_cpu_us_per_pipeline"] = float(borrower["candidate_queue_time_ns"]) / tasks / 1e3
     row["borrower_candidate_reports_per_pipeline"] = float(borrower["candidate_reports_built"]) / tasks
     row["borrower_candidate_rpc_reports_per_pipeline"] = float(borrower["candidate_rpc_logical_reports_sent"]) / tasks
+    row["borrower_candidate_physical_rpcs_per_pipeline"] = float(borrower["candidate_rpc_physical_rpcs_sent"]) / tasks
+    physical_candidate_rpcs = int(borrower["candidate_rpc_physical_rpcs_sent"])
+    row["borrower_candidate_mean_batch_width"] = (
+        float(borrower["candidate_rpc_logical_reports_sent"]) / physical_candidate_rpcs
+        if physical_candidate_rpcs > 0
+        else math.nan
+    )
     row["owner_piggyback_copies_per_pipeline"] = float(owner["first_holder_piggyback_copies_sent"]) / tasks
     row["owner_install_rpcs_per_pipeline"] = float(owner["holder_install_rpcs_sent"]) / tasks
     row["owner_control_bytes_per_pipeline"] = (
@@ -469,6 +476,8 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "borrower_candidate_queue_cpu_us_per_pipeline",
         "borrower_candidate_reports_per_pipeline",
         "borrower_candidate_rpc_reports_per_pipeline",
+        "borrower_candidate_physical_rpcs_per_pipeline",
+        "borrower_candidate_mean_batch_width",
         "owner_piggyback_copies_per_pipeline",
         "owner_install_rpcs_per_pipeline",
         "owner_control_bytes_per_pipeline",
