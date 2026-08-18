@@ -22,10 +22,23 @@ Thus one application naturally produces:
   * dense sharing for broadcast dimension objects;
   * objects with B >= R, where Succession should lose its lineage-copy advantage.
 
-The workload is TPC-H-*inspired* in that it is a partitioned, concurrent,
-decision-support query mix with broad rollups plus selective time/region/product/
+The workload is TPC-H-*inspired* in that it is a partitioned, multi-query
+decision-support mix with broad rollups plus selective time/region/product/
 shipping slices.  It is NOT a TPC-H implementation and must not be reported as a
 TPC-H result.
+
+Activation scheduling
+---------------------
+The paper/default mode is ``--activation-mode progressive``. Query streams arrive
+in a randomized order that is identical for both recovery methods. After each
+stream exports the ObjectRefs selected by its query predicate, the benchmark waits
+for the cumulative native holder target implied by the streams seen so far. This
+preserves naturally generated B while avoiding simultaneous-candidate loss caused
+by the current one-outstanding-reservation-per-task implementation.
+
+``--activation-mode concurrent`` retains all-query-at-once export as a separate
+formation-contention stress test; target misses in that mode are reported rather
+than treated as lineage savings.
 
 Recovery semantics
 ------------------
@@ -885,6 +898,30 @@ def wait_for_profile_quiescence(
     return last, False
 
 
+def expected_role_transfers_for_query_prefix(
+    *,
+    method: Method,
+    role_ids: tuple[int, ...],
+    assignments: tuple[tuple[int, ...], ...],
+    query_prefix: tuple[int, ...],
+) -> int:
+    """Native full-lineage target contributed by one role after query_prefix.
+
+    Fanout still comes entirely from the application predicates.  This helper
+    only asks how much of that natural fanout has actually arrived so far.
+    """
+    allowed = set(int(x) for x in role_ids)
+    seen: dict[int, int] = {}
+    for query_id in query_prefix:
+        for object_index in assignments[query_id]:
+            if object_index in allowed:
+                seen[object_index] = seen.get(object_index, 0) + 1
+
+    if method.baseline_enabled:
+        return sum(R for count in seen.values() if count > 0)
+    return sum(min(count, R) for count in seen.values() if count > 0)
+
+
 def form_role_protection(
     *,
     owner,
@@ -893,34 +930,99 @@ def form_role_protection(
     assignments: tuple[tuple[int, ...], ...],
     query_workers: list[Any],
     query_order: tuple[int, ...],
+    base_expected_transfers: int,
     expected_cumulative_transfers: int,
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Activate one application role and wait only for its native protection target.
+    """Activate one application role and observe its native protection target.
 
-    Deliberately do NOT perform the stable/quiescent profiling wait here.  That
-    observer wait is harness overhead and must not be charged to application
-    protection-ready latency or no-failure throughput.  A single quiescence wait
-    is performed later, outside the measured application critical path.
+    ``progressive`` is the paper/default mode. Query streams arrive in the same
+    randomized order for both systems, one stream at a time. After each stream
+    exports its naturally selected ObjectRefs, the harness waits for the native
+    holder target implied by *all query streams seen so far*. This does not set B
+    or change query predicates; it prevents the implementation's one-outstanding-
+    reservation-per-task rule from dropping simultaneous candidate races.
+
+    ``concurrent`` keeps the original all-query-at-once activation and is useful
+    as a separate formation-contention stress test. In that mode, a target miss
+    is reported rather than silently interpreted as a state-amplification win.
+
+    A stable/quiescent profiling wait is still performed later, outside the
+    measured application critical path.
     """
     before = get_owner_profile(owner)
     start = time.perf_counter()
-    exported_edges = ray.get(
-        owner.export_role.remote(
-            role_ids,
-            assignments,
-            query_workers,
-            query_order,
-        )
-    )
-    export_done_s = time.perf_counter() - start
+    exported_edges = 0
+    target_wait_s = 0.0
+    target_profile = before
+    target_reached = True
 
-    target_profile, target_reached, target_wait_s = wait_for_profile_target(
-        owner,
-        method=method,
-        target_transfers=expected_cumulative_transfers,
-        timeout_s=args.formation_timeout_seconds,
-    )
+    if args.activation_mode == "concurrent":
+        exported_edges = ray.get(
+            owner.export_role.remote(
+                role_ids, assignments, query_workers, query_order
+            )
+        )
+        export_done_s = time.perf_counter() - start
+        target_profile, target_reached, wait_s = wait_for_profile_target(
+            owner,
+            method=method,
+            target_transfers=expected_cumulative_transfers,
+            timeout_s=args.formation_timeout_seconds,
+        )
+        target_wait_s += wait_s
+    else:
+        export_done_s = 0.0
+        processed: list[int] = []
+        for query_id in query_order:
+            export_start = time.perf_counter()
+            exported_edges += ray.get(
+                owner.export_role.remote(
+                    role_ids,
+                    assignments,
+                    query_workers,
+                    (query_id,),
+                )
+            )
+            export_done_s += time.perf_counter() - export_start
+            processed.append(query_id)
+
+            role_target = expected_role_transfers_for_query_prefix(
+                method=method,
+                role_ids=role_ids,
+                assignments=assignments,
+                query_prefix=tuple(processed),
+            )
+            cumulative_target = base_expected_transfers + role_target
+            target_profile, reached, wait_s = wait_for_profile_target(
+                owner,
+                method=method,
+                target_transfers=cumulative_target,
+                timeout_s=args.formation_timeout_seconds,
+            )
+            target_wait_s += wait_s
+            if not reached:
+                target_reached = False
+                observed = full_lineage_transfers(method, target_profile)
+                raise TimeoutError(
+                    f"progressive activation failed after query {query_id}: "
+                    f"native full-lineage target {cumulative_target}, "
+                    f"observed {observed}. Do not use this run for a fair "
+                    f"state-amplification comparison. Use "
+                    f"--activation-mode concurrent only as a contention stress test."
+                )
+
+        # Require the final role target as an explicit invariant.
+        if target_reached and full_lineage_transfers(method, target_profile) < expected_cumulative_transfers:
+            target_profile, reached, wait_s = wait_for_profile_target(
+                owner,
+                method=method,
+                target_transfers=expected_cumulative_transfers,
+                timeout_s=args.formation_timeout_seconds,
+            )
+            target_wait_s += wait_s
+            target_reached = bool(reached)
+
     total_s = time.perf_counter() - start
 
     return target_profile, {
@@ -1210,6 +1312,7 @@ def run_one(
             assignments=plan.assignments,
             query_workers=query_workers,
             query_order=query_order,
+            base_expected_transfers=0,
             expected_cumulative_transfers=fact_expected_cumulative,
             args=args,
         )
@@ -1224,6 +1327,7 @@ def run_one(
             assignments=plan.assignments,
             query_workers=query_workers,
             query_order=query_order,
+            base_expected_transfers=fact_expected_cumulative,
             expected_cumulative_transfers=total_expected,
             args=args,
         )
@@ -1296,6 +1400,7 @@ def run_one(
             "prekill_query_nodes": prekill_query_count,
             "killed_query_ids": ";".join(str(x) for x in killed_query_ids),
             "query_launch_order": ";".join(str(x) for x in query_order),
+            "activation_mode": args.activation_mode,
             "target_holders": R,
             "task_spec_padding_name": spec_size.name,
             "task_spec_padding_bytes": spec_size.padding_bytes,
@@ -1767,6 +1872,21 @@ def paired_rows(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "baseline_native_protection_ready_s": float(
                 b["native_protection_ready_time_s_mean"]
             ),
+            # Keep one stable CSV schema across no-failure and recovery rows.
+            "succession_logical_consumptions_per_s": math.nan,
+            "baseline_logical_consumptions_per_s": math.nan,
+            "succession_over_baseline_query_throughput": math.nan,
+            "succession_query_p95_s": math.nan,
+            "baseline_query_p95_s": math.nan,
+            "succession_end_to_end_logical_consumptions_per_s": math.nan,
+            "baseline_end_to_end_logical_consumptions_per_s": math.nan,
+            "succession_end_to_end_query_p95_s": math.nan,
+            "baseline_end_to_end_query_p95_s": math.nan,
+            "succession_recovery_success_rate": math.nan,
+            "baseline_recovery_success_rate": math.nan,
+            "success_rate_delta_succession_minus_baseline": math.nan,
+            "succession_recovery_p95_s": math.nan,
+            "baseline_recovery_p95_s": math.nan,
         }
 
         if phase == "nofailure":
@@ -2197,6 +2317,17 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=["nofailure", "recovery"],
         default=["nofailure", "recovery"],
+    )
+    p.add_argument(
+        "--activation-mode",
+        choices=["progressive", "concurrent"],
+        default="progressive",
+        help=(
+            "How natural query streams export ObjectRefs during protection "
+            "formation. 'progressive' is the paper/default mode and waits for "
+            "each query stream's cumulative native target; 'concurrent' is a "
+            "formation-contention stress test."
+        ),
     )
     p.add_argument("--repetitions", type=int, default=1)
     p.add_argument(
