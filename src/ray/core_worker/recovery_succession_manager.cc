@@ -414,9 +414,8 @@ bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
 
   task_states_[task_id] = std::move(task_state);
 
-  if (profiling_enabled_) {
-    ++profile_.owner_lazy_task_spec_copies_avoided;
-  }
+  // Patch 4L deliberately retains one dormant owner TaskSpec copy, so the
+  // legacy Patch-4J "copy avoided" counter must remain zero.
 
   return true;
 }
@@ -435,9 +434,19 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
 
   const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
 
+  const auto retained_copy_start = std::chrono::steady_clock::now();
+
   OwnerRetainedTaskState retained;
   retained.task_spec.CopyFrom(task_proto);
   ClearFirstHolderTaskSpecPiggybacks(&retained.task_spec);
+  retained.task_spec_bytes =
+      static_cast<uint64_t>(retained.task_spec.ByteSizeLong());
+
+  const auto retained_copy_end = std::chrono::steady_clock::now();
+  const uint64_t retained_copy_ns = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          retained_copy_end - retained_copy_start)
+          .count());
 
   for (const rpc::ObjectReference &returned_ref : returned_refs) {
     if (returned_ref.object_id().size() != ObjectID::Size()) {
@@ -460,6 +469,26 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
 
   auto existing = owner_retained_tasks_.find(task_id);
   if (existing == owner_retained_tasks_.end()) {
+    if (profiling_enabled_) {
+      ++profile_.owner_retained_task_specs_created;
+      ++profile_.owner_retained_task_specs_current;
+      profile_.owner_retained_task_spec_bytes_current +=
+          retained.task_spec_bytes;
+      profile_.owner_retained_task_spec_copy_time_ns += retained_copy_ns;
+
+      if (profile_.owner_retained_task_specs_current >
+          profile_.owner_retained_task_specs_peak) {
+        profile_.owner_retained_task_specs_peak =
+            profile_.owner_retained_task_specs_current;
+      }
+
+      if (profile_.owner_retained_task_spec_bytes_current >
+          profile_.owner_retained_task_spec_bytes_peak) {
+        profile_.owner_retained_task_spec_bytes_peak =
+            profile_.owner_retained_task_spec_bytes_current;
+      }
+    }
+
     owner_retained_tasks_[task_id] = std::move(retained);
     return;
   }
@@ -521,6 +550,24 @@ bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
 
   if (!retained_it->second.live_return_ids.empty()) {
     return false;
+  }
+
+  const uint64_t retained_bytes = retained_it->second.task_spec_bytes;
+
+  if (profiling_enabled_) {
+    ++profile_.owner_retained_task_specs_released;
+
+    if (profile_.owner_retained_task_specs_current > 0) {
+      --profile_.owner_retained_task_specs_current;
+    }
+
+    if (profile_.owner_retained_task_spec_bytes_current >= retained_bytes) {
+      profile_.owner_retained_task_spec_bytes_current -= retained_bytes;
+    } else {
+      // Profiling resets reconstruct current state, so this should only be a
+      // defensive fallback rather than a normal path.
+      profile_.owner_retained_task_spec_bytes_current = 0;
+    }
   }
 
   owner_retained_tasks_.erase(retained_it);
@@ -2099,6 +2146,22 @@ void RecoverySuccessionManager::ResetProfile() {
 
   absl::MutexLock lock(&mutex_);
   profile_ = RecoverySuccessionProfile{};
+
+  // Patch 4L gauges describe real retained state, not just events after reset.
+  // Reconstruct them so a benchmark profile reset cannot make a later release
+  // underflow or hide already-live owner lineage.
+  profile_.owner_retained_task_specs_current =
+      static_cast<uint64_t>(owner_retained_tasks_.size());
+
+  for (const auto &entry : owner_retained_tasks_) {
+    profile_.owner_retained_task_spec_bytes_current +=
+        entry.second.task_spec_bytes;
+  }
+
+  profile_.owner_retained_task_specs_peak =
+      profile_.owner_retained_task_specs_current;
+  profile_.owner_retained_task_spec_bytes_peak =
+      profile_.owner_retained_task_spec_bytes_current;
 }
 
 void RecoverySuccessionManager::RecordCandidateReport(bool accepted) {

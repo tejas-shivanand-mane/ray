@@ -87,9 +87,21 @@ class RecoverySuccessionManager {
     uint64_t owner_task_spec_copy_count = 0;
     uint64_t owner_task_spec_copy_time_ns = 0;
 
-    // Patch 4J: owner first-borrow activation deliberately does not retain
-    // another full TaskSpec in RecoverySuccessionManager.
+    // Legacy Patch-4J metric. Patch 4L deliberately retains one dormant
+    // owner TaskSpec, so this remains zero under the 4L design.
     uint64_t owner_lazy_task_spec_copies_avoided = 0;
+
+    // Patch 4L owner-retained lineage accounting. "current" and "peak" are
+    // gauges/state high-water marks; created/released are cumulative events
+    // since the last profile reset.
+    uint64_t owner_retained_task_specs_current = 0;
+    uint64_t owner_retained_task_specs_peak = 0;
+    uint64_t owner_retained_task_spec_bytes_current = 0;
+    uint64_t owner_retained_task_spec_bytes_peak = 0;
+    uint64_t owner_retained_task_specs_created = 0;
+    uint64_t owner_retained_task_specs_released = 0;
+    uint64_t owner_retained_task_spec_copy_time_ns = 0;
+
     uint64_t task_centric_metadata_builds = 0;
 
     // Patch 4F full-lineage copies moved through normal downstream PushTask
@@ -423,6 +435,7 @@ class RecoverySuccessionManager {
 
   struct OwnerRetainedTaskState {
     rpc::TaskSpec task_spec;
+    uint64_t task_spec_bytes = 0;
     absl::flat_hash_set<ObjectID> live_return_ids;
   };
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark 22 v2: Recovery Succession 4K vs lazy fixed-R witness-holder baseline.
+Benchmark 22 v2: Recovery Succession 4L vs lazy fixed-R witness-holder baseline.
 
 Research question
 -----------------
@@ -14,7 +14,9 @@ R = 4.
 
 Both methods are lazy:
   * B=0:
-      no recovery activation, no full TaskSpec replication.
+      no recovery activation and no remote full TaskSpec replication.
+      Patch 4L may retain one dormant owner-side TaskSpec copy while the
+      producer ObjectRef remains live; this is measured separately.
   * B>=1, Succession:
       full TaskSpec copies/task = min(B, R)
       achieved holders/task    = min(B, R)
@@ -59,7 +61,9 @@ Steady-state:
   * p50/p95/p99 end-to-end fan-out pipeline latency
 
 Recovery state/traffic:
-  * complete TaskSpec copies and bytes per pipeline
+  * remote complete TaskSpec copies and bytes per pipeline
+  * Patch-4L owner-retained TaskSpec count/bytes (current and peak)
+  * combined live TaskSpec state = owner-retained + remote holder copies
   * measured TaskSpec bytes/copy
   * recovery-manifest bytes
   * candidate-report request bytes
@@ -151,6 +155,13 @@ PROFILE_KEYS = [
     "owner_task_spec_copy_count",
     "owner_task_spec_copy_time_ns",
     "owner_lazy_task_spec_copies_avoided",
+    "owner_retained_task_specs_current",
+    "owner_retained_task_specs_peak",
+    "owner_retained_task_spec_bytes_current",
+    "owner_retained_task_spec_bytes_peak",
+    "owner_retained_task_specs_created",
+    "owner_retained_task_specs_released",
+    "owner_retained_task_spec_copy_time_ns",
     "task_centric_metadata_builds",
     "first_holder_piggyback_copies_sent",
     "first_holder_piggyback_bytes_sent",
@@ -700,6 +711,29 @@ def derive_recovery_metrics(
         )
 
     full_lineage_bytes = int(owner["task_spec_bytes_sent"])
+
+    owner_retained_task_specs_current = int(
+        owner["owner_retained_task_specs_current"]
+    )
+    owner_retained_task_specs_peak = int(
+        owner["owner_retained_task_specs_peak"]
+    )
+    owner_retained_task_spec_bytes_current = int(
+        owner["owner_retained_task_spec_bytes_current"]
+    )
+    owner_retained_task_spec_bytes_peak = int(
+        owner["owner_retained_task_spec_bytes_peak"]
+    )
+    owner_retained_task_specs_created = int(
+        owner["owner_retained_task_specs_created"]
+    )
+    owner_retained_task_specs_released = int(
+        owner["owner_retained_task_specs_released"]
+    )
+    owner_retained_task_spec_copy_time_ns = int(
+        owner["owner_retained_task_spec_copy_time_ns"]
+    )
+
     manifest_bytes = int(owner["manifest_bytes_sent"])
     candidate_request_bytes = int(borrowers["candidate_rpc_request_bytes_sent"])
     normal_path_metadata_bytes = int(owner["task_argument_metadata_transport_bytes"])
@@ -749,6 +783,47 @@ def derive_recovery_metrics(
         "measured_task_spec_bytes_per_copy": safe_div(
             full_lineage_bytes, full_lineage_transfers
         ),
+
+        # Patch 4L owner-side retained lineage is memory/state, not network
+        # replication, so keep it separate from task_spec_bytes_sent.
+        "owner_retained_task_specs_current": owner_retained_task_specs_current,
+        "owner_retained_task_specs_peak": owner_retained_task_specs_peak,
+        "owner_retained_task_specs_current_per_pipeline": safe_div(
+            owner_retained_task_specs_current, pipeline_count
+        ),
+        "owner_retained_task_specs_peak_per_pipeline": safe_div(
+            owner_retained_task_specs_peak, pipeline_count
+        ),
+        "owner_retained_task_spec_bytes_current": (
+            owner_retained_task_spec_bytes_current
+        ),
+        "owner_retained_task_spec_bytes_peak": owner_retained_task_spec_bytes_peak,
+        "owner_retained_task_spec_bytes_current_per_pipeline": safe_div(
+            owner_retained_task_spec_bytes_current, pipeline_count
+        ),
+        "owner_retained_task_spec_bytes_peak_per_pipeline": safe_div(
+            owner_retained_task_spec_bytes_peak, pipeline_count
+        ),
+        "measured_owner_retained_task_spec_bytes_per_copy": safe_div(
+            owner_retained_task_spec_bytes_current,
+            owner_retained_task_specs_current,
+        ),
+        "owner_retained_task_specs_created": owner_retained_task_specs_created,
+        "owner_retained_task_specs_released": owner_retained_task_specs_released,
+        "owner_retained_task_specs_created_per_pipeline": safe_div(
+            owner_retained_task_specs_created, pipeline_count
+        ),
+        "owner_retained_task_specs_released_per_pipeline": safe_div(
+            owner_retained_task_specs_released, pipeline_count
+        ),
+        "owner_retained_task_spec_copy_time_ns": (
+            owner_retained_task_spec_copy_time_ns
+        ),
+        "owner_retained_task_spec_copy_time_us_per_created": safe_div(
+            owner_retained_task_spec_copy_time_ns / 1e3,
+            owner_retained_task_specs_created,
+        ),
+
         "manifest_bytes_total": manifest_bytes,
         "manifest_bytes_per_pipeline": safe_div(
             manifest_bytes, pipeline_count
@@ -985,13 +1060,30 @@ def run_live_state_batch(
         )
     )
 
+    live_total_lineage_state_bytes = (
+        int(derived["full_lineage_bytes_total"])
+        + int(derived["owner_retained_task_spec_bytes_current"])
+    )
+    live_total_taskspec_copies = (
+        float(derived["full_lineage_copies_per_pipeline"])
+        + float(derived["owner_retained_task_specs_current_per_pipeline"])
+    )
+
     result: dict[str, Any] = {
         **derived,
+        "live_total_full_taskspec_copies_per_pipeline": live_total_taskspec_copies,
+        "live_total_lineage_state_bytes_current": live_total_lineage_state_bytes,
+        "live_total_lineage_state_bytes_per_pipeline": safe_div(
+            live_total_lineage_state_bytes, args.state_task_count
+        ),
         "live_state_task_count": args.state_task_count,
         "live_state_formation_ms": formation_ms,
         "live_state_target_ok": int(target_ok),
         "live_state_b0_lazy_ok": int(b0_lazy_ok),
+        # Keep the old 4K field for CSV compatibility; 4L preserves the same
+        # no-piggyback transport condition.
         "live_state_succession_4k_no_piggyback_ok": int(succession_4k_ok),
+        "live_state_succession_4l_no_piggyback_ok": int(succession_4k_ok),
         "live_state_valid": int(live_valid),
     }
 
@@ -1222,6 +1314,16 @@ SUMMARY_METRICS = [
     "full_lineage_copies_per_pipeline",
     "full_lineage_bytes_per_pipeline",
     "measured_task_spec_bytes_per_copy",
+    "owner_retained_task_specs_current_per_pipeline",
+    "owner_retained_task_specs_peak_per_pipeline",
+    "owner_retained_task_spec_bytes_current_per_pipeline",
+    "owner_retained_task_spec_bytes_peak_per_pipeline",
+    "measured_owner_retained_task_spec_bytes_per_copy",
+    "owner_retained_task_specs_created_per_pipeline",
+    "owner_retained_task_specs_released_per_pipeline",
+    "owner_retained_task_spec_copy_time_us_per_created",
+    "live_total_full_taskspec_copies_per_pipeline",
+    "live_total_lineage_state_bytes_per_pipeline",
     "manifest_bytes_per_pipeline",
     "derived_witness_manifest_bytes_per_pipeline",
     "candidate_request_bytes_per_pipeline",
@@ -1334,6 +1436,18 @@ def paired_rows(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         s_lineage = float(s["full_lineage_bytes_per_pipeline_mean"])
         b_lineage = float(b["full_lineage_bytes_per_pipeline_mean"])
+        s_retained = float(
+            s["owner_retained_task_spec_bytes_current_per_pipeline_mean"]
+        )
+        b_retained = float(
+            b["owner_retained_task_spec_bytes_current_per_pipeline_mean"]
+        )
+        s_total_state = float(
+            s["live_total_lineage_state_bytes_per_pipeline_mean"]
+        )
+        b_total_state = float(
+            b["live_total_lineage_state_bytes_per_pipeline_mean"]
+        )
         s_wire = float(s["measured_recovery_wire_payload_bytes_per_pipeline_mean"])
         b_wire = float(b["measured_recovery_wire_payload_bytes_per_pipeline_mean"])
         s_thr = float(s["throughput_rps_mean"])
@@ -1367,6 +1481,22 @@ def paired_rows(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "lineage_bytes_reduction_pct_succession_vs_baseline": (
                     100.0 * (b_lineage - s_lineage) / b_lineage
                     if b_lineage > 0
+                    else math.nan
+                ),
+                "succession_owner_retained_task_spec_bytes_per_pipeline": s_retained,
+                "baseline_owner_retained_task_spec_bytes_per_pipeline": b_retained,
+                "succession_live_total_lineage_state_bytes_per_pipeline": (
+                    s_total_state
+                ),
+                "baseline_live_total_lineage_state_bytes_per_pipeline": (
+                    b_total_state
+                ),
+                "live_total_lineage_state_bytes_saved_by_succession_per_pipeline": (
+                    b_total_state - s_total_state
+                ),
+                "live_total_lineage_state_reduction_pct_succession_vs_baseline": (
+                    100.0 * (b_total_state - s_total_state) / b_total_state
+                    if b_total_state > 0
                     else math.nan
                 ),
                 "succession_full_lineage_copies_per_pipeline": float(
@@ -1690,8 +1820,14 @@ def plot_results(args: argparse.Namespace) -> None:
             (
                 "full_lineage_bytes_per_pipeline_mean",
                 "full_lineage_bytes_per_pipeline_ci95",
-                "Full TaskSpec bytes / pipeline",
+                "Remote full TaskSpec bytes / pipeline",
                 "full_lineage_bytes_vs_borrowers",
+            ),
+            (
+                "live_total_lineage_state_bytes_per_pipeline_mean",
+                "live_total_lineage_state_bytes_per_pipeline_ci95",
+                "Live total TaskSpec state bytes / pipeline",
+                "live_total_lineage_state_bytes_vs_borrowers",
             ),
             (
                 "measured_recovery_wire_payload_bytes_per_pipeline_mean",

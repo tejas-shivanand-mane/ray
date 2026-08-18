@@ -1240,6 +1240,22 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.owner_task_spec_copy_time_ns;
   result["owner_lazy_task_spec_copies_avoided"] =
       profile.owner_lazy_task_spec_copies_avoided;
+
+  result["owner_retained_task_specs_current"] =
+      profile.owner_retained_task_specs_current;
+  result["owner_retained_task_specs_peak"] =
+      profile.owner_retained_task_specs_peak;
+  result["owner_retained_task_spec_bytes_current"] =
+      profile.owner_retained_task_spec_bytes_current;
+  result["owner_retained_task_spec_bytes_peak"] =
+      profile.owner_retained_task_spec_bytes_peak;
+  result["owner_retained_task_specs_created"] =
+      profile.owner_retained_task_specs_created;
+  result["owner_retained_task_specs_released"] =
+      profile.owner_retained_task_specs_released;
+  result["owner_retained_task_spec_copy_time_ns"] =
+      profile.owner_retained_task_spec_copy_time_ns;
+
   result["task_centric_metadata_builds"] =
       profile.task_centric_metadata_builds;
   // Patch 4F TaskSpecs transported through normal downstream PushTask.
