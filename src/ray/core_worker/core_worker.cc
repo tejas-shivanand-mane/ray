@@ -61,10 +61,18 @@ using MessageType = ray::protocol::MessageType;
 namespace ray::core {
 
 // Patch 4D: pipelined holder admission.
+// Patch 4E: batched recovery control RPCs.
 
 namespace {
 // Default capacity for serialization caches.
 constexpr size_t kDefaultSerializationCacheCap = 500;
+
+// Patch 4E physical batching knobs. These alter only transport coalescing,
+// never logical holder/witness semantics.
+constexpr size_t kRecoveryCandidateBatchMaxItems = 64;
+constexpr int64_t kRecoveryCandidateBatchDelayUs = 500;
+constexpr size_t kRecoveryInstallBatchMaxItems = 64;
+constexpr uint64_t kRecoveryInstallBatchMaxBytes = 4ULL * 1024ULL * 1024ULL;
 
 // Implements setting the transient RUNNING_IN_RAY_GET and RUNNING_IN_RAY_WAIT states.
 // These states override the RUNNING state of a task.
@@ -4623,37 +4631,11 @@ void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
         recovery_succession_manager_->RegisterExecutorTask(request.task_spec());
 
     for (auto &candidate_report : candidate_reports) {
-      const TaskID reported_task_id =
-          TaskID::FromBinary(candidate_report.request.task_id());
-
-      auto candidate_client =
-          core_worker_client_pool_->GetOrConnect(candidate_report.coordinator_address);
-
-      candidate_client->ReportRecoveryCandidate(
-          std::move(candidate_report.request),
-          [manager = recovery_succession_manager_, reported_task_id](
-              const Status &status, rpc::ReportRecoveryCandidateReply &&candidate_reply) {
-            if (!status.ok()) {
-              RAY_LOG(DEBUG).WithField(reported_task_id) << "Recovery candidate report "
-                                                            "failed: "
-                                                         << status;
-              return;
-            }
-
-            if (candidate_reply.has_latest_manifest()) {
-              manager->ApplyCommittedManifest(candidate_reply.latest_manifest());
-            }
-
-            // Patch 4D: transient admission failure must not permanently suppress
-            // future candidate reports from this borrower. A late speculative
-            // install that is rolled back will clear the bit again on rollback.
-            if (candidate_reply.result() ==
-                    rpc::ReportRecoveryCandidateReply::NO_SLOT ||
-                candidate_reply.result() ==
-                    rpc::ReportRecoveryCandidateReply::STALE_MANIFEST) {
-              manager->AllowCandidateReportRetry(reported_task_id);
-            }
-          });
+      // Patch 4E: queue by coordinator and physically coalesce independent
+      // logical reports across tasks. The task itself is not blocked on this RPC.
+      QueueRecoveryCandidateReport(
+          std::move(candidate_report.coordinator_address),
+          std::move(candidate_report.request));
     }
   }
 
@@ -5082,16 +5064,222 @@ void CoreWorker::FinishRecoveryHolderAdmission(
 }
 
 
-void CoreWorker::HandleReportRecoveryCandidate(
-    rpc::ReportRecoveryCandidateRequest request,
+void CoreWorker::QueueRecoveryCandidateReport(
+    rpc::Address coordinator_address,
+    rpc::ReportRecoveryCandidateRequest request) {
+  if (request.task_id().empty()) {
+    return;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(request.task_id());
+
+  // Preserve deterministic failure-injection semantics. A batch has one gRPC
+  // status for all logical items, so the post-witness/pre-commit test continues
+  // to use the original single-item RPC path.
+  if (RayConfig::instance().recovery_succession_test_fail_after_witness_ack() ||
+      coordinator_address.worker_id().empty()) {
+    auto manager = recovery_succession_manager_;
+    auto client = core_worker_client_pool_->GetOrConnect(coordinator_address);
+    client->ReportRecoveryCandidate(
+        std::move(request),
+        [manager, task_id](const Status &status,
+                           rpc::ReportRecoveryCandidateReply &&candidate_reply) {
+          if (!status.ok()) {
+            RAY_LOG(DEBUG).WithField(task_id)
+                << "Recovery candidate report failed: " << status;
+            return;
+          }
+
+          if (candidate_reply.has_latest_manifest()) {
+            manager->ApplyCommittedManifest(candidate_reply.latest_manifest());
+          }
+
+          if (candidate_reply.result() == rpc::ReportRecoveryCandidateReply::NO_SLOT ||
+              candidate_reply.result() ==
+                  rpc::ReportRecoveryCandidateReply::STALE_MANIFEST) {
+            manager->AllowCandidateReportRetry(task_id);
+          }
+        });
+    return;
+  }
+
+  const std::string coordinator_worker_id = coordinator_address.worker_id();
+  bool schedule_flush = false;
+
+  {
+    absl::MutexLock lock(&recovery_candidate_batch_mutex_);
+    auto [it, inserted] = recovery_candidate_batch_queues_.try_emplace(
+        coordinator_worker_id);
+    RecoveryCandidateBatchQueue &queue = it->second;
+
+    if (inserted) {
+      queue.coordinator_address.CopyFrom(coordinator_address);
+      schedule_flush = true;
+    }
+
+    PendingRecoveryCandidateReport pending;
+    pending.task_id = task_id;
+    pending.request.Swap(&request);
+    queue.pending.push_back(std::move(pending));
+  }
+
+  if (schedule_flush) {
+    io_service_.post(
+        [this, coordinator_worker_id]() {
+          FlushRecoveryCandidateReportBatch(coordinator_worker_id);
+        },
+        "CoreWorker.FlushRecoveryCandidateReportBatch",
+        kRecoveryCandidateBatchDelayUs);
+  }
+}
+
+void CoreWorker::FlushRecoveryCandidateReportBatch(
+    const std::string &coordinator_worker_id) {
+  rpc::Address coordinator_address;
+  std::vector<PendingRecoveryCandidateReport> items;
+  bool schedule_next = false;
+
+  {
+    absl::MutexLock lock(&recovery_candidate_batch_mutex_);
+    const auto it = recovery_candidate_batch_queues_.find(coordinator_worker_id);
+    if (it == recovery_candidate_batch_queues_.end()) {
+      return;
+    }
+
+    RecoveryCandidateBatchQueue &queue = it->second;
+    coordinator_address.CopyFrom(queue.coordinator_address);
+
+    const size_t take =
+        std::min(kRecoveryCandidateBatchMaxItems, queue.pending.size());
+    items.reserve(take);
+    for (size_t i = 0; i < take; ++i) {
+      items.push_back(std::move(queue.pending.front()));
+      queue.pending.pop_front();
+    }
+
+    if (queue.pending.empty()) {
+      recovery_candidate_batch_queues_.erase(it);
+    } else {
+      schedule_next = true;
+    }
+  }
+
+  if (schedule_next) {
+    // The first window already performed the coalescing. Drain a backlog on
+    // successive event-loop turns without adding another fixed delay.
+    io_service_.post(
+        [this, coordinator_worker_id]() {
+          FlushRecoveryCandidateReportBatch(coordinator_worker_id);
+        },
+        "CoreWorker.FlushRecoveryCandidateReportBatch");
+  }
+
+  if (items.empty()) {
+    return;
+  }
+
+  auto manager = recovery_succession_manager_;
+  auto client = core_worker_client_pool_->GetOrConnect(coordinator_address);
+
+  if (items.size() == 1) {
+    TaskID task_id = items.front().task_id;
+    rpc::ReportRecoveryCandidateRequest single_request;
+    single_request.Swap(&items.front().request);
+
+    client->ReportRecoveryCandidate(
+        std::move(single_request),
+        [manager, task_id](const Status &status,
+                           rpc::ReportRecoveryCandidateReply &&candidate_reply) {
+          if (!status.ok()) {
+            RAY_LOG(DEBUG).WithField(task_id)
+                << "Recovery candidate report failed: " << status;
+            return;
+          }
+
+          if (candidate_reply.has_latest_manifest()) {
+            manager->ApplyCommittedManifest(candidate_reply.latest_manifest());
+          }
+
+          if (candidate_reply.result() == rpc::ReportRecoveryCandidateReply::NO_SLOT ||
+              candidate_reply.result() ==
+                  rpc::ReportRecoveryCandidateReply::STALE_MANIFEST) {
+            manager->AllowCandidateReportRetry(task_id);
+          }
+        });
+    return;
+  }
+
+  rpc::ReportRecoveryCandidateBatchRequest batch_request;
+  batch_request.mutable_requests()->Reserve(static_cast<int>(items.size()));
+  std::vector<TaskID> task_ids;
+  task_ids.reserve(items.size());
+
+  for (auto &item : items) {
+    task_ids.push_back(item.task_id);
+    batch_request.add_requests()->Swap(&item.request);
+  }
+
+  RAY_LOG(DEBUG) << "Patch 4E sending candidate batch with "
+                 << task_ids.size() << " logical reports";
+
+  client->ReportRecoveryCandidateBatch(
+      std::move(batch_request),
+      [manager, task_ids = std::move(task_ids)](
+          const Status &status,
+          rpc::ReportRecoveryCandidateBatchReply &&batch_reply) mutable {
+        if (!status.ok()) {
+          RAY_LOG(DEBUG) << "Recovery candidate batch failed: " << status;
+          return;
+        }
+
+        const int reply_count = batch_reply.replies_size();
+        const size_t matched =
+            std::min(task_ids.size(), static_cast<size_t>(reply_count));
+
+        for (size_t i = 0; i < matched; ++i) {
+          const auto &candidate_reply = batch_reply.replies(static_cast<int>(i));
+
+          if (candidate_reply.has_latest_manifest()) {
+            manager->ApplyCommittedManifest(candidate_reply.latest_manifest());
+          }
+
+          if (candidate_reply.result() == rpc::ReportRecoveryCandidateReply::NO_SLOT ||
+              candidate_reply.result() ==
+                  rpc::ReportRecoveryCandidateReply::STALE_MANIFEST) {
+            manager->AllowCandidateReportRetry(task_ids[i]);
+          }
+        }
+
+        if (matched != task_ids.size()) {
+          RAY_LOG(WARNING)
+              << "Patch 4E candidate batch reply size mismatch: expected "
+              << task_ids.size() << ", got " << reply_count;
+
+          // Missing logical replies must not permanently suppress future
+          // candidate reports from those tasks.
+          for (size_t i = matched; i < task_ids.size(); ++i) {
+            manager->AllowCandidateReportRetry(task_ids[i]);
+          }
+        }
+      });
+}
+
+std::optional<CoreWorker::PreparedRecoveryHolderInstall>
+CoreWorker::PrepareRecoveryCandidateAdmission(
+    const rpc::ReportRecoveryCandidateRequest &request,
     rpc::ReportRecoveryCandidateReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
+  if (reply == nullptr) {
+    send_reply_callback(Status::Invalid("null recovery candidate reply"), nullptr, nullptr);
+    return std::nullopt;
+  }
+
   if (!recovery_succession_enabled_ ||
       recovery_witness_holder_baseline_enabled_ ||
       recovery_succession_manager_ == nullptr) {
     reply->set_result(rpc::ReportRecoveryCandidateReply::DISABLED);
     send_reply_callback(Status::OK(), nullptr, nullptr);
-    return;
+    return std::nullopt;
   }
 
   const uint64_t admission_start_ns =
@@ -5120,7 +5308,7 @@ void CoreWorker::HandleReportRecoveryCandidate(
   if (result != rpc::ReportRecoveryCandidateReply::ACCEPTED ||
       admission_plan.reservation_id.empty()) {
     send_reply_callback(Status::OK(), nullptr, nullptr);
-    return;
+    return std::nullopt;
   }
 
   const std::string reservation_id = admission_plan.reservation_id;
@@ -5144,7 +5332,7 @@ void CoreWorker::HandleReportRecoveryCandidate(
     manager->AbortHolderAdmission(reservation_id);
     reply->set_result(rpc::ReportRecoveryCandidateReply::STALE_MANIFEST);
     send_reply_callback(Status::OK(), nullptr, nullptr);
-    return;
+    return std::nullopt;
   }
 
   auto state = std::make_shared<PendingRecoveryHolderAdmission>();
@@ -5168,7 +5356,7 @@ void CoreWorker::HandleReportRecoveryCandidate(
       manager->AbortHolderAdmission(reservation_id);
       state->reply->set_result(rpc::ReportRecoveryCandidateReply::NO_SLOT);
       state->send_reply_callback(Status::OK(), nullptr, nullptr);
-      return;
+      return std::nullopt;
     }
   }
 
@@ -5178,7 +5366,7 @@ void CoreWorker::HandleReportRecoveryCandidate(
       state->installed = true;
     }
     TryAdvanceRecoveryHolderAdmissions(task_id);
-    return;
+    return std::nullopt;
   }
 
   rpc::InstallRecoveryHolderRequest install_request;
@@ -5197,98 +5385,349 @@ void CoreWorker::HandleReportRecoveryCandidate(
 
   install_request.mutable_proposed_manifest()->CopyFrom(proposed_manifest);
 
-  auto candidate_client = core_worker_client_pool_->GetOrConnect(candidate_address);
-
-  uint64_t install_start_ns = 0;
   if (recovery_succession_profiling_enabled_) {
+    // Keep the existing logical accounting. Patch 4E changes physical RPC count,
+    // not the number of logical holder installations or lineage bytes.
     manager->RecordHolderInstallRpcSent(
         static_cast<uint64_t>(install_request.task_spec().ByteSizeLong()),
         static_cast<uint64_t>(install_request.proposed_manifest().ByteSizeLong()));
-    install_start_ns = RecoveryProfileNowNs();
   }
 
-  // Patch 4D: this RPC is no longer serialized behind the previous holder's
-  // witness publication/commit. H1..HR installs may all be in flight.
+  PreparedRecoveryHolderInstall prepared;
+  prepared.state = std::move(state);
+  prepared.request.Swap(&install_request);
+  return prepared;
+}
+
+void CoreWorker::HandleRecoveryHolderInstallResult(
+    const std::shared_ptr<PendingRecoveryHolderAdmission> &state,
+    const Status &status,
+    rpc::InstallRecoveryHolderReply install_reply) {
+  if (state == nullptr) {
+    return;
+  }
+
+  auto manager = recovery_succession_manager_;
+  if (state->install_start_ns != 0) {
+    manager->RecordHolderInstallRpcLatency(
+        RecoveryProfileNowNs() - state->install_start_ns);
+    state->install_start_ns = 0;
+  }
+
+  bool already_aborted = false;
+  rpc::RecoveryManifest abort_manifest;
+  {
+    absl::MutexLock lock(&recovery_holder_admission_mutex_);
+    already_aborted = state->aborted;
+    if (already_aborted) {
+      abort_manifest.CopyFrom(state->abort_manifest);
+    }
+  }
+
+  if (already_aborted) {
+    // The lower-rank failure may have raced with this install. If the candidate
+    // stored the provisional lineage after the first cleanup, clean it again.
+    if (status.ok() && install_reply.stored()) {
+      SendRecoveryHolderRollback(state, abort_manifest);
+    }
+    return;
+  }
+
+  if (!status.ok() || !install_reply.stored() ||
+      install_reply.reservation_id() != state->reservation_id) {
+    AbortRecoveryHolderAdmissionSuffix(
+        state,
+        rpc::ReportRecoveryCandidateReply::NO_SLOT,
+        state->latest_manifest);
+    return;
+  }
+
+  {
+    absl::MutexLock lock(&recovery_holder_admission_mutex_);
+    if (state->aborted) {
+      abort_manifest.CopyFrom(state->abort_manifest);
+      already_aborted = true;
+    } else {
+      state->installed = true;
+    }
+  }
+
+  if (already_aborted) {
+    SendRecoveryHolderRollback(state, abort_manifest);
+    return;
+  }
+
+  TryAdvanceRecoveryHolderAdmissions(state->task_id);
+}
+
+void CoreWorker::DispatchRecoveryHolderInstall(
+    PreparedRecoveryHolderInstall prepared) {
+  if (prepared.state == nullptr) {
+    return;
+  }
+
+  auto state = prepared.state;
+  auto candidate_client =
+      core_worker_client_pool_->GetOrConnect(state->candidate_address);
+
+  if (recovery_succession_profiling_enabled_) {
+    state->install_start_ns = RecoveryProfileNowNs();
+  }
+
   candidate_client->InstallRecoveryHolder(
-      std::move(install_request),
-      [this, manager, state, install_start_ns](
-          const Status &status, rpc::InstallRecoveryHolderReply &&install_reply) mutable {
-        if (install_start_ns != 0) {
-          manager->RecordHolderInstallRpcLatency(
-              RecoveryProfileNowNs() - install_start_ns);
-        }
-
-        bool already_aborted = false;
-        rpc::RecoveryManifest abort_manifest;
-        {
-          absl::MutexLock lock(&recovery_holder_admission_mutex_);
-          already_aborted = state->aborted;
-          if (already_aborted) {
-            abort_manifest.CopyFrom(state->abort_manifest);
-          }
-        }
-
-        if (already_aborted) {
-          // The lower-rank failure may have raced with this Install RPC. If the
-          // candidate stored the provisional lineage after the first cleanup,
-          // send cleanup again now that installation has definitively finished.
-          if (status.ok() && install_reply.stored()) {
-            SendRecoveryHolderRollback(state, abort_manifest);
-          }
-          return;
-        }
-
-        if (!status.ok() || !install_reply.stored() ||
-            install_reply.reservation_id() != state->reservation_id) {
-          AbortRecoveryHolderAdmissionSuffix(
-              state,
-              rpc::ReportRecoveryCandidateReply::NO_SLOT,
-              state->latest_manifest);
-          return;
-        }
-
-        {
-          absl::MutexLock lock(&recovery_holder_admission_mutex_);
-          if (state->aborted) {
-            abort_manifest.CopyFrom(state->abort_manifest);
-            already_aborted = true;
-          } else {
-            state->installed = true;
-          }
-        }
-
-        if (already_aborted) {
-          SendRecoveryHolderRollback(state, abort_manifest);
-          return;
-        }
-
-        TryAdvanceRecoveryHolderAdmissions(state->task_id);
+      std::move(prepared.request),
+      [this, state](const Status &status,
+                    rpc::InstallRecoveryHolderReply &&install_reply) mutable {
+        HandleRecoveryHolderInstallResult(
+            state, status, std::move(install_reply));
       });
 }
 
-void CoreWorker::HandleInstallRecoveryHolder(rpc::InstallRecoveryHolderRequest request,
-                                             rpc::InstallRecoveryHolderReply *reply,
-                                             rpc::SendReplyCallback send_reply_callback) {
+void CoreWorker::DispatchRecoveryHolderInstallBatch(
+    std::vector<PreparedRecoveryHolderInstall> prepared) {
+  if (prepared.empty()) {
+    return;
+  }
+
+  size_t begin = 0;
+  while (begin < prepared.size()) {
+    size_t end = begin;
+    uint64_t bytes = 0;
+
+    while (end < prepared.size() &&
+           end - begin < kRecoveryInstallBatchMaxItems) {
+      const uint64_t next_bytes =
+          static_cast<uint64_t>(prepared[end].request.ByteSizeLong());
+
+      if (end > begin && bytes + next_bytes > kRecoveryInstallBatchMaxBytes) {
+        break;
+      }
+
+      bytes += next_bytes;
+      ++end;
+    }
+
+    // Always make progress even when one TaskSpec itself exceeds the byte cap.
+    if (end == begin) {
+      ++end;
+    }
+
+    if (end - begin == 1) {
+      DispatchRecoveryHolderInstall(std::move(prepared[begin]));
+      begin = end;
+      continue;
+    }
+
+    rpc::InstallRecoveryHolderBatchRequest batch_request;
+    batch_request.mutable_requests()->Reserve(static_cast<int>(end - begin));
+
+    std::vector<std::shared_ptr<PendingRecoveryHolderAdmission>> states;
+    states.reserve(end - begin);
+
+    for (size_t i = begin; i < end; ++i) {
+      states.push_back(prepared[i].state);
+      batch_request.add_requests()->Swap(&prepared[i].request);
+    }
+
+    const rpc::Address candidate_address = states.front()->candidate_address;
+    auto candidate_client = core_worker_client_pool_->GetOrConnect(candidate_address);
+
+    const uint64_t install_start_ns =
+        recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+    if (install_start_ns != 0) {
+      for (const auto &state : states) {
+        state->install_start_ns = install_start_ns;
+      }
+    }
+
+    RAY_LOG(DEBUG) << "Patch 4E sending install batch with "
+                   << states.size() << " logical installs and ~"
+                   << bytes << " serialized request bytes";
+
+    candidate_client->InstallRecoveryHolderBatch(
+        std::move(batch_request),
+        [this, states = std::move(states)](
+            const Status &status,
+            rpc::InstallRecoveryHolderBatchReply &&batch_reply) mutable {
+          const bool shape_ok =
+              status.ok() &&
+              batch_reply.replies_size() == static_cast<int>(states.size());
+
+          const Status item_status =
+              shape_ok
+                  ? Status::OK()
+                  : (status.ok()
+                         ? Status::IOError(
+                               "InstallRecoveryHolderBatch reply size mismatch")
+                         : status);
+
+          for (size_t i = 0; i < states.size(); ++i) {
+            rpc::InstallRecoveryHolderReply item_reply;
+            if (shape_ok) {
+              item_reply.CopyFrom(batch_reply.replies(static_cast<int>(i)));
+            } else {
+              item_reply.set_stored(false);
+              item_reply.set_reservation_id(states[i]->reservation_id);
+            }
+
+            HandleRecoveryHolderInstallResult(
+                states[i], item_status, std::move(item_reply));
+          }
+        });
+
+    begin = end;
+  }
+}
+
+void CoreWorker::HandleReportRecoveryCandidate(
+    rpc::ReportRecoveryCandidateRequest request,
+    rpc::ReportRecoveryCandidateReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  auto prepared = PrepareRecoveryCandidateAdmission(
+      request, reply, std::move(send_reply_callback));
+  if (prepared.has_value()) {
+    DispatchRecoveryHolderInstall(std::move(prepared.value()));
+  }
+}
+
+void CoreWorker::HandleReportRecoveryCandidateBatch(
+    rpc::ReportRecoveryCandidateBatchRequest request,
+    rpc::ReportRecoveryCandidateBatchReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  if (reply == nullptr) {
+    send_reply_callback(Status::Invalid("null recovery candidate batch reply"),
+                        nullptr,
+                        nullptr);
+    return;
+  }
+
+  const int count = request.requests_size();
+  if (count == 0) {
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  reply->mutable_replies()->Reserve(count);
+  std::vector<rpc::ReportRecoveryCandidateReply *> item_replies;
+  item_replies.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    item_replies.push_back(reply->add_replies());
+  }
+
+  struct CompletionState {
+    absl::Mutex mutex;
+    int remaining ABSL_GUARDED_BY(mutex);
+    bool sent ABSL_GUARDED_BY(mutex) = false;
+    Status first_error ABSL_GUARDED_BY(mutex) = Status::OK();
+    rpc::SendReplyCallback callback;
+
+    CompletionState(int count, rpc::SendReplyCallback cb)
+        : remaining(count), callback(std::move(cb)) {}
+  };
+
+  auto completion =
+      std::make_shared<CompletionState>(count, std::move(send_reply_callback));
+
+  auto item_done = [completion](const Status &status, auto, auto) mutable {
+    bool finish = false;
+    Status final_status = Status::OK();
+
+    {
+      absl::MutexLock lock(&completion->mutex);
+      if (!status.ok() && completion->first_error.ok()) {
+        completion->first_error = status;
+      }
+
+      --completion->remaining;
+      RAY_CHECK_GE(completion->remaining, 0);
+
+      if (completion->remaining == 0 && !completion->sent) {
+        completion->sent = true;
+        final_status = completion->first_error;
+        finish = true;
+      }
+    }
+
+    if (finish) {
+      completion->callback(final_status, nullptr, nullptr);
+    }
+  };
+
+  // A batch normally comes from one candidate worker and one owner, but group
+  // by candidate worker defensively before issuing holder-install batches.
+  std::map<std::string, std::vector<PreparedRecoveryHolderInstall>> install_groups;
+
+  for (int i = 0; i < count; ++i) {
+    auto prepared = PrepareRecoveryCandidateAdmission(
+        request.requests(i), item_replies[static_cast<size_t>(i)], item_done);
+
+    if (!prepared.has_value()) {
+      continue;
+    }
+
+    const std::string candidate_worker_id =
+        prepared->state->candidate_address.worker_id();
+    install_groups[candidate_worker_id].push_back(std::move(prepared.value()));
+  }
+
+  for (auto &[candidate_worker_id, group] : install_groups) {
+    static_cast<void>(candidate_worker_id);
+    DispatchRecoveryHolderInstallBatch(std::move(group));
+  }
+}
+
+void CoreWorker::HandleInstallRecoveryHolder(
+    rpc::InstallRecoveryHolderRequest request,
+    rpc::InstallRecoveryHolderReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
   reply->set_reservation_id(request.reservation_id());
 
   if (!recovery_succession_enabled_ ||
-    recovery_witness_holder_baseline_enabled_ ||
-    recovery_succession_manager_ == nullptr) {
+      recovery_witness_holder_baseline_enabled_ ||
+      recovery_succession_manager_ == nullptr) {
     reply->set_stored(false);
-
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
 
   const bool stored = recovery_succession_manager_->InstallRecoveryHolder(request);
-
   reply->set_stored(stored);
 
   if (stored) {
     RAY_LOG(INFO).WithField(TaskID::FromBinary(request.task_id()))
-        << "Stored provisional recovery "
-           "holder at rank "
+        << "Stored provisional recovery holder at rank "
         << request.proposed_rank();
+  }
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
+void CoreWorker::HandleInstallRecoveryHolderBatch(
+    rpc::InstallRecoveryHolderBatchRequest request,
+    rpc::InstallRecoveryHolderBatchReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  const int count = request.requests_size();
+  reply->mutable_replies()->Reserve(count);
+
+  const bool enabled =
+      recovery_succession_enabled_ &&
+      !recovery_witness_holder_baseline_enabled_ &&
+      recovery_succession_manager_ != nullptr;
+
+  for (int i = 0; i < count; ++i) {
+    const rpc::InstallRecoveryHolderRequest &item_request = request.requests(i);
+    rpc::InstallRecoveryHolderReply *item_reply = reply->add_replies();
+    item_reply->set_reservation_id(item_request.reservation_id());
+
+    const bool stored =
+        enabled && recovery_succession_manager_->InstallRecoveryHolder(item_request);
+    item_reply->set_stored(stored);
+
+    if (stored) {
+      RAY_LOG(DEBUG).WithField(TaskID::FromBinary(item_request.task_id()))
+          << "Patch 4E batch stored provisional recovery holder at rank "
+          << item_request.proposed_rank();
+    }
   }
 
   send_reply_callback(Status::OK(), nullptr, nullptr);

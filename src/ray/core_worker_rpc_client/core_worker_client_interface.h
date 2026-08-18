@@ -53,13 +53,22 @@ class CoreWorkerClientInterface : public pubsub::SubscriberClientInterface {
                                const ClientCallback<GetObjectStatusReply> &callback) = 0;
 
   // Recovery succession RPCs.
+  // Patch 4E: batched recovery control RPCs.
   virtual void ReportRecoveryCandidate(
       ReportRecoveryCandidateRequest &&request,
       const ClientCallback<ReportRecoveryCandidateReply> &callback) = 0;
 
+  virtual void ReportRecoveryCandidateBatch(
+      ReportRecoveryCandidateBatchRequest &&request,
+      const ClientCallback<ReportRecoveryCandidateBatchReply> &callback) = 0;
+
   virtual void InstallRecoveryHolder(
       InstallRecoveryHolderRequest &&request,
       const ClientCallback<InstallRecoveryHolderReply> &callback) = 0;
+
+  virtual void InstallRecoveryHolderBatch(
+      InstallRecoveryHolderBatchRequest &&request,
+      const ClientCallback<InstallRecoveryHolderBatchReply> &callback) = 0;
 
   virtual void CommitRecoveryManifest(
       CommitRecoveryManifestRequest &&request,

@@ -467,6 +467,7 @@ message RegisterMutableObjectReaderReply {
 }
 
 // Recovery succession
+// Patch 4E: batched recovery control RPCs.
 
 message ReportRecoveryCandidateRequest {
   bytes task_id = 1;
@@ -492,6 +493,16 @@ message ReportRecoveryCandidateReply {
   RecoveryManifest latest_manifest = 2;
 }
 
+// Patch 4E: physically coalesce independent logical candidate reports.
+// replies[i] corresponds to requests[i].
+message ReportRecoveryCandidateBatchRequest {
+  repeated ReportRecoveryCandidateRequest requests = 1;
+}
+
+message ReportRecoveryCandidateBatchReply {
+  repeated ReportRecoveryCandidateReply replies = 1;
+}
+
 message InstallRecoveryHolderRequest {
   bytes task_id = 1;
   bytes reservation_id = 2;
@@ -503,6 +514,16 @@ message InstallRecoveryHolderRequest {
 message InstallRecoveryHolderReply {
   bool stored = 1;
   bytes reservation_id = 2;
+}
+
+// Patch 4E: physically coalesce independent logical holder installations.
+// replies[i] corresponds to requests[i].
+message InstallRecoveryHolderBatchRequest {
+  repeated InstallRecoveryHolderRequest requests = 1;
+}
+
+message InstallRecoveryHolderBatchReply {
+  repeated InstallRecoveryHolderReply replies = 1;
 }
 
 message CommitRecoveryManifestRequest {
@@ -677,8 +698,14 @@ service CoreWorkerService {
   rpc ReportRecoveryCandidate(ReportRecoveryCandidateRequest)
       returns (ReportRecoveryCandidateReply);
 
+  rpc ReportRecoveryCandidateBatch(ReportRecoveryCandidateBatchRequest)
+      returns (ReportRecoveryCandidateBatchReply);
+
   rpc InstallRecoveryHolder(InstallRecoveryHolderRequest)
       returns (InstallRecoveryHolderReply);
+
+  rpc InstallRecoveryHolderBatch(InstallRecoveryHolderBatchRequest)
+      returns (InstallRecoveryHolderBatchReply);
 
   rpc CommitRecoveryManifest(CommitRecoveryManifestRequest)
       returns (CommitRecoveryManifestReply);

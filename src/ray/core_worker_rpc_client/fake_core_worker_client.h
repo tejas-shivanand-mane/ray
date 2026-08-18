@@ -28,6 +28,8 @@
 namespace ray {
 namespace rpc {
 
+// Patch 4E: batched recovery control RPCs.
+
 class FakeCoreWorkerClient : public CoreWorkerClientInterface {
  public:
   const Address &Addr() const override {
@@ -62,9 +64,17 @@ class FakeCoreWorkerClient : public CoreWorkerClientInterface {
       ReportRecoveryCandidateRequest &&request,
       const ClientCallback<ReportRecoveryCandidateReply> &callback) override {}
 
+  void ReportRecoveryCandidateBatch(
+      ReportRecoveryCandidateBatchRequest &&request,
+      const ClientCallback<ReportRecoveryCandidateBatchReply> &callback) override {}
+
   void InstallRecoveryHolder(
       InstallRecoveryHolderRequest &&request,
       const ClientCallback<InstallRecoveryHolderReply> &callback) override {}
+
+  void InstallRecoveryHolderBatch(
+      InstallRecoveryHolderBatchRequest &&request,
+      const ClientCallback<InstallRecoveryHolderBatchReply> &callback) override {}
 
   void CommitRecoveryManifest(
       CommitRecoveryManifestRequest &&request,

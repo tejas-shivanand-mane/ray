@@ -31,6 +31,8 @@
 namespace ray {
 namespace rpc {
 
+// Patch 4E: batched recovery control RPCs.
+
 /// The maximum number of requests in flight per client.
 inline constexpr int64_t kMaxBytesInFlight = 16L * 1024 * 1024;
 
@@ -79,9 +81,24 @@ class CoreWorkerClient : public std::enable_shared_from_this<CoreWorkerClient>,
                                    /*method_timeout_ms*/ -1,
                                    override)
 
+  // Patch 4E: one physical RPC may carry many independent logical reports.
+  VOID_RETRYABLE_RPC_CLIENT_METHOD(retryable_grpc_client_,
+                                   CoreWorkerService,
+                                   ReportRecoveryCandidateBatch,
+                                   grpc_client_,
+                                   /*method_timeout_ms*/ -1,
+                                   override)
+
   VOID_RETRYABLE_RPC_CLIENT_METHOD(retryable_grpc_client_,
                                    CoreWorkerService,
                                    InstallRecoveryHolder,
+                                   grpc_client_,
+                                   /*method_timeout_ms*/ -1,
+                                   override)
+
+  VOID_RETRYABLE_RPC_CLIENT_METHOD(retryable_grpc_client_,
+                                   CoreWorkerService,
+                                   InstallRecoveryHolderBatch,
                                    grpc_client_,
                                    /*method_timeout_ms*/ -1,
                                    override)

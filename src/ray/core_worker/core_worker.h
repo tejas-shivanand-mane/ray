@@ -66,6 +66,7 @@
 namespace ray::core {
 
 // Patch 4D: pipelined holder admission.
+// Patch 4E: batched recovery control RPCs.
 
 JobID GetProcessJobID(const CoreWorkerOptions &options);
 
@@ -1399,10 +1400,24 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                                      rpc::ReportRecoveryCandidateReply *reply,
                                      rpc::SendReplyCallback send_reply_callback);
 
+  /// Patch 4E: batched form of HandleReportRecoveryCandidate. Logical replies
+  /// preserve request order.
+  void HandleReportRecoveryCandidateBatch(
+      rpc::ReportRecoveryCandidateBatchRequest request,
+      rpc::ReportRecoveryCandidateBatchReply *reply,
+      rpc::SendReplyCallback send_reply_callback);
+
   /// Installs lineage and a provisional manifest on a holder.
   void HandleInstallRecoveryHolder(rpc::InstallRecoveryHolderRequest request,
                                    rpc::InstallRecoveryHolderReply *reply,
                                    rpc::SendReplyCallback send_reply_callback);
+
+  /// Patch 4E: batched form of HandleInstallRecoveryHolder. Logical replies
+  /// preserve request order.
+  void HandleInstallRecoveryHolderBatch(
+      rpc::InstallRecoveryHolderBatchRequest request,
+      rpc::InstallRecoveryHolderBatchReply *reply,
+      rpc::SendReplyCallback send_reply_callback);
 
   /// Commits a newer recovery manifest on a holder.
   void HandleCommitRecoveryManifest(rpc::CommitRecoveryManifestRequest request,
@@ -1634,6 +1649,24 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     RecoveryWitnessPublishCallback callback,
     const rpc::TaskSpec *task_spec = nullptr) const;
 
+  // Patch 4E sender-side coalescing state. The queue is per coordinator so
+  // unrelated owners never share a physical RPC.
+  struct PendingRecoveryCandidateReport {
+    TaskID task_id;
+    rpc::ReportRecoveryCandidateRequest request;
+  };
+
+  struct RecoveryCandidateBatchQueue {
+    rpc::Address coordinator_address;
+    std::deque<PendingRecoveryCandidateReport> pending;
+  };
+
+  void QueueRecoveryCandidateReport(
+      rpc::Address coordinator_address,
+      rpc::ReportRecoveryCandidateRequest request);
+
+  void FlushRecoveryCandidateReportBatch(const std::string &coordinator_worker_id);
+
   // Patch 4D: InstallRecoveryHolder RPCs may complete concurrently, while
   // witness publication and durable commits remain strictly rank ordered.
   struct PendingRecoveryHolderAdmission {
@@ -1645,6 +1678,7 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     rpc::RecoveryManifest latest_manifest;
     rpc::RecoveryManifest proposed_manifest;
     uint64_t admission_start_ns = 0;
+    uint64_t install_start_ns = 0;
     rpc::ReportRecoveryCandidateReply *reply = nullptr;
     rpc::SendReplyCallback send_reply_callback;
     bool installed = false;
@@ -1658,6 +1692,27 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     uint32_t witness_publish_rank = 0;
     std::map<uint32_t, std::shared_ptr<PendingRecoveryHolderAdmission>> pending_by_rank;
   };
+
+  struct PreparedRecoveryHolderInstall {
+    std::shared_ptr<PendingRecoveryHolderAdmission> state;
+    rpc::InstallRecoveryHolderRequest request;
+  };
+
+  std::optional<PreparedRecoveryHolderInstall> PrepareRecoveryCandidateAdmission(
+      const rpc::ReportRecoveryCandidateRequest &request,
+      rpc::ReportRecoveryCandidateReply *reply,
+      rpc::SendReplyCallback send_reply_callback);
+
+  void DispatchRecoveryHolderInstall(
+      PreparedRecoveryHolderInstall prepared);
+
+  void DispatchRecoveryHolderInstallBatch(
+      std::vector<PreparedRecoveryHolderInstall> prepared);
+
+  void HandleRecoveryHolderInstallResult(
+      const std::shared_ptr<PendingRecoveryHolderAdmission> &state,
+      const Status &status,
+      rpc::InstallRecoveryHolderReply install_reply);
 
   void FinishRecoveryHolderAdmission(
       std::shared_ptr<PendingRecoveryHolderAdmission> state);
@@ -2194,6 +2249,13 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   /// Distributed recovery succession state. Null when the feature is disabled.
   std::shared_ptr<RecoverySuccessionManager> recovery_succession_manager_;
+
+  // Patch 4E candidate-report microbatch queues. This lock protects only queue
+  // metadata and is never held while sending an RPC.
+  mutable absl::Mutex recovery_candidate_batch_mutex_;
+  absl::flat_hash_map<std::string, RecoveryCandidateBatchQueue>
+      recovery_candidate_batch_queues_
+          ABSL_GUARDED_BY(recovery_candidate_batch_mutex_);
 
   // Patch 4D owner-side continuation queue. It is deliberately separate from
   // mutex_: RPC callbacks may finish out of order, and this mutex protects only

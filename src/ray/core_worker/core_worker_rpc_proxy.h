@@ -25,6 +25,8 @@
 namespace ray {
 namespace core {
 
+// Patch 4E: batched recovery control RPCs.
+
 // Lock is unnecessary as SetCoreWorker is called only once and RPCs
 // are blocked until it is called.
 #define RAY_CORE_WORKER_RPC_PROXY(METHOD)                                    \
@@ -52,7 +54,9 @@ class CoreWorkerServiceHandlerProxy : public rpc::CoreWorkerServiceHandler {
   RAY_CORE_WORKER_RPC_PROXY(GetObjectStatus)
 
   RAY_CORE_WORKER_RPC_PROXY(ReportRecoveryCandidate)
+  RAY_CORE_WORKER_RPC_PROXY(ReportRecoveryCandidateBatch)
   RAY_CORE_WORKER_RPC_PROXY(InstallRecoveryHolder)
+  RAY_CORE_WORKER_RPC_PROXY(InstallRecoveryHolderBatch)
   RAY_CORE_WORKER_RPC_PROXY(CommitRecoveryManifest)
   RAY_CORE_WORKER_RPC_PROXY(RecoverTaskOutput)
   RAY_CORE_WORKER_RPC_PROXY(ApplyRecoveryTombstone)
