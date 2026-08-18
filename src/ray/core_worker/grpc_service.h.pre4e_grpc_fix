@@ -69,19 +69,9 @@ class CoreWorkerServiceHandler : public DelayedServiceHandler {
         ReportRecoveryCandidateReply *reply,
         SendReplyCallback send_reply_callback) = 0;
 
-    virtual void HandleReportRecoveryCandidateBatch(
-        ReportRecoveryCandidateBatchRequest request,
-        ReportRecoveryCandidateBatchReply *reply,
-        SendReplyCallback send_reply_callback) = 0;
-
     virtual void HandleInstallRecoveryHolder(
         InstallRecoveryHolderRequest request,
         InstallRecoveryHolderReply *reply,
-        SendReplyCallback send_reply_callback) = 0;
-
-    virtual void HandleInstallRecoveryHolderBatch(
-        InstallRecoveryHolderBatchRequest request,
-        InstallRecoveryHolderBatchReply *reply,
         SendReplyCallback send_reply_callback) = 0;
 
     virtual void HandleCommitRecoveryManifest(
