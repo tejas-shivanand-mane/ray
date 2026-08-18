@@ -27,7 +27,6 @@ namespace ray::core {
 // Patch 4G: hot-path profiling and B1 ablations.
 // Patch 4H: compact task-argument recovery metadata.
 // Patch 4I: TaskSpec-level recovery argument sidecar.
-// Patch 4J: task-centric recovery state.
 
 namespace {
 
@@ -333,7 +332,6 @@ rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
   return manifest;
 }
 
-
 void RecoverySuccessionManager::RegisterOwnedTask(
     const TaskSpecification &task_spec,
     std::vector<rpc::ObjectReference> *returned_refs) {
@@ -351,8 +349,6 @@ void RecoverySuccessionManager::RegisterOwnedTask(
 
   TaskRecoveryState task_state;
   task_state.manifest.CopyFrom(task_proto.recovery_manifest());
-  task_state.owned_num_returns =
-      static_cast<uint32_t>(task_spec.NumReturns());
 
   rpc::TaskSpec stored_task_spec;
   stored_task_spec.CopyFrom(task_proto);
@@ -364,10 +360,12 @@ void RecoverySuccessionManager::RegisterOwnedTask(
   task_state.manifest_committed = true;
 
   absl::MutexLock lock(&mutex_);
+
   task_states_[task_id] = std::move(task_state);
 
   for (size_t return_index = 0; return_index < returned_refs->size(); ++return_index) {
     rpc::ObjectReference &returned_ref = returned_refs->at(return_index);
+
     if (returned_ref.object_id().empty()) {
       continue;
     }
@@ -376,10 +374,15 @@ void RecoverySuccessionManager::RegisterOwnedTask(
     metadata.set_task_id(task_proto.task_id());
     metadata.set_return_index(static_cast<uint32_t>(return_index));
     metadata.mutable_manifest()->CopyFrom(task_proto.recovery_manifest());
+
+    const ObjectID object_id = ObjectID::FromBinary(returned_ref.object_id());
+
+    object_recovery_metadata_[object_id] = metadata;
+    task_object_ids_[task_id].insert(object_id);
+
     returned_ref.mutable_recovery_metadata()->CopyFrom(metadata);
   }
 }
-
 
 
 bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
@@ -401,19 +404,46 @@ bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
     if (existing_it->second.manifest.tombstoned()) {
       return false;
     }
+
+    // Another serialization thread already activated this task.
+    if (existing_it->second.task_spec.has_value()) {
+      return false;
+    }
+
+    // Avoid overwriting any unexpected partially-created state.
     return false;
   }
 
   TaskRecoveryState task_state;
   task_state.manifest.CopyFrom(manifest);
-  task_state.owned_num_returns =
-      static_cast<uint32_t>(task_spec.NumReturns());
+
+  rpc::TaskSpec stored_task_spec;
+  stored_task_spec.CopyFrom(task_proto);
+  ClearFirstHolderTaskSpecPiggybacks(&stored_task_spec);
+  stored_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
+
+  task_state.task_spec = std::move(stored_task_spec);
   task_state.manifest_committed = true;
 
   task_states_[task_id] = std::move(task_state);
 
-  if (profiling_enabled_) {
-    ++profile_.owner_lazy_task_spec_copies_avoided;
+  // Static return IDs are deterministic. Initialize metadata for every return
+  // so the first exported return activates protection for the whole task.
+  for (size_t return_index = 0; return_index < task_spec.NumReturns();
+       ++return_index) {
+    const ObjectID object_id = task_spec.ReturnId(return_index);
+
+    if (object_id.IsNil()) {
+      continue;
+    }
+
+    rpc::RecoveryObjectMetadata metadata;
+    metadata.set_task_id(task_proto.task_id());
+    metadata.set_return_index(static_cast<uint32_t>(return_index));
+    metadata.mutable_manifest()->CopyFrom(manifest);
+
+    object_recovery_metadata_[object_id] = metadata;
+    task_object_ids_[task_id].insert(object_id);
   }
 
   return true;
@@ -539,27 +569,36 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     BorrowedObjectRecoveryState borrowed_state;
     borrowed_state.task_id = metadata_task_id;
     borrowed_state.return_index = effective_metadata.return_index();
-    borrowed_objects_[object_id] = std::move(borrowed_state);
 
-    TaskRecoveryState &dependency_state = task_states_[metadata_task_id];
-    if (dependency_state.manifest.task_id().empty() ||
-        CompareManifestVersions(effective_metadata.manifest(),
-                                dependency_state.manifest) > 0) {
-      dependency_state.manifest.CopyFrom(effective_metadata.manifest());
-    }
+    borrowed_objects_[object_id] = std::move(borrowed_state);
+    object_recovery_metadata_[object_id] = effective_metadata;
+    task_object_ids_[metadata_task_id].insert(object_id);
 
     if (valid_piggyback &&
         piggyback_task_spec.task_id() == effective_metadata.task_id()) {
-      if (!dependency_state.task_spec.has_value()) {
+      const auto existing_task_it = task_states_.find(metadata_task_id);
+
+      if (existing_task_it == task_states_.end()) {
+        TaskRecoveryState piggyback_state;
+        piggyback_state.manifest.CopyFrom(effective_metadata.manifest());
         piggyback_task_spec.mutable_recovery_manifest()->CopyFrom(
-            dependency_state.manifest);
-        dependency_state.task_spec = std::move(piggyback_task_spec);
-        dependency_state.manifest_committed = false;
-        dependency_state.provisional_piggyback_task_spec = true;
+            effective_metadata.manifest());
+        piggyback_state.task_spec = std::move(piggyback_task_spec);
+
+        // Critical 4F invariant: possession is provisional only. The local
+        // owner-only manifest does not yet make this worker a replayable H1.
+        piggyback_state.manifest_committed = false;
+        piggyback_state.provisional_piggyback_task_spec = true;
+
+        task_states_[metadata_task_id] = std::move(piggyback_state);
         piggyback_task_ids.insert(metadata_task_id);
-      } else if (dependency_state.provisional_piggyback_task_spec) {
+      } else if (existing_task_it->second.provisional_piggyback_task_spec &&
+                 existing_task_it->second.task_spec.has_value()) {
+        // Duplicate delivery of the same downstream TaskSpec.
         piggyback_task_ids.insert(metadata_task_id);
       }
+      // Any other pre-existing TaskRecoveryState falls back conservatively to
+      // the normal InstallRecoveryHolder path.
     }
   }
 
@@ -620,41 +659,52 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
   return reports;
 }
 
-
 void RecoverySuccessionManager::RegisterBorrowedObject(
     const ObjectID &object_id, const rpc::RecoveryObjectMetadata &metadata) {
   if (metadata.task_id().empty() || !metadata.has_manifest()) {
     return;
   }
 
-  const TaskID task_id = TaskID::FromBinary(metadata.task_id());
+  rpc::RecoveryObjectMetadata effective_metadata;
+  effective_metadata.CopyFrom(metadata);
 
   absl::MutexLock lock(&mutex_);
 
+  const auto existing_metadata = object_recovery_metadata_.find(object_id);
+
+  if (existing_metadata != object_recovery_metadata_.end() &&
+      CompareManifestVersions(existing_metadata->second.manifest(), metadata.manifest()) >
+          0) {
+    effective_metadata.CopyFrom(existing_metadata->second);
+  }
+
+  // Patch 4F TaskSpec bytes are valid only on downstream PushTask receipt.
+  effective_metadata.clear_first_holder_task_spec();
+
+  const TaskID task_id =
+    TaskID::FromBinary(effective_metadata.task_id());
+
   const auto tombstone_it = task_states_.find(task_id);
+
   if (tombstone_it != task_states_.end() &&
       tombstone_it->second.manifest.tombstoned() &&
       CompareManifestVersions(tombstone_it->second.manifest,
-                              metadata.manifest()) >= 0) {
+                              effective_metadata.manifest()) >= 0) {
     return;
   }
 
   BorrowedObjectRecoveryState borrowed_state;
   borrowed_state.task_id = task_id;
-  borrowed_state.return_index = metadata.return_index();
-  borrowed_objects_[object_id] = std::move(borrowed_state);
+  borrowed_state.return_index = effective_metadata.return_index();
 
-  TaskRecoveryState &task_state = task_states_[task_id];
-  if (task_state.manifest.task_id().empty() ||
-      CompareManifestVersions(metadata.manifest(), task_state.manifest) > 0) {
-    task_state.manifest.CopyFrom(metadata.manifest());
-  }
+  borrowed_objects_[object_id] = std::move(borrowed_state);
+  object_recovery_metadata_[object_id] = effective_metadata;
+  task_object_ids_[task_id].insert(object_id);
 }
 
 rpc::ReportRecoveryCandidateReply::Result
 RecoverySuccessionManager::PrepareHolderAdmission(
     const rpc::ReportRecoveryCandidateRequest &request,
-    const rpc::TaskSpec *owner_task_spec,
     HolderAdmissionPlan *plan,
     rpc::RecoveryManifest *latest_manifest) {
   if (plan == nullptr || latest_manifest == nullptr || request.task_id().empty() ||
@@ -677,7 +727,7 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   absl::MutexLock lock(&mutex_);
 
   const auto task_it = task_states_.find(task_id);
-  if (task_it == task_states_.end()) {
+  if (task_it == task_states_.end() || !task_it->second.task_spec.has_value()) {
     return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
   }
 
@@ -808,23 +858,10 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   plan->candidate_already_stores_task_spec = request.already_stores_task_spec();
 
   if (!plan->candidate_already_stores_task_spec) {
-    const rpc::TaskSpec *lineage_task_spec =
-        task_it->second.task_spec.has_value()
-            ? &task_it->second.task_spec.value()
-            : owner_task_spec;
-
-    if (lineage_task_spec == nullptr ||
-        lineage_task_spec->task_id() != task_id.Binary() ||
-        !IsEligibleTask(*lineage_task_spec)) {
-      EraseHolderReservationLocked(reservation_id);
-      return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
-    }
-
     if (profiling_enabled_) {
       const auto copy_start = std::chrono::steady_clock::now();
 
-      plan->task_spec.CopyFrom(*lineage_task_spec);
-      ClearFirstHolderTaskSpecPiggybacks(&plan->task_spec);
+      plan->task_spec.CopyFrom(task_it->second.task_spec.value());
       plan->task_spec.mutable_recovery_manifest()->CopyFrom(proposed_manifest);
 
       const auto copy_end = std::chrono::steady_clock::now();
@@ -835,8 +872,7 @@ RecoverySuccessionManager::PrepareHolderAdmission(
       ++profile_.owner_task_spec_copy_count;
       profile_.owner_task_spec_copy_time_ns += copy_ns;
     } else {
-      plan->task_spec.CopyFrom(*lineage_task_spec);
-      ClearFirstHolderTaskSpecPiggybacks(&plan->task_spec);
+      plan->task_spec.CopyFrom(task_it->second.task_spec.value());
       plan->task_spec.mutable_recovery_manifest()->CopyFrom(proposed_manifest);
     }
   }
@@ -1089,68 +1125,11 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
   return true;
 }
 
-
-bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
-    const ObjectID &object_id,
-    rpc::RecoveryObjectMetadata *metadata) const {
-  if (object_id.IsNil()) {
-    return false;
-  }
-
-  const TaskID task_id = object_id.TaskId();
-  uint32_t return_index = 0;
-  bool known_object = false;
-
-  const auto borrowed_it = borrowed_objects_.find(object_id);
-  if (borrowed_it != borrowed_objects_.end() &&
-      borrowed_it->second.task_id == task_id) {
-    return_index = borrowed_it->second.return_index;
-    known_object = true;
-  }
-
-  const auto task_it = task_states_.find(task_id);
-  if (!known_object && task_it != task_states_.end() &&
-      task_it->second.owned_num_returns > 0) {
-    const auto object_index = object_id.ObjectIndex();
-    if (object_index > 0 &&
-        static_cast<uint64_t>(object_index) <=
-            static_cast<uint64_t>(task_it->second.owned_num_returns)) {
-      return_index = static_cast<uint32_t>(object_index - 1);
-      known_object = true;
-    }
-  }
-
-  if (known_object && task_it != task_states_.end() &&
-      !task_it->second.manifest.task_id().empty()) {
-    if (metadata != nullptr) {
-      metadata->Clear();
-      metadata->set_task_id(task_id.Binary());
-      metadata->set_return_index(return_index);
-      metadata->mutable_manifest()->CopyFrom(task_it->second.manifest);
-    }
-    if (profiling_enabled_) {
-      ++profile_.task_centric_metadata_builds;
-    }
-    return true;
-  }
-
-  const auto legacy_it = object_recovery_metadata_.find(object_id);
-  if (legacy_it == object_recovery_metadata_.end()) {
-    return false;
-  }
-  if (metadata != nullptr) {
-    metadata->CopyFrom(legacy_it->second);
-  }
-  return true;
-}
-
-
 bool RecoverySuccessionManager::HasRecoveryMetadata(
     const ObjectID &object_id) const {
   absl::MutexLock lock(&mutex_);
-  return BuildRecoveryMetadataLocked(object_id, nullptr);
+  return object_recovery_metadata_.contains(object_id);
 }
-
 
 bool RecoverySuccessionManager::PopulateRecoveryMetadata(
     const ObjectID &object_id, rpc::RecoveryObjectMetadata *metadata) const {
@@ -1161,7 +1140,12 @@ bool RecoverySuccessionManager::PopulateRecoveryMetadata(
   const auto patch4g_start = std::chrono::steady_clock::now();
   absl::MutexLock lock(&mutex_);
 
-  const bool hit = BuildRecoveryMetadataLocked(object_id, metadata);
+  const auto metadata_it = object_recovery_metadata_.find(object_id);
+  const bool hit = metadata_it != object_recovery_metadata_.end();
+
+  if (hit) {
+    metadata->CopyFrom(metadata_it->second);
+  }
 
   if (profiling_enabled_) {
     ++profile_.recovery_metadata_lookup_calls;
@@ -1178,8 +1162,7 @@ bool RecoverySuccessionManager::PopulateRecoveryMetadata(
 }
 
 void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
-    rpc::TaskSpec *task_spec,
-    const absl::flat_hash_map<TaskID, rpc::TaskSpec> *owner_task_specs) {
+    rpc::TaskSpec *task_spec) {
   if (task_spec == nullptr) {
     return;
   }
@@ -1214,12 +1197,12 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       return;
     }
 
-    rpc::RecoveryObjectMetadata source_storage;
     rpc::RecoveryObjectMetadata legacy_expanded;
     const rpc::RecoveryObjectMetadata *source = nullptr;
 
-    if (BuildRecoveryMetadataLocked(object_id, &source_storage)) {
-      source = &source_storage;
+    const auto metadata_it = object_recovery_metadata_.find(object_id);
+    if (metadata_it != object_recovery_metadata_.end()) {
+      source = &metadata_it->second;
     } else if (had_legacy_transport) {
       rpc::ObjectReference synthetic_ref;
       synthetic_ref.set_object_id(object_id.Binary());
@@ -1308,6 +1291,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     // is still [A]. Later holders use the ordinary Patch-4E install path.
     if (state.first_holder_piggyback_sent ||
         !state.manifest_committed ||
+        !state.task_spec.has_value() ||
         state.manifest.tombstoned() ||
         state.manifest.frozen() ||
         state.manifest.succession_size() != 1 ||
@@ -1320,19 +1304,9 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       return;
     }
 
-    const rpc::TaskSpec *lineage_task_spec = nullptr;
-    if (state.task_spec.has_value()) {
-      lineage_task_spec = &state.task_spec.value();
-    } else if (owner_task_specs != nullptr) {
-      const auto lineage_it = owner_task_specs->find(producer_task_id);
-      if (lineage_it != owner_task_specs->end()) {
-        lineage_task_spec = &lineage_it->second;
-      }
-    }
-
-    if (lineage_task_spec == nullptr ||
-        !IsEligibleTask(*lineage_task_spec) ||
-        lineage_task_spec->task_id() != state.manifest.task_id()) {
+    if (!IsEligibleTask(state.task_spec.value()) ||
+        !state.task_spec->has_recovery_manifest() ||
+        state.task_spec->task_id() != state.manifest.task_id()) {
       return;
     }
 
@@ -1350,11 +1324,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
 
     const auto serialize_start = std::chrono::steady_clock::now();
     std::string serialized_task_spec;
-    rpc::TaskSpec piggyback_lineage;
-    piggyback_lineage.CopyFrom(*lineage_task_spec);
-    ClearFirstHolderTaskSpecPiggybacks(&piggyback_lineage);
-    piggyback_lineage.mutable_recovery_manifest()->CopyFrom(state.manifest);
-    const bool ok = piggyback_lineage.SerializeToString(&serialized_task_spec);
+    const bool ok = state.task_spec->SerializeToString(&serialized_task_spec);
     const auto serialize_end = std::chrono::steady_clock::now();
 
     if (!ok || serialized_task_spec.empty()) {
@@ -1520,7 +1490,6 @@ void RecoverySuccessionManager::UpdateManifestForTaskLocked(
   }
 }
 
-
 bool RecoverySuccessionManager::GetBorrowedObjectRecoveryPlan(
     const ObjectID &object_id, BorrowedObjectRecoveryPlan *plan) const {
   if (plan == nullptr) {
@@ -1534,24 +1503,27 @@ bool RecoverySuccessionManager::GetBorrowedObjectRecoveryPlan(
     return false;
   }
 
-  const auto task_it = task_states_.find(borrowed_it->second.task_id);
-  if (task_it == task_states_.end() ||
-      task_it->second.manifest.task_id().empty()) {
+  const auto metadata_it =
+    object_recovery_metadata_.find(object_id);
+
+  if (metadata_it == object_recovery_metadata_.end() ||
+      !metadata_it->second.has_manifest()) {
     return false;
   }
 
   plan->task_id = borrowed_it->second.task_id;
   plan->return_index = borrowed_it->second.return_index;
-  plan->cached_manifest.CopyFrom(task_it->second.manifest);
+  plan->cached_manifest.CopyFrom(
+      metadata_it->second.manifest());
+
   return true;
+
 }
 
 RecoverySuccessionManager::ReplayPreparationResult
-RecoverySuccessionManager::PrepareTaskReplay(
-    const rpc::RecoverTaskOutputRequest &request,
-    const rpc::TaskSpec *owner_task_spec,
-    rpc::TaskSpec *task_spec,
-    rpc::RecoveryManifest *latest_manifest) {
+RecoverySuccessionManager::PrepareTaskReplay(const rpc::RecoverTaskOutputRequest &request,
+                                             rpc::TaskSpec *task_spec,
+                                             rpc::RecoveryManifest *latest_manifest) {
   if (task_spec == nullptr ||
     latest_manifest == nullptr ||
     request.task_id().size() != TaskID::Size() ||
@@ -1578,11 +1550,7 @@ RecoverySuccessionManager::PrepareTaskReplay(
     return ReplayPreparationResult::TOMBSTONED;
   }
 
-  const rpc::TaskSpec *lineage_task_spec =
-      state.task_spec.has_value() ? &state.task_spec.value() : owner_task_spec;
-  if (lineage_task_spec == nullptr ||
-      lineage_task_spec->task_id() != task_id.Binary() ||
-      !IsEligibleTask(*lineage_task_spec)) {
+  if (!state.task_spec.has_value()) {
     return ReplayPreparationResult::TASK_NOT_FOUND;
   }
 
@@ -1664,9 +1632,9 @@ RecoverySuccessionManager::PrepareTaskReplay(
 
   state.manifest.set_recovery_attempt(state.manifest.recovery_attempt() + 1);
 
-  task_spec->CopyFrom(*lineage_task_spec);
-  ClearFirstHolderTaskSpecPiggybacks(task_spec);
-  task_spec->mutable_recovery_manifest()->CopyFrom(state.manifest);
+  state.task_spec->mutable_recovery_manifest()->CopyFrom(state.manifest);
+
+  task_spec->CopyFrom(state.task_spec.value());
   latest_manifest->CopyFrom(state.manifest);
 
   return ReplayPreparationResult::READY;
@@ -1751,7 +1719,6 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
   return true;
 }
 
-
 void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
     const ObjectID &object_id,
     const rpc::RecoveryManifest &manifest) {
@@ -1762,18 +1729,26 @@ void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
   absl::MutexLock lock(&mutex_);
 
   const auto borrowed_it = borrowed_objects_.find(object_id);
-  if (borrowed_it == borrowed_objects_.end() ||
-      borrowed_it->second.task_id.Binary() != manifest.task_id()) {
+
+  if (borrowed_it == borrowed_objects_.end()) {
     return;
   }
 
-  TaskRecoveryState &state = task_states_[borrowed_it->second.task_id];
-  if (!state.manifest.task_id().empty() &&
-      CompareManifestVersions(manifest, state.manifest) < 0) {
+  auto metadata_it = object_recovery_metadata_.find(object_id);
+
+  if (metadata_it == object_recovery_metadata_.end() ||
+      !metadata_it->second.has_manifest() ||
+      metadata_it->second.task_id() != manifest.task_id()) {
     return;
   }
 
-  state.manifest.CopyFrom(manifest);
+  if (CompareManifestVersions(
+          manifest,
+          metadata_it->second.manifest()) < 0) {
+    return;
+  }
+
+  metadata_it->second.mutable_manifest()->CopyFrom(manifest);
 }
 
 std::optional<rpc::RecoveryManifest> RecoverySuccessionManager::BuildTombstoneForTask(
@@ -1788,7 +1763,8 @@ std::optional<rpc::RecoveryManifest> RecoverySuccessionManager::BuildTombstoneFo
 
   const TaskRecoveryState &task_state = task_it->second;
 
-  if (!task_state.manifest_committed || task_state.manifest.tombstoned()) {
+  if (!task_state.manifest_committed || task_state.manifest.tombstoned() ||
+      !task_state.task_spec.has_value()) {
     return std::nullopt;
   }
 
@@ -1864,26 +1840,20 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
   return true;
 }
 
-
 void RecoverySuccessionManager::EraseTaskObjectMetadataLocked(
     const TaskID &task_id) {
   const auto object_ids_it = task_object_ids_.find(task_id);
-  if (object_ids_it != task_object_ids_.end()) {
-    for (const ObjectID &object_id : object_ids_it->second) {
-      object_recovery_metadata_.erase(object_id);
-      borrowed_objects_.erase(object_id);
-    }
-    task_object_ids_.erase(object_ids_it);
+
+  if (object_ids_it == task_object_ids_.end()) {
+    return;
   }
 
-  for (auto it = borrowed_objects_.begin(); it != borrowed_objects_.end();) {
-    if (it->second.task_id == task_id) {
-      object_recovery_metadata_.erase(it->first);
-      it = borrowed_objects_.erase(it);
-    } else {
-      ++it;
-    }
+  for (const ObjectID &object_id : object_ids_it->second) {
+    object_recovery_metadata_.erase(object_id);
+    borrowed_objects_.erase(object_id);
   }
+
+  task_object_ids_.erase(object_ids_it);
 }
 
 

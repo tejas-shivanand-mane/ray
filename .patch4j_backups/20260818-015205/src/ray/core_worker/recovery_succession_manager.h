@@ -36,8 +36,6 @@ namespace ray::core {
 /// Patch 4F: first-holder TaskSpec piggyback.
 /// Patch 4G: hot-path profiling and B1 ablations.
 /// Patch 4H: compact task-argument recovery metadata.
-/// Patch 4I: TaskSpec-level recovery argument sidecar.
-/// Patch 4J: task-centric recovery state and on-demand owner lineage.
 /// Stores lineage, succession, and holder-admission state for the
 /// experimental recovery-succession implementation.
 class RecoverySuccessionManager {
@@ -85,11 +83,6 @@ class RecoverySuccessionManager {
 
     uint64_t owner_task_spec_copy_count = 0;
     uint64_t owner_task_spec_copy_time_ns = 0;
-
-    // Patch 4J: owner first-borrow activation deliberately does not retain
-    // another full TaskSpec in RecoverySuccessionManager.
-    uint64_t owner_lazy_task_spec_copies_avoided = 0;
-    uint64_t task_centric_metadata_builds = 0;
 
     // Patch 4F full-lineage copies moved through normal downstream PushTask
     // transport instead of InstallRecoveryHolder. task_spec_bytes_sent also
@@ -267,7 +260,6 @@ class RecoverySuccessionManager {
   /// Prepares a provisional holder admission on the current coordinator.
   rpc::ReportRecoveryCandidateReply::Result PrepareHolderAdmission(
       const rpc::ReportRecoveryCandidateRequest &request,
-      const rpc::TaskSpec *owner_task_spec,
       HolderAdmissionPlan *plan,
       rpc::RecoveryManifest *latest_manifest);
 
@@ -300,9 +292,7 @@ class RecoverySuccessionManager {
   /// Adds recovery metadata to direct and nested ObjectRef arguments.
   /// Patch 4F may atomically claim the one-shot H1 TaskSpec piggyback, so this
   /// method intentionally mutates manager state.
-  void PopulateTaskArgumentMetadata(
-      rpc::TaskSpec *task_spec,
-      const absl::flat_hash_map<TaskID, rpc::TaskSpec> *owner_task_specs = nullptr);
+  void PopulateTaskArgumentMetadata(rpc::TaskSpec *task_spec);
 
   struct BorrowedObjectRecoveryPlan {
     TaskID task_id;
@@ -325,11 +315,9 @@ class RecoverySuccessionManager {
   bool GetBorrowedObjectRecoveryPlan(const ObjectID &object_id,
                                      BorrowedObjectRecoveryPlan *plan) const;
 
-  ReplayPreparationResult PrepareTaskReplay(
-      const rpc::RecoverTaskOutputRequest &request,
-      const rpc::TaskSpec *owner_task_spec,
-      rpc::TaskSpec *task_spec,
-      rpc::RecoveryManifest *latest_manifest);
+  ReplayPreparationResult PrepareTaskReplay(const rpc::RecoverTaskOutputRequest &request,
+                                            rpc::TaskSpec *task_spec,
+                                            rpc::RecoveryManifest *latest_manifest);
 
   /// Promotes a provisional holder only from a manifest obtained directly
   /// from one of the task's compact witnesses.
@@ -368,22 +356,10 @@ class RecoverySuccessionManager {
   void EraseTaskObjectMetadataLocked(const TaskID &task_id)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  // Patch 4J: reconstruct ordinary RecoveryObjectMetadata from task-level
-  // state. object_recovery_metadata_ is only a legacy compatibility fallback.
-  bool BuildRecoveryMetadataLocked(
-      const ObjectID &object_id,
-      rpc::RecoveryObjectMetadata *metadata) const
-      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-
   struct TaskRecoveryState {
     rpc::RecoveryManifest manifest;
 
-    // Patch 4J: static return count lets the owner reconstruct per-object
-    // metadata from ObjectID::ObjectIndex() without a per-return manifest copy.
-    uint32_t owned_num_returns = 0;
-
-    // Present on executors and installed/piggyback lineage holders. The
-    // original owner may leave this empty and use TaskManager on demand.
+    // Present on the owner, executor, and installed lineage holders.
     std::optional<rpc::TaskSpec> task_spec;
 
     // An installed holder is not usable until either CommitRecoveryManifest

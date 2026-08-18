@@ -1227,10 +1227,6 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.owner_task_spec_copy_count;
   result["owner_task_spec_copy_time_ns"] =
       profile.owner_task_spec_copy_time_ns;
-  result["owner_lazy_task_spec_copies_avoided"] =
-      profile.owner_lazy_task_spec_copies_avoided;
-  result["task_centric_metadata_builds"] =
-      profile.task_centric_metadata_builds;
   // Patch 4F TaskSpecs transported through normal downstream PushTask.
   result["first_holder_piggyback_copies_sent"] =
       profile.first_holder_piggyback_copies_sent;
@@ -2928,58 +2924,18 @@ void CoreWorker::BuildCommonTaskSpec(
       !args.empty()) {
     EnsureRecoverySuccessionForTaskArguments(builder.MutableMessage());
 
-    absl::flat_hash_map<TaskID, rpc::TaskSpec> owner_recovery_task_specs;
-    const std::string &recovery_mode = RecoveryBenchmarkAblationMode();
-    if (!recovery_witness_holder_baseline_enabled_ &&
-        (recovery_mode == "full" ||
-         recovery_mode == "piggyback_no_candidate")) {
-      absl::flat_hash_set<TaskID> seen_producers;
-
-      auto maybe_prefetch = [this, &owner_recovery_task_specs, &seen_producers](
-                                const rpc::ObjectReference &ref) {
-        if (ref.object_id().size() != ObjectID::Size()) {
-          return;
-        }
-        const TaskID producer_task_id =
-            ObjectID::FromBinary(ref.object_id()).TaskId();
-        if (!seen_producers.insert(producer_task_id).second) {
-          return;
-        }
-
-        auto producer_spec = task_manager_->GetTaskSpec(producer_task_id);
-        if (!producer_spec.has_value()) {
-          return;
-        }
-        const rpc::TaskSpec &proto = producer_spec->GetMessage();
-        if (!RecoverySuccessionManager::IsEligibleTask(proto)) {
-          return;
-        }
-        owner_recovery_task_specs[producer_task_id].CopyFrom(proto);
-      };
-
-      for (const rpc::TaskArg &task_arg : builder.MutableMessage()->args()) {
-        if (task_arg.has_object_ref()) {
-          maybe_prefetch(task_arg.object_ref());
-        }
-        for (const rpc::ObjectReference &nested_ref :
-             task_arg.nested_inlined_refs()) {
-          maybe_prefetch(nested_ref);
-        }
-      }
-    }
-
     if (recovery_succession_profiling_enabled_) {
       const uint64_t start_ns = RecoveryProfileNowNs();
 
       recovery_succession_manager_->PopulateTaskArgumentMetadata(
-          builder.MutableMessage(), &owner_recovery_task_specs);
+          builder.MutableMessage());
 
       recovery_succession_manager_
           ->RecordTaskArgumentMetadataLatency(
               RecoveryProfileNowNs() - start_ns);
     } else {
       recovery_succession_manager_->PopulateTaskArgumentMetadata(
-          builder.MutableMessage(), &owner_recovery_task_specs);
+          builder.MutableMessage());
     }
   }
 
@@ -5477,19 +5433,8 @@ CoreWorker::PrepareRecoveryCandidateAdmission(
   RecoverySuccessionManager::HolderAdmissionPlan admission_plan;
   rpc::RecoveryManifest latest_manifest;
 
-  std::optional<TaskSpecification> owner_task_spec;
-  const rpc::TaskSpec *owner_task_proto = nullptr;
-  if (!request.already_stores_task_spec() &&
-      request.task_id().size() == TaskID::Size()) {
-    owner_task_spec =
-        task_manager_->GetTaskSpec(TaskID::FromBinary(request.task_id()));
-    if (owner_task_spec.has_value()) {
-      owner_task_proto = &owner_task_spec->GetMessage();
-    }
-  }
-
   const auto result = manager->PrepareHolderAdmission(
-      request, owner_task_proto, &admission_plan, &latest_manifest);
+      request, &admission_plan, &latest_manifest);
 
   if (recovery_succession_profiling_enabled_) {
     const bool accepted_new_holder =
@@ -5964,21 +5909,8 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
   rpc::TaskSpec replay_task_proto;
   rpc::RecoveryManifest latest_manifest;
 
-  std::optional<TaskSpecification> owner_replay_task_spec;
-  const rpc::TaskSpec *owner_replay_task_proto = nullptr;
-  if (request.task_id().size() == TaskID::Size()) {
-    owner_replay_task_spec =
-        task_manager_->GetTaskSpec(TaskID::FromBinary(request.task_id()));
-    if (owner_replay_task_spec.has_value()) {
-      owner_replay_task_proto = &owner_replay_task_spec->GetMessage();
-    }
-  }
-
   const auto preparation = recovery_succession_manager_->PrepareTaskReplay(
-      request,
-      owner_replay_task_proto,
-      &replay_task_proto,
-      &latest_manifest);
+      request, &replay_task_proto, &latest_manifest);
 
   reply->mutable_latest_manifest()->CopyFrom(latest_manifest);
 

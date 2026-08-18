@@ -10,7 +10,7 @@ Cases:
   PiggybackNoCandidate      metadata + 4F TaskSpec sidecar, no candidate
   CandidateRpcNoAdmit       metadata + candidate RPC, owner immediately NO_SLOT
   NoPiggyback               full recovery; H1 uses InstallRecoveryHolder
-  Full4J                    ordinary recovery with Patch-4I TaskSpec sidecar
+  Full4I                    ordinary recovery with Patch-4I TaskSpec sidecar
 
 The three middle ablations intentionally weaken durability and are BENCHMARK ONLY.
 Default repetitions = 2 to keep iteration time reasonable.
@@ -68,8 +68,6 @@ PROFILE_KEYS = [
     "manifest_bytes_sent",
     "owner_task_spec_copy_count",
     "owner_task_spec_copy_time_ns",
-    "owner_lazy_task_spec_copies_avoided",
-    "task_centric_metadata_builds",
     "first_holder_piggyback_copies_sent",
     "first_holder_piggyback_bytes_sent",
     "first_holder_piggyback_serialize_time_ns",
@@ -151,7 +149,7 @@ def cases() -> list[Case]:
         Case("piggyback_no_candidate", "PiggybackNoCandidate", True, "piggyback_no_candidate"),
         Case("candidate_rpc_no_admit", "CandidateRpcNoAdmit", True, "candidate_rpc_no_admit"),
         Case("no_piggyback", "NoPiggyback", True, "no_piggyback"),
-        Case("full", "Full4J", True, "full"),
+        Case("full", "Full4I", True, "full"),
     ]
 
 
