@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark 22: Recovery Succession 4K vs lazy fixed-R witness-holder baseline.
+Benchmark 22 v2: Recovery Succession 4K vs lazy fixed-R witness-holder baseline.
 
 Research question
 -----------------
@@ -33,6 +33,24 @@ TaskSpec-size sweep
 The producer TaskSpec is enlarged by many small by-value byte arguments while
 the returned payload remains small. The CSV records measured serialized
 TaskSpec bytes/copy; requested padding is only the sweep control.
+
+Measurement discipline
+----------------------
+The benchmark deliberately separates two questions:
+
+1. LIVE-REFERENCE STATE PHASE
+   A fixed batch of producer ObjectRefs is kept strongly referenced by the
+   driver until the expected protection state is reached. This is the phase
+   used for exact lineage-copy/byte and achieved-holder comparisons.
+
+2. STEADY-STATE PERFORMANCE PHASE
+   Pipelines are allowed to finish and their ObjectRefs die naturally. This is
+   the phase used for throughput and latency. We record the recovery work that
+   actually occurred, but we do NOT require every already-dead pipeline to have
+   reached R/min(B,R) protection.
+
+This avoids incorrectly classifying normal cleanup of dead ObjectRefs as a
+Recovery Succession correctness failure.
 
 Metrics
 -------
@@ -77,6 +95,7 @@ os.environ["RAY_BACKEND_LOG_LEVEL"] = "warning"
 os.environ["RAY_DEDUP_LOGS"] = "1"
 
 import argparse
+import gc
 import json
 import math
 import random
@@ -776,6 +795,196 @@ def derive_recovery_metrics(
     }
 
 
+
+def wait_for_live_state_target(
+    *,
+    method: Method,
+    borrower_count: int,
+    task_count: int,
+    consumers: list[Any],
+    timeout_s: float,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Wait while producer refs are still live until the intended protection is reached."""
+    if not method.recovery_enabled or borrower_count == 0:
+        owner, borrowers = profile_snapshot(consumers, method.recovery_enabled)
+        return owner, borrowers, True
+
+    expected_per_task = expected_full_lineage_copies(method, borrower_count)
+    expected_total = expected_per_task * task_count
+
+    deadline = time.monotonic() + timeout_s
+    owner, borrowers = profile_snapshot(consumers, method.recovery_enabled)
+
+    while time.monotonic() < deadline:
+        owner, borrowers = profile_snapshot(consumers, method.recovery_enabled)
+
+        if method.baseline_enabled:
+            ready = (
+                int(owner["witness_update_rpcs_completed"]) >= expected_total
+                and int(owner["task_spec_bytes_sent"]) > 0
+            )
+        else:
+            ready = (
+                int(owner["holder_admissions_committed"]) >= expected_total
+            )
+
+        if ready:
+            owner, borrowers, quiescent = wait_for_profile_quiescence(
+                consumers,
+                method.recovery_enabled,
+                timeout_s=timeout_s,
+                stable_s=0.25,
+            )
+            return owner, borrowers, quiescent
+
+        time.sleep(0.02)
+
+    owner, borrowers = profile_snapshot(consumers, method.recovery_enabled)
+    return owner, borrowers, False
+
+
+def run_live_state_batch(
+    *,
+    args: argparse.Namespace,
+    method: Method,
+    borrower_count: int,
+    produce: Any,
+    consumers: list[Any],
+    producer_strategy: Any,
+    padding: tuple[bytes, ...],
+) -> dict[str, Any]:
+    """
+    Measure architectural recovery state while the application still owns refs.
+
+    The returned ObjectRefs stay in `producer_refs` until after the protection
+    target and profile snapshot. Therefore an admission rejected in this phase
+    cannot be explained by the application having already released the object.
+    """
+    reset_profiles(consumers, method.recovery_enabled)
+
+    request_id_base = 5_000_000
+    producer_refs: list[ray.ObjectRef] = []
+    request_ids: list[int] = []
+
+    start_ns = time.perf_counter_ns()
+
+    for i in range(args.state_task_count):
+        request_id = request_id_base + i
+        request_ids.append(request_id)
+        producer_refs.append(
+            produce.options(
+                scheduling_strategy=producer_strategy,
+                num_cpus=1,
+            ).remote(
+                request_id,
+                args.payload_bytes,
+                *padding,
+            )
+        )
+
+    if borrower_count == 0:
+        payloads = ray.get(producer_refs)
+        for request_id, payload in zip(request_ids, payloads):
+            if len(payload) < 8:
+                raise RuntimeError("live-state producer payload too small")
+            observed = int.from_bytes(payload[:8], "little", signed=False)
+            if observed != request_id:
+                raise RuntimeError(
+                    f"live-state validation failed: expected {request_id}, got {observed}"
+                )
+    else:
+        stage_refs: list[ray.ObjectRef] = []
+        expected_ids: list[int] = []
+
+        for request_id, producer_ref in zip(request_ids, producer_refs):
+            for i in range(borrower_count):
+                stage_refs.append(consumers[i].touch.remote([producer_ref]))
+                expected_ids.append(request_id)
+
+        values = ray.get(stage_refs)
+        for expected, observed in zip(expected_ids, values):
+            if int(observed) != expected:
+                raise RuntimeError(
+                    f"live-state validation failed: expected {expected}, got {observed}"
+                )
+
+    owner, borrower_profile, target_ok = wait_for_live_state_target(
+        method=method,
+        borrower_count=borrower_count,
+        task_count=args.state_task_count,
+        consumers=consumers,
+        timeout_s=args.protection_timeout_seconds,
+    )
+
+    formation_ms = (time.perf_counter_ns() - start_ns) / 1e6
+
+    derived = derive_recovery_metrics(
+        method=method,
+        borrower_count=borrower_count,
+        owner=owner,
+        borrowers=borrower_profile,
+        pipeline_count=args.state_task_count,
+    )
+
+    b0_lazy_ok = True
+    if method.recovery_enabled and borrower_count == 0:
+        b0_lazy_ok = (
+            int(owner["initial_manifest_build_count"]) == 0
+            and int(owner["task_spec_bytes_sent"]) == 0
+            and int(owner["witness_update_rpcs_sent"]) == 0
+            and int(owner["holder_install_rpcs_sent"]) == 0
+        )
+
+    succession_4k_ok = True
+    if (
+        method.recovery_enabled
+        and not method.baseline_enabled
+        and borrower_count > 0
+    ):
+        succession_4k_ok = (
+            float(derived["first_holder_piggyback_copies_per_pipeline"]) == 0.0
+        )
+
+    live_valid = (
+        bool(target_ok)
+        and bool(b0_lazy_ok)
+        and bool(succession_4k_ok)
+        and (
+            not method.recovery_enabled
+            or int(derived["full_lineage_transfer_count_ok"]) == 1
+        )
+    )
+
+    result: dict[str, Any] = {
+        **derived,
+        "live_state_task_count": args.state_task_count,
+        "live_state_formation_ms": formation_ms,
+        "live_state_target_ok": int(target_ok),
+        "live_state_b0_lazy_ok": int(b0_lazy_ok),
+        "live_state_succession_4k_no_piggyback_ok": int(succession_4k_ok),
+        "live_state_valid": int(live_valid),
+    }
+
+    for key in PROFILE_KEYS:
+        result[f"live_owner_{key}"] = owner[key]
+        result[f"live_borrower_{key}"] = borrower_profile[key]
+
+    # Only now let the application refs die. Wait for resulting tombstone /
+    # lineage cleanup before the later throughput profile is reset.
+    producer_refs.clear()
+    gc.collect()
+
+    wait_for_profile_quiescence(
+        consumers,
+        method.recovery_enabled,
+        timeout_s=args.profile_quiescence_timeout_seconds,
+        stable_s=args.profile_stable_seconds,
+    )
+
+    return result
+
+
+
 def run_one(
     args: argparse.Namespace,
     *,
@@ -826,7 +1035,7 @@ def run_one(
             args.inline_chunk_bytes,
         )
 
-        # Warm the exact same path, then drain/quiesce before resetting counters.
+        # Warm the exact same path.
         if args.warmup_seconds > 0:
             run_fanout_window(
                 produce=produce,
@@ -848,7 +1057,7 @@ def run_one(
                 stable_s=args.profile_stable_seconds,
             )
 
-        # Protection-ready canary on a warmed system.
+        # Single warmed canary: payload_ref remains alive until target is reached.
         reset_profiles(consumers, method.recovery_enabled)
         protection_ready_ms, protection_ready_ok = measure_protection_ready(
             method=method,
@@ -867,7 +1076,19 @@ def run_one(
             stable_s=args.profile_stable_seconds,
         )
 
-        # Clean measurement window.
+        # Architectural measurement: refs are held live until protection forms.
+        live_state = run_live_state_batch(
+            args=args,
+            method=method,
+            borrower_count=borrower_count,
+            produce=produce,
+            consumers=consumers,
+            producer_strategy=producer_strategy,
+            padding=padding,
+        )
+
+        # Independent steady-state performance measurement. Here refs are
+        # intentionally allowed to die naturally after pipeline completion.
         reset_profiles(consumers, method.recovery_enabled)
 
         perf = run_fanout_window(
@@ -884,40 +1105,27 @@ def run_one(
             request_id_base=10_000_000,
         )
 
-        owner, borrower_profile, quiescent = wait_for_profile_quiescence(
+        perf_owner, perf_borrower, perf_quiescent = wait_for_profile_quiescence(
             consumers,
             method.recovery_enabled,
             timeout_s=args.profile_quiescence_timeout_seconds,
             stable_s=args.profile_stable_seconds,
         )
 
-        derived = derive_recovery_metrics(
+        perf_recovery = derive_recovery_metrics(
             method=method,
             borrower_count=borrower_count,
-            owner=owner,
-            borrowers=borrower_profile,
+            owner=perf_owner,
+            borrowers=perf_borrower,
             pipeline_count=int(perf["total_pipeline_submitted"]),
         )
 
-        b0_lazy_ok = True
-        if method.recovery_enabled and borrower_count == 0:
-            b0_lazy_ok = (
-                int(owner["initial_manifest_build_count"]) == 0
-                and int(owner["task_spec_bytes_sent"]) == 0
-                and int(owner["witness_update_rpcs_sent"]) == 0
-                and int(owner["holder_install_rpcs_sent"]) == 0
-            )
-
-        succession_4k_ok = True
-        if (
-            method.recovery_enabled
-            and not method.baseline_enabled
-            and borrower_count > 0
-        ):
-            succession_4k_ok = (
-                float(derived["first_holder_piggyback_copies_per_pipeline"])
-                == 0.0
-            )
+        # Prefix throughput-phase recovery activity so it cannot be confused
+        # with the exact live-reference state metrics above.
+        perf_recovery_prefixed = {
+            f"perf_observed_{key}": value
+            for key, value in perf_recovery.items()
+        }
 
         row: dict[str, Any] = {
             "repetition": repetition,
@@ -936,29 +1144,22 @@ def run_one(
             "inflight": args.inflight,
             "protection_ready_ms": protection_ready_ms,
             "protection_ready_ok": int(protection_ready_ok),
-            "profile_quiescent": int(quiescent),
-            "profile_owner_async_outstanding": outstanding(owner),
-            "profile_borrower_async_outstanding": outstanding(borrower_profile),
-            "b0_lazy_ok": int(b0_lazy_ok),
-            "succession_4k_no_piggyback_ok": int(succession_4k_ok),
+            "perf_profile_quiescent": int(perf_quiescent),
+            "perf_profile_owner_async_outstanding": outstanding(perf_owner),
+            "perf_profile_borrower_async_outstanding": outstanding(perf_borrower),
             **perf,
-            **derived,
+            **live_state,
+            **perf_recovery_prefixed,
         }
 
-        # Keep raw profile fields for forensic analysis.
         for key in PROFILE_KEYS:
-            row[f"owner_{key}"] = owner[key]
-            row[f"borrower_{key}"] = borrower_profile[key]
+            row[f"perf_owner_{key}"] = perf_owner[key]
+            row[f"perf_borrower_{key}"] = perf_borrower[key]
 
         row["run_valid"] = int(
             bool(protection_ready_ok)
-            and bool(quiescent)
-            and bool(b0_lazy_ok)
-            and bool(succession_4k_ok)
-            and (
-                not method.recovery_enabled
-                or int(row["full_lineage_transfer_count_ok"]) == 1
-            )
+            and bool(live_state["live_state_valid"])
+            and bool(perf_quiescent)
         )
 
         print(
@@ -966,11 +1167,11 @@ def run_one(
             f"throughput={row['throughput_rps']:.1f} rps "
             f"p95={row['latency_p95_ms']:.2f} ms "
             f"protection={row['protection_ready_ms']:.2f} ms "
-            f"copies/pipeline={row['full_lineage_copies_per_pipeline']:.2f} "
-            f"lineage_KiB/pipeline="
+            f"LIVE copies/pipeline={row['full_lineage_copies_per_pipeline']:.2f} "
+            f"LIVE lineage_KiB/pipeline="
             f"{row['full_lineage_bytes_per_pipeline'] / 1024.0:.1f} "
-            f"total_recovery_KiB/pipeline="
-            f"{row['measured_recovery_wire_payload_bytes_per_pipeline'] / 1024.0:.1f} "
+            f"PERF observed copies/pipeline="
+            f"{row['perf_observed_full_lineage_copies_per_pipeline']:.2f} "
             f"valid={row['run_valid']}"
         )
 
@@ -987,6 +1188,7 @@ SUMMARY_METRICS = [
     "latency_p95_ms",
     "latency_p99_ms",
     "protection_ready_ms",
+    "live_state_formation_ms",
     "full_lineage_copies_per_pipeline",
     "full_lineage_bytes_per_pipeline",
     "measured_task_spec_bytes_per_copy",
@@ -1244,6 +1446,8 @@ def child_command(
         str(args.duration_seconds),
         "--inflight",
         str(args.inflight),
+        "--state-task-count",
+        str(args.state_task_count),
         "--cpus-per-node",
         str(args.cpus_per_node),
         "--witness-count",
@@ -1591,7 +1795,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--output-dir",
-        default="gossip_benchmarks/results/22_succession_vs_lazy_baseline",
+        default="gossip_benchmarks/results/22_succession_vs_lazy_baseline_v2",
     )
     parser.add_argument("--borrowers", type=int, nargs="+", default=DEFAULT_BORROWERS)
     parser.add_argument(
@@ -1613,6 +1817,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup-seconds", type=float, default=3.0)
     parser.add_argument("--duration-seconds", type=float, default=15.0)
     parser.add_argument("--inflight", type=int, default=64)
+    parser.add_argument(
+        "--state-task-count",
+        type=int,
+        default=32,
+        help="Number of strongly-live producer refs used for exact state/byte validation.",
+    )
 
     parser.add_argument("--cpus-per-node", type=int, default=3)
     parser.add_argument("--witness-count", type=int, default=2)
@@ -1653,6 +1863,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--repetitions must be positive")
     if args.inflight <= 0:
         raise ValueError("--inflight must be positive")
+    if args.state_task_count <= 0:
+        raise ValueError("--state-task-count must be positive")
     if any(b < 0 or b > TARGET_HOLDERS for b in args.borrowers):
         raise ValueError("borrower counts must be between 0 and 4")
 
