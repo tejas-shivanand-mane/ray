@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -31,6 +32,7 @@
 
 namespace ray::core {
 
+/// Patch 4D: pipelined holder admission.
 /// Stores lineage, succession, and holder-admission state for the
 /// experimental recovery-succession implementation.
 class RecoverySuccessionManager {
@@ -211,8 +213,13 @@ class RecoverySuccessionManager {
   bool CommitHolderAdmission(const std::string &reservation_id,
                              rpc::RecoveryManifest *committed_manifest);
 
-  /// Removes a failed provisional reservation.
+  /// Patch 4D: removes a failed provisional reservation and every
+  /// speculative reservation at a higher rank for the same task.
   void AbortHolderAdmission(const std::string &reservation_id);
+
+  /// Allows a borrower whose candidate report was rejected/aborted to
+  /// report itself again on a later ObjectRef delivery.
+  void AllowCandidateReportRetry(const TaskID &task_id);
 
   /// Applies a committed manifest received from the coordinator.
   bool ApplyCommittedManifest(const rpc::RecoveryManifest &manifest);
@@ -308,6 +315,7 @@ class RecoverySuccessionManager {
     TaskID task_id;
     rpc::Address candidate_address;
     rpc::RecoveryManifest proposed_manifest;
+    uint32_t proposed_rank = 0;  // Patch 4D: speculative contiguous rank.
   };
 
   void MaybeAddCandidateReportLocked(const rpc::RecoveryManifest &manifest,
@@ -351,9 +359,10 @@ class RecoverySuccessionManager {
   absl::flat_hash_map<std::string, HolderReservation> holder_reservations_
       ABSL_GUARDED_BY(mutex_);
 
-  /// At most one provisional holder reservation is permitted per task.
-  absl::flat_hash_map<TaskID, std::string> holder_reservation_by_task_
-      ABSL_GUARDED_BY(mutex_);
+  /// Patch 4D: multiple provisional reservations may coexist per task.
+  /// The ordered rank map is the speculative prefix H1..HR.
+  absl::flat_hash_map<TaskID, std::map<uint32_t, std::string>>
+      holder_reservation_by_task_ ABSL_GUARDED_BY(mutex_);
 
   /// Prevents repeated reports for the same producer task.
   absl::flat_hash_set<TaskID> candidate_reports_sent_ ABSL_GUARDED_BY(mutex_);

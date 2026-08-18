@@ -21,6 +21,8 @@
 
 namespace ray::core {
 
+// Patch 4D: pipelined holder admission.
+
 namespace {
 
 
@@ -435,22 +437,18 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   absl::MutexLock lock(&mutex_);
 
   const auto task_it = task_states_.find(task_id);
-
   if (task_it == task_states_.end() || !task_it->second.task_spec.has_value()) {
     return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
   }
 
   const TaskRecoveryState &task_state = task_it->second;
-
   latest_manifest->CopyFrom(task_state.manifest);
 
   if (task_state.manifest.tombstoned()) {
     return rpc::ReportRecoveryCandidateReply::TOMBSTONED;
   }
 
-  // Only the original owner forms the frozen succession list.
   const rpc::RecoveryHolder *owner = FindHolderByRank(task_state.manifest, 0);
-
   if (owner == nullptr || !SameWorker(owner->address(), self_address_)) {
     return rpc::ReportRecoveryCandidateReply::WRONG_COORDINATOR;
   }
@@ -473,14 +471,20 @@ RecoverySuccessionManager::PrepareHolderAdmission(
           ? static_cast<uint32_t>(task_state.manifest.succession_size() - 1)
           : 0;
 
-  if (confirmed_non_owner_holders >= task_state.manifest.target_holder_count()) {
+  const auto per_task_it = holder_reservation_by_task_.find(task_id);
+  const size_t pending_count =
+      per_task_it == holder_reservation_by_task_.end()
+          ? 0
+          : per_task_it->second.size();
+
+  if (confirmed_non_owner_holders + pending_count >=
+      task_state.manifest.target_holder_count()) {
     return rpc::ReportRecoveryCandidateReply::NO_SLOT;
   }
 
-  if (holder_reservation_by_task_.contains(task_id)) {
-    return rpc::ReportRecoveryCandidateReply::NO_SLOT;
-  }
-
+  // Patch 4D: a task may have several provisional reservations. Reject only
+  // duplicate/failure-domain candidates; do not reject merely because another
+  // rank is currently being installed.
   for (const rpc::RecoveryHolder &holder : task_state.manifest.succession()) {
     if (!holder.failure_domain_id().empty() &&
         holder.failure_domain_id() == candidate_address.node_id()) {
@@ -488,8 +492,48 @@ RecoverySuccessionManager::PrepareHolderAdmission(
     }
   }
 
+  if (per_task_it != holder_reservation_by_task_.end()) {
+    for (const auto &[rank, existing_reservation_id] : per_task_it->second) {
+      static_cast<void>(rank);
+      const auto reservation_it = holder_reservations_.find(existing_reservation_id);
+      if (reservation_it == holder_reservations_.end()) {
+        continue;
+      }
+
+      const HolderReservation &pending = reservation_it->second;
+      if (SameWorker(pending.candidate_address, candidate_address)) {
+        // The original report RPC for this candidate is still responsible for
+        // completing the admission. Treat duplicate reports as already accepted.
+        return rpc::ReportRecoveryCandidateReply::ACCEPTED;
+      }
+
+      if (!pending.candidate_address.node_id().empty() &&
+          pending.candidate_address.node_id() == candidate_address.node_id()) {
+        return rpc::ReportRecoveryCandidateReply::NO_SLOT;
+      }
+    }
+  }
+
+  // Construct the speculative prefix from the committed manifest plus all
+  // earlier reservations. Every proposed manifest is therefore contiguous:
+  // [A,H1], [A,H1,H2], ... even while H1..HR installations overlap.
   rpc::RecoveryManifest proposed_manifest;
   proposed_manifest.CopyFrom(task_state.manifest);
+
+  if (per_task_it != holder_reservation_by_task_.end()) {
+    for (const auto &[rank, existing_reservation_id] : per_task_it->second) {
+      const auto reservation_it = holder_reservations_.find(existing_reservation_id);
+      if (reservation_it == holder_reservations_.end()) {
+        continue;
+      }
+
+      const HolderReservation &pending = reservation_it->second;
+      rpc::RecoveryHolder *holder = proposed_manifest.add_succession();
+      holder->mutable_address()->CopyFrom(pending.candidate_address);
+      holder->set_rank(rank);
+      holder->set_failure_domain_id(pending.candidate_address.node_id());
+    }
+  }
 
   const uint32_t proposed_rank =
       static_cast<uint32_t>(proposed_manifest.succession_size());
@@ -500,11 +544,10 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   new_holder->set_failure_domain_id(candidate_address.node_id());
 
   proposed_manifest.mutable_version()->set_generation(
-      task_state.manifest.version().generation() + 1);
+      task_state.manifest.version().generation() + pending_count + 1);
 
   const uint32_t holders_after_admission =
       static_cast<uint32_t>(proposed_manifest.succession_size() - 1);
-
   if (holders_after_admission >= proposed_manifest.target_holder_count()) {
     proposed_manifest.set_frozen(true);
   }
@@ -515,48 +558,36 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   reservation.task_id = task_id;
   reservation.candidate_address.CopyFrom(candidate_address);
   reservation.proposed_manifest.CopyFrom(proposed_manifest);
+  reservation.proposed_rank = proposed_rank;
 
   holder_reservations_[reservation_id] = std::move(reservation);
-  holder_reservation_by_task_[task_id] = reservation_id;
+  holder_reservation_by_task_[task_id][proposed_rank] = reservation_id;
 
   plan->reservation_id = reservation_id;
   plan->candidate_address.CopyFrom(candidate_address);
-  plan->candidate_already_stores_task_spec =
-      request.already_stores_task_spec();
+  plan->candidate_already_stores_task_spec = request.already_stores_task_spec();
 
   if (!plan->candidate_already_stores_task_spec) {
-  if (profiling_enabled_) {
-    const auto copy_start =
-        std::chrono::steady_clock::now();
+    if (profiling_enabled_) {
+      const auto copy_start = std::chrono::steady_clock::now();
 
-    plan->task_spec.CopyFrom(
-        task_it->second.task_spec.value());
+      plan->task_spec.CopyFrom(task_it->second.task_spec.value());
+      plan->task_spec.mutable_recovery_manifest()->CopyFrom(proposed_manifest);
 
-    plan->task_spec.mutable_recovery_manifest()->CopyFrom(
-        proposed_manifest);
+      const auto copy_end = std::chrono::steady_clock::now();
+      const uint64_t copy_ns = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(copy_end - copy_start)
+              .count());
 
-    const auto copy_end =
-        std::chrono::steady_clock::now();
-
-    const uint64_t copy_ns =
-        static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                copy_end - copy_start)
-                .count());
-
-    ++profile_.owner_task_spec_copy_count;
-    profile_.owner_task_spec_copy_time_ns += copy_ns;
-  } else {
-    plan->task_spec.CopyFrom(
-        task_it->second.task_spec.value());
-
-    plan->task_spec.mutable_recovery_manifest()->CopyFrom(
-        proposed_manifest);
+      ++profile_.owner_task_spec_copy_count;
+      profile_.owner_task_spec_copy_time_ns += copy_ns;
+    } else {
+      plan->task_spec.CopyFrom(task_it->second.task_spec.value());
+      plan->task_spec.mutable_recovery_manifest()->CopyFrom(proposed_manifest);
+    }
   }
-}
 
   plan->proposed_manifest.CopyFrom(proposed_manifest);
-
   return rpc::ReportRecoveryCandidateReply::ACCEPTED;
 }
 
@@ -623,13 +654,12 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
   absl::MutexLock lock(&mutex_);
 
   const auto reservation_it = holder_reservations_.find(reservation_id);
-
   if (reservation_it == holder_reservations_.end()) {
     return false;
   }
 
-  const TaskID task_id = reservation_it->second.task_id;
-
+  const HolderReservation &reservation = reservation_it->second;
+  const TaskID task_id = reservation.task_id;
   const auto task_it = task_states_.find(task_id);
 
   if (task_it == task_states_.end()) {
@@ -637,74 +667,119 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
     return false;
   }
 
-  UpdateManifestForTaskLocked(task_id, reservation_it->second.proposed_manifest, true);
+  const rpc::RecoveryManifest &current = task_it->second.manifest;
+  const rpc::RecoveryManifest &proposed = reservation.proposed_manifest;
 
+  // Patch 4D: only the next contiguous rank may become durable. Install RPCs
+  // may complete in any order, but commits must remain H1,H2,...
+  if (reservation.proposed_rank !=
+          static_cast<uint32_t>(current.succession_size()) ||
+      proposed.succession_size() != current.succession_size() + 1 ||
+      proposed.version().generation() != current.version().generation() + 1) {
+    return false;
+  }
+
+  for (int index = 0; index < current.succession_size(); ++index) {
+    if (current.succession(index).SerializeAsString() !=
+        proposed.succession(index).SerializeAsString()) {
+      return false;
+    }
+  }
+
+  UpdateManifestForTaskLocked(task_id, proposed, true);
 
   if (profiling_enabled_) {
-    const rpc::RecoveryManifest &manifest =
-        reservation_it->second.proposed_manifest;
-
     ++profile_.holder_admissions_committed;
     ++profile_.manifest_generations_committed;
 
-    if (manifest.version().generation() >
-        profile_.max_generation) {
-      profile_.max_generation =
-          manifest.version().generation();
+    if (proposed.version().generation() > profile_.max_generation) {
+      profile_.max_generation = proposed.version().generation();
     }
 
     const uint64_t non_owner_holders =
-        manifest.succession_size() > 0
-            ? static_cast<uint64_t>(
-                  manifest.succession_size() - 1)
+        proposed.succession_size() > 0
+            ? static_cast<uint64_t>(proposed.succession_size() - 1)
             : 0;
 
-    if (non_owner_holders >
-        profile_.max_non_owner_holders) {
-      profile_.max_non_owner_holders =
-          non_owner_holders;
+    if (non_owner_holders > profile_.max_non_owner_holders) {
+      profile_.max_non_owner_holders = non_owner_holders;
     }
 
-    if (manifest.frozen()) {
+    if (proposed.frozen()) {
       ++profile_.frozen_commits;
     }
   }
 
-  committed_manifest->CopyFrom(reservation_it->second.proposed_manifest);
-
+  committed_manifest->CopyFrom(proposed);
   EraseHolderReservationLocked(reservation_id);
-
   return true;
 }
 
-void RecoverySuccessionManager::AbortHolderAdmission(const std::string &reservation_id) {
+void RecoverySuccessionManager::AbortHolderAdmission(
+    const std::string &reservation_id) {
   if (reservation_id.empty()) {
     return;
   }
 
   absl::MutexLock lock(&mutex_);
-  EraseHolderReservationLocked(reservation_id);
 
-}
-
-
-void RecoverySuccessionManager::EraseHolderReservationLocked(
-    const std::string &reservation_id) {
-  const auto reservation_it =
-      holder_reservations_.find(reservation_id);
-
+  const auto reservation_it = holder_reservations_.find(reservation_id);
   if (reservation_it == holder_reservations_.end()) {
     return;
   }
 
   const TaskID task_id = reservation_it->second.task_id;
+  const uint32_t failed_rank = reservation_it->second.proposed_rank;
 
-  const auto task_index_it =
-      holder_reservation_by_task_.find(task_id);
+  const auto task_index_it = holder_reservation_by_task_.find(task_id);
+  if (task_index_it == holder_reservation_by_task_.end()) {
+    holder_reservations_.erase(reservation_it);
+    return;
+  }
 
-  if (task_index_it != holder_reservation_by_task_.end() &&
-      task_index_it->second == reservation_id) {
-    holder_reservation_by_task_.erase(task_index_it);
+  // Patch 4D conservative failure rule: a missing lower rank invalidates every
+  // speculative suffix reservation because their proposed manifests include it.
+  std::vector<std::string> suffix;
+  for (auto it = task_index_it->second.lower_bound(failed_rank);
+       it != task_index_it->second.end(); ++it) {
+    suffix.push_back(it->second);
+  }
+
+  for (const std::string &id : suffix) {
+    EraseHolderReservationLocked(id);
+  }
+}
+
+void RecoverySuccessionManager::AllowCandidateReportRetry(
+    const TaskID &task_id) {
+  if (task_id.IsNil()) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  candidate_reports_sent_.erase(task_id);
+}
+
+
+void RecoverySuccessionManager::EraseHolderReservationLocked(
+    const std::string &reservation_id) {
+  const auto reservation_it = holder_reservations_.find(reservation_id);
+  if (reservation_it == holder_reservations_.end()) {
+    return;
+  }
+
+  const TaskID task_id = reservation_it->second.task_id;
+  const uint32_t rank = reservation_it->second.proposed_rank;
+
+  const auto task_index_it = holder_reservation_by_task_.find(task_id);
+  if (task_index_it != holder_reservation_by_task_.end()) {
+    auto rank_it = task_index_it->second.find(rank);
+    if (rank_it != task_index_it->second.end() && rank_it->second == reservation_id) {
+      task_index_it->second.erase(rank_it);
+    }
+    if (task_index_it->second.empty()) {
+      holder_reservation_by_task_.erase(task_index_it);
+    }
   }
 
   holder_reservations_.erase(reservation_it);
@@ -728,6 +803,18 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
     const int comparison = CompareManifestVersions(manifest, task_it->second.manifest);
 
     if (comparison < 0) {
+      // Patch 4D failure-only rollback. A speculative higher-rank holder may
+      // have installed a future manifest before a lower rank failed. The
+      // coordinator cleans that candidate up by sending the last committed
+      // prefix through the existing CommitRecoveryManifest RPC. Accept this
+      // older prefix only for an uncommitted provisional holder that is NOT a
+      // member of the committed prefix.
+      if (!task_it->second.manifest_committed &&
+          !ContainsWorker(manifest, self_address_)) {
+        UpdateManifestForTaskLocked(task_id, manifest, true);
+        candidate_reports_sent_.erase(task_id);
+        return true;
+      }
       return false;
     }
 
@@ -1223,12 +1310,17 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
 
   EraseTaskObjectMetadataLocked(task_id);
 
-  const auto reservation_it =
-      holder_reservation_by_task_.find(task_id);
-
+  const auto reservation_it = holder_reservation_by_task_.find(task_id);
   if (reservation_it != holder_reservation_by_task_.end()) {
-    const std::string reservation_id = reservation_it->second;
-    EraseHolderReservationLocked(reservation_id);
+    std::vector<std::string> reservation_ids;
+    reservation_ids.reserve(reservation_it->second.size());
+    for (const auto &[rank, reservation_id] : reservation_it->second) {
+      static_cast<void>(rank);
+      reservation_ids.push_back(reservation_id);
+    }
+    for (const std::string &reservation_id : reservation_ids) {
+      EraseHolderReservationLocked(reservation_id);
+    }
   }
 
   candidate_reports_sent_.erase(task_id);

@@ -18,6 +18,7 @@
 
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -63,6 +64,8 @@
 #include <mutex>
 
 namespace ray::core {
+
+// Patch 4D: pipelined holder admission.
 
 JobID GetProcessJobID(const CoreWorkerOptions &options);
 
@@ -1631,16 +1634,44 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     RecoveryWitnessPublishCallback callback,
     const rpc::TaskSpec *task_spec = nullptr) const;
 
+  // Patch 4D: InstallRecoveryHolder RPCs may complete concurrently, while
+  // witness publication and durable commits remain strictly rank ordered.
+  struct PendingRecoveryHolderAdmission {
+    std::string reservation_id;
+    TaskID task_id;
+    uint32_t rank = 0;
+    rpc::Address candidate_address;
+    bool candidate_needs_commit_rpc = true;
+    rpc::RecoveryManifest latest_manifest;
+    rpc::RecoveryManifest proposed_manifest;
+    uint64_t admission_start_ns = 0;
+    rpc::ReportRecoveryCandidateReply *reply = nullptr;
+    rpc::SendReplyCallback send_reply_callback;
+    bool installed = false;
+    bool aborted = false;
+    rpc::RecoveryManifest abort_manifest;
+  };
+
+  struct RecoveryHolderAdmissionTaskState {
+    // Zero means no publication is active. Otherwise this is the rank whose
+    // manifest is currently being published/committed.
+    uint32_t witness_publish_rank = 0;
+    std::map<uint32_t, std::shared_ptr<PendingRecoveryHolderAdmission>> pending_by_rank;
+  };
+
   void FinishRecoveryHolderAdmission(
-    std::string reservation_id,
-    TaskID task_id,
-    rpc::Address candidate_address,
-    bool candidate_needs_commit_rpc,
-    rpc::RecoveryManifest latest_manifest,
-    rpc::RecoveryManifest proposed_manifest,
-    uint64_t admission_start_ns,
-    rpc::ReportRecoveryCandidateReply *reply,
-    rpc::SendReplyCallback send_reply_callback);
+      std::shared_ptr<PendingRecoveryHolderAdmission> state);
+
+  void TryAdvanceRecoveryHolderAdmissions(const TaskID &task_id);
+
+  void AbortRecoveryHolderAdmissionSuffix(
+      const std::shared_ptr<PendingRecoveryHolderAdmission> &failed_state,
+      rpc::ReportRecoveryCandidateReply::Result failed_result,
+      const rpc::RecoveryManifest &committed_manifest);
+
+  void SendRecoveryHolderRollback(
+      const std::shared_ptr<PendingRecoveryHolderAdmission> &state,
+      const rpc::RecoveryManifest &committed_manifest);
 
   using RecoveryWitnessLookupCallback =
       std::function<void(std::optional<rpc::RecoveryManifest>)>;
@@ -2163,6 +2194,14 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   /// Distributed recovery succession state. Null when the feature is disabled.
   std::shared_ptr<RecoverySuccessionManager> recovery_succession_manager_;
+
+  // Patch 4D owner-side continuation queue. It is deliberately separate from
+  // mutex_: RPC callbacks may finish out of order, and this mutex protects only
+  // the tiny admission scheduler state.
+  mutable absl::Mutex recovery_holder_admission_mutex_;
+  absl::flat_hash_map<TaskID, RecoveryHolderAdmissionTaskState>
+      recovery_holder_admission_states_
+          ABSL_GUARDED_BY(recovery_holder_admission_mutex_);
 
   absl::flat_hash_set<TaskID> recovery_tombstones_in_flight_;
 

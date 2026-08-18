@@ -60,6 +60,8 @@ using MessageType = ray::protocol::MessageType;
 
 namespace ray::core {
 
+// Patch 4D: pipelined holder admission.
+
 namespace {
 // Default capacity for serialization caches.
 constexpr size_t kDefaultSerializationCacheCap = 500;
@@ -4641,6 +4643,16 @@ void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
             if (candidate_reply.has_latest_manifest()) {
               manager->ApplyCommittedManifest(candidate_reply.latest_manifest());
             }
+
+            // Patch 4D: transient admission failure must not permanently suppress
+            // future candidate reports from this borrower. A late speculative
+            // install that is rolled back will clear the bit again on rollback.
+            if (candidate_reply.result() ==
+                    rpc::ReportRecoveryCandidateReply::NO_SLOT ||
+                candidate_reply.result() ==
+                    rpc::ReportRecoveryCandidateReply::STALE_MANIFEST) {
+              manager->AllowCandidateReportRetry(reported_task_id);
+            }
           });
     }
   }
@@ -4847,83 +4859,167 @@ void CoreWorker::PopulateObjectStatus(const ObjectID &object_id,
 }
 
 
+void CoreWorker::SendRecoveryHolderRollback(
+    const std::shared_ptr<PendingRecoveryHolderAdmission> &state,
+    const rpc::RecoveryManifest &committed_manifest) {
+  if (state == nullptr || committed_manifest.task_id().empty() ||
+      state->candidate_address.worker_id().empty()) {
+    return;
+  }
+
+  rpc::CommitRecoveryManifestRequest request;
+  request.mutable_manifest()->CopyFrom(committed_manifest);
+
+  auto client = core_worker_client_pool_->GetOrConnect(state->candidate_address);
+
+  uint64_t rpc_start_ns = 0;
+  if (recovery_succession_profiling_enabled_) {
+    recovery_succession_manager_->RecordHolderCommitRpcSent(
+        static_cast<uint64_t>(committed_manifest.ByteSizeLong()));
+    rpc_start_ns = RecoveryProfileNowNs();
+  }
+
+  client->CommitRecoveryManifest(
+      std::move(request),
+      [manager = recovery_succession_manager_, rpc_start_ns](
+          const Status &status, rpc::CommitRecoveryManifestReply &&reply) {
+        static_cast<void>(reply);
+        if (rpc_start_ns != 0) {
+          manager->RecordHolderCommitRpcLatency(RecoveryProfileNowNs() - rpc_start_ns);
+        }
+        if (!status.ok()) {
+          RAY_LOG(DEBUG) << "Patch 4D provisional-holder rollback RPC failed: "
+                         << status;
+        }
+      });
+}
+
+void CoreWorker::AbortRecoveryHolderAdmissionSuffix(
+    const std::shared_ptr<PendingRecoveryHolderAdmission> &failed_state,
+    rpc::ReportRecoveryCandidateReply::Result failed_result,
+    const rpc::RecoveryManifest &committed_manifest) {
+  if (failed_state == nullptr) {
+    return;
+  }
+
+  // First remove the owner-side reservations. Manager semantics remove the
+  // failed rank and every speculative rank above it.
+  recovery_succession_manager_->AbortHolderAdmission(failed_state->reservation_id);
+
+  std::vector<std::shared_ptr<PendingRecoveryHolderAdmission>> aborted;
+  {
+    absl::MutexLock lock(&recovery_holder_admission_mutex_);
+    const auto task_it = recovery_holder_admission_states_.find(failed_state->task_id);
+    if (task_it != recovery_holder_admission_states_.end()) {
+      auto &task_state = task_it->second;
+      for (auto it = task_state.pending_by_rank.lower_bound(failed_state->rank);
+           it != task_state.pending_by_rank.end();) {
+        it->second->aborted = true;
+        it->second->abort_manifest.CopyFrom(committed_manifest);
+        aborted.push_back(it->second);
+        it = task_state.pending_by_rank.erase(it);
+      }
+      if (task_state.witness_publish_rank >= failed_state->rank) {
+        task_state.witness_publish_rank = 0;
+      }
+      if (task_state.pending_by_rank.empty()) {
+        recovery_holder_admission_states_.erase(task_it);
+      }
+    }
+  }
+
+  for (const auto &state : aborted) {
+    if (state->reply != nullptr) {
+      state->reply->set_result(
+          state->rank == failed_state->rank
+              ? failed_result
+              : rpc::ReportRecoveryCandidateReply::NO_SLOT);
+      if (!committed_manifest.task_id().empty()) {
+        state->reply->mutable_latest_manifest()->CopyFrom(committed_manifest);
+      }
+    }
+
+    // Failure-only cleanup. A higher-rank InstallRecoveryHolder may already
+    // have completed. Roll it back to the last committed prefix so it does not
+    // remain a permanently orphaned provisional holder.
+    SendRecoveryHolderRollback(state, committed_manifest);
+
+    state->send_reply_callback(Status::OK(), nullptr, nullptr);
+  }
+}
+
+void CoreWorker::TryAdvanceRecoveryHolderAdmissions(const TaskID &task_id) {
+  std::shared_ptr<PendingRecoveryHolderAdmission> next;
+
+  {
+    absl::MutexLock lock(&recovery_holder_admission_mutex_);
+    const auto task_it = recovery_holder_admission_states_.find(task_id);
+    if (task_it == recovery_holder_admission_states_.end()) {
+      return;
+    }
+
+    auto &task_state = task_it->second;
+    if (task_state.witness_publish_rank != 0 || task_state.pending_by_rank.empty()) {
+      return;
+    }
+
+    const auto first = task_state.pending_by_rank.begin();
+    if (!first->second->installed || first->second->aborted) {
+      return;
+    }
+
+    task_state.witness_publish_rank = first->first;
+    next = first->second;
+  }
+
+  FinishRecoveryHolderAdmission(std::move(next));
+}
+
 void CoreWorker::FinishRecoveryHolderAdmission(
-    std::string reservation_id,
-    TaskID task_id,
-    rpc::Address candidate_address,
-    bool candidate_needs_commit_rpc,
-    rpc::RecoveryManifest latest_manifest,
-    rpc::RecoveryManifest proposed_manifest,
-    uint64_t admission_start_ns,
-    rpc::ReportRecoveryCandidateReply *reply,
-    rpc::SendReplyCallback send_reply_callback) {
+    std::shared_ptr<PendingRecoveryHolderAdmission> state) {
+  if (state == nullptr) {
+    return;
+  }
+
   auto manager = recovery_succession_manager_;
-
   uint64_t witness_publish_start_ns = 0;
-
   if (recovery_succession_profiling_enabled_) {
     witness_publish_start_ns = RecoveryProfileNowNs();
   }
 
   PublishRecoveryManifestToWitnesses(
-      proposed_manifest,
-      [this,
-       manager,
-       reservation_id = std::move(reservation_id),
-       task_id,
-       candidate_address = std::move(candidate_address),
-       candidate_needs_commit_rpc,
-       latest_manifest = std::move(latest_manifest),
-       admission_start_ns,
-       witness_publish_start_ns,
-       reply,
-       send_reply_callback = std::move(send_reply_callback)](
+      state->proposed_manifest,
+      [this, manager, state = std::move(state), witness_publish_start_ns](
           bool witness_stored,
           std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
-
         if (witness_publish_start_ns != 0) {
           manager->RecordWitnessPublishLatency(
-              RecoveryProfileNowNs() -
-              witness_publish_start_ns);
+              RecoveryProfileNowNs() - witness_publish_start_ns);
         }
 
         if (!witness_stored) {
-          manager->AbortHolderAdmission(reservation_id);
-
-          reply->set_result(
-              rpc::ReportRecoveryCandidateReply::STALE_MANIFEST);
-
+          rpc::RecoveryManifest rollback_manifest;
           if (newer_manifest.has_value()) {
-            reply->mutable_latest_manifest()->CopyFrom(
-                newer_manifest.value());
-
-            manager->ApplyCommittedManifest(
-                newer_manifest.value());
-          } else if (!latest_manifest.task_id().empty()) {
-            reply->mutable_latest_manifest()->CopyFrom(
-                latest_manifest);
+            rollback_manifest.CopyFrom(newer_manifest.value());
+            manager->ApplyCommittedManifest(newer_manifest.value());
+          } else {
+            rollback_manifest.CopyFrom(state->latest_manifest);
           }
 
-          send_reply_callback(Status::OK(), nullptr, nullptr);
+          AbortRecoveryHolderAdmissionSuffix(
+              state,
+              rpc::ReportRecoveryCandidateReply::STALE_MANIFEST,
+              rollback_manifest);
           return;
         }
 
-        // TEST ONLY.
-        //
-        // At this point a real witness ACK has already made
-        // proposed_manifest discoverable during recovery, while a newly
-        // installed candidate is still provisional
-        // (manifest_committed == false). Inject a failure here so the
-        // correctness benchmark can deterministically kill the owner in the
-        // exact post-witness / pre-candidate-commit window.
-        if (candidate_needs_commit_rpc &&
-            RayConfig::instance()
-                .recovery_succession_test_fail_after_witness_ack()) {
-          RAY_LOG(WARNING).WithField(task_id)
+        // Preserve the existing post-witness/pre-commit failure injection.
+        if (state->candidate_needs_commit_rpc &&
+            RayConfig::instance().recovery_succession_test_fail_after_witness_ack()) {
+          RAY_LOG(WARNING).WithField(state->task_id)
               << "TEST ONLY: injected recovery succession failure after "
                  "witness ACK before candidate commit";
-
-          send_reply_callback(
+          state->send_reply_callback(
               Status::IOError(
                   "Injected recovery succession failure after witness ACK "
                   "before candidate commit"),
@@ -4933,47 +5029,55 @@ void CoreWorker::FinishRecoveryHolderAdmission(
         }
 
         rpc::RecoveryManifest committed_manifest;
-
-        if (!manager->CommitHolderAdmission(
-                reservation_id,
-                &committed_manifest)) {
-          reply->set_result(
-              rpc::ReportRecoveryCandidateReply::STALE_MANIFEST);
-
-          send_reply_callback(Status::OK(), nullptr, nullptr);
+        if (!manager->CommitHolderAdmission(state->reservation_id, &committed_manifest)) {
+          // This should not occur on the normal Patch-4D path because only the
+          // lowest installed rank reaches this function. Fail the speculative
+          // suffix rather than committing out of order.
+          AbortRecoveryHolderAdmissionSuffix(
+              state,
+              rpc::ReportRecoveryCandidateReply::STALE_MANIFEST,
+              state->latest_manifest);
           return;
         }
 
-        if (admission_start_ns != 0) {
+        if (state->admission_start_ns != 0) {
           manager->RecordHolderAdmissionLatency(
-              RecoveryProfileNowNs() -
-              admission_start_ns);
+              RecoveryProfileNowNs() - state->admission_start_ns);
         }
 
-        reply->set_result(
-            rpc::ReportRecoveryCandidateReply::ACCEPTED);
+        state->reply->set_result(rpc::ReportRecoveryCandidateReply::ACCEPTED);
+        state->reply->mutable_latest_manifest()->CopyFrom(committed_manifest);
 
-        reply->mutable_latest_manifest()->CopyFrom(
-            committed_manifest);
-
-        RAY_LOG(INFO).WithField(task_id)
-            << "Committed recovery succession manifest "
-            << "after witness publication with "
-            << committed_manifest.succession_size()
+        RAY_LOG(INFO).WithField(state->task_id)
+            << "Patch 4D: committed ordered recovery succession rank "
+            << state->rank << " with " << committed_manifest.succession_size()
             << " total members";
 
-        // Patch 4B-2: do not send an explicit CommitRecoveryManifest RPC.
-        //
-        // The normal ReportRecoveryCandidate reply already carries the
-        // committed manifest, and the candidate applies that manifest in its
-        // report callback. If the reply is lost after witness publication, the
-        // holder remains provisional and can independently confirm the
-        // witnessed manifest during recovery.
+        // Patch 4B-2 remains in force: successful normal admission does not
+        // send an explicit CommitRecoveryManifest RPC. The report reply carries
+        // the committed manifest to this candidate.
+        state->send_reply_callback(Status::OK(), nullptr, nullptr);
 
-        send_reply_callback(Status::OK(), nullptr, nullptr);
-        
+        {
+          absl::MutexLock lock(&recovery_holder_admission_mutex_);
+          const auto task_it = recovery_holder_admission_states_.find(state->task_id);
+          if (task_it != recovery_holder_admission_states_.end()) {
+            auto &task_state = task_it->second;
+            const auto rank_it = task_state.pending_by_rank.find(state->rank);
+            if (rank_it != task_state.pending_by_rank.end() &&
+                rank_it->second->reservation_id == state->reservation_id) {
+              task_state.pending_by_rank.erase(rank_it);
+            }
+            if (task_state.witness_publish_rank == state->rank) {
+              task_state.witness_publish_rank = 0;
+            }
+            if (task_state.pending_by_rank.empty()) {
+              recovery_holder_admission_states_.erase(task_it);
+            }
+          }
+        }
 
-
+        TryAdvanceRecoveryHolderAdmissions(state->task_id);
       });
 }
 
@@ -4985,90 +5089,52 @@ void CoreWorker::HandleReportRecoveryCandidate(
   if (!recovery_succession_enabled_ ||
       recovery_witness_holder_baseline_enabled_ ||
       recovery_succession_manager_ == nullptr) {
-    reply->set_result(
-        rpc::ReportRecoveryCandidateReply::DISABLED);
-
+    reply->set_result(rpc::ReportRecoveryCandidateReply::DISABLED);
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
 
   const uint64_t admission_start_ns =
-    recovery_succession_profiling_enabled_
-        ? RecoveryProfileNowNs()
-        : 0;
+      recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
 
   auto manager = recovery_succession_manager_;
-
   RecoverySuccessionManager::HolderAdmissionPlan admission_plan;
   rpc::RecoveryManifest latest_manifest;
 
   const auto result = manager->PrepareHolderAdmission(
-      request,
-      &admission_plan,
-      &latest_manifest);
-
+      request, &admission_plan, &latest_manifest);
 
   if (recovery_succession_profiling_enabled_) {
     const bool accepted_new_holder =
         result == rpc::ReportRecoveryCandidateReply::ACCEPTED &&
         !admission_plan.reservation_id.empty();
-
-    manager->RecordCandidateReport(
-        accepted_new_holder);
+    manager->RecordCandidateReport(accepted_new_holder);
   }
 
   reply->set_result(result);
-
   if (!latest_manifest.task_id().empty()) {
-    reply->mutable_latest_manifest()->CopyFrom(
-        latest_manifest);
+    reply->mutable_latest_manifest()->CopyFrom(latest_manifest);
   }
 
-  // ACCEPTED with no reservation means this candidate was already
-  // present in the committed manifest.
+  // ACCEPTED with no reservation means already committed or already pending.
   if (result != rpc::ReportRecoveryCandidateReply::ACCEPTED ||
       admission_plan.reservation_id.empty()) {
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
 
-  const std::string reservation_id =
-      admission_plan.reservation_id;
-
-  const TaskID task_id = TaskID::FromBinary(
-      admission_plan.proposed_manifest.task_id());
+  const std::string reservation_id = admission_plan.reservation_id;
+  const TaskID task_id = TaskID::FromBinary(admission_plan.proposed_manifest.task_id());
 
   rpc::Address candidate_address;
-  candidate_address.CopyFrom(
-      admission_plan.candidate_address);
+  candidate_address.CopyFrom(admission_plan.candidate_address);
 
   rpc::RecoveryManifest proposed_manifest;
-  proposed_manifest.CopyFrom(
-      admission_plan.proposed_manifest);
+  proposed_manifest.CopyFrom(admission_plan.proposed_manifest);
 
-  // The executor already retained the complete TaskSpec when it
-  // received the original task.
-  if (admission_plan.candidate_already_stores_task_spec) {
-    FinishRecoveryHolderAdmission(
-        reservation_id,
-        task_id,
-        std::move(candidate_address),
-        false,
-        std::move(latest_manifest),
-        std::move(proposed_manifest),
-        admission_start_ns,
-        reply,
-        std::move(send_reply_callback));
-    return;
-  }
-
-  // Find the rank assigned to the newly proposed candidate.
   const rpc::RecoveryHolder *candidate_holder = nullptr;
-
-  for (const rpc::RecoveryHolder &holder :
-       proposed_manifest.succession()) {
-    if (holder.address().worker_id() ==
-        candidate_address.worker_id()) {
+  for (const rpc::RecoveryHolder &holder : proposed_manifest.succession()) {
+    if (holder.address().worker_id() == candidate_address.worker_id()) {
       candidate_holder = &holder;
       break;
     }
@@ -5076,117 +5142,128 @@ void CoreWorker::HandleReportRecoveryCandidate(
 
   if (candidate_holder == nullptr) {
     manager->AbortHolderAdmission(reservation_id);
-
-    reply->set_result(
-        rpc::ReportRecoveryCandidateReply::STALE_MANIFEST);
-
+    reply->set_result(rpc::ReportRecoveryCandidateReply::STALE_MANIFEST);
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
   }
 
-  const uint32_t candidate_rank = candidate_holder->rank();
+  auto state = std::make_shared<PendingRecoveryHolderAdmission>();
+  state->reservation_id = reservation_id;
+  state->task_id = task_id;
+  state->rank = candidate_holder->rank();
+  state->candidate_address.CopyFrom(candidate_address);
+  state->candidate_needs_commit_rpc =
+      !admission_plan.candidate_already_stores_task_spec;
+  state->latest_manifest.CopyFrom(latest_manifest);
+  state->proposed_manifest.CopyFrom(proposed_manifest);
+  state->admission_start_ns = admission_start_ns;
+  state->reply = reply;
+  state->send_reply_callback = std::move(send_reply_callback);
 
-  rpc::InstallRecoveryHolderRequest install_request;
-
-  install_request.set_task_id(
-      proposed_manifest.task_id());
-
-  install_request.set_reservation_id(
-      reservation_id);
-
-  install_request.set_proposed_rank(
-      candidate_rank);
-
-  if (recovery_succession_profiling_enabled_) {
-    const uint64_t task_spec_copy_start_ns =
-        RecoveryProfileNowNs();
-
-    install_request.mutable_task_spec()->CopyFrom(
-        admission_plan.task_spec);
-
-    manager->RecordOwnerTaskSpecCopyLatency(
-        RecoveryProfileNowNs() -
-        task_spec_copy_start_ns);
-  } else {
-    install_request.mutable_task_spec()->CopyFrom(
-        admission_plan.task_spec);
+  {
+    absl::MutexLock lock(&recovery_holder_admission_mutex_);
+    auto &task_state = recovery_holder_admission_states_[task_id];
+    const auto inserted = task_state.pending_by_rank.emplace(state->rank, state);
+    if (!inserted.second) {
+      manager->AbortHolderAdmission(reservation_id);
+      state->reply->set_result(rpc::ReportRecoveryCandidateReply::NO_SLOT);
+      state->send_reply_callback(Status::OK(), nullptr, nullptr);
+      return;
+    }
   }
 
-  install_request.mutable_proposed_manifest()->CopyFrom(
-      proposed_manifest);
+  if (admission_plan.candidate_already_stores_task_spec) {
+    {
+      absl::MutexLock lock(&recovery_holder_admission_mutex_);
+      state->installed = true;
+    }
+    TryAdvanceRecoveryHolderAdmissions(task_id);
+    return;
+  }
 
-  auto candidate_client =
-      core_worker_client_pool_->GetOrConnect(
-          candidate_address);
-
-
-  uint64_t install_start_ns = 0;
+  rpc::InstallRecoveryHolderRequest install_request;
+  install_request.set_task_id(proposed_manifest.task_id());
+  install_request.set_reservation_id(reservation_id);
+  install_request.set_proposed_rank(state->rank);
 
   if (recovery_succession_profiling_enabled_) {
-    manager->RecordHolderInstallRpcSent(
-        static_cast<uint64_t>(
-            install_request.task_spec().ByteSizeLong()),
-        static_cast<uint64_t>(
-            install_request.proposed_manifest().ByteSizeLong()));
+    const uint64_t task_spec_copy_start_ns = RecoveryProfileNowNs();
+    install_request.mutable_task_spec()->CopyFrom(admission_plan.task_spec);
+    manager->RecordOwnerTaskSpecCopyLatency(
+        RecoveryProfileNowNs() - task_spec_copy_start_ns);
+  } else {
+    install_request.mutable_task_spec()->CopyFrom(admission_plan.task_spec);
+  }
 
+  install_request.mutable_proposed_manifest()->CopyFrom(proposed_manifest);
+
+  auto candidate_client = core_worker_client_pool_->GetOrConnect(candidate_address);
+
+  uint64_t install_start_ns = 0;
+  if (recovery_succession_profiling_enabled_) {
+    manager->RecordHolderInstallRpcSent(
+        static_cast<uint64_t>(install_request.task_spec().ByteSizeLong()),
+        static_cast<uint64_t>(install_request.proposed_manifest().ByteSizeLong()));
     install_start_ns = RecoveryProfileNowNs();
   }
 
+  // Patch 4D: this RPC is no longer serialized behind the previous holder's
+  // witness publication/commit. H1..HR installs may all be in flight.
   candidate_client->InstallRecoveryHolder(
-    std::move(install_request),
-    [this,
-     manager,
-     reservation_id,
-     task_id,
-     candidate_address = std::move(candidate_address),
-     latest_manifest = std::move(latest_manifest),
-     proposed_manifest = std::move(proposed_manifest),
-     install_start_ns,
-     admission_start_ns,
-     reply,
-     send_reply_callback = std::move(send_reply_callback)](
-          const Status &status,
-          rpc::InstallRecoveryHolderReply &&install_reply) mutable {
-
+      std::move(install_request),
+      [this, manager, state, install_start_ns](
+          const Status &status, rpc::InstallRecoveryHolderReply &&install_reply) mutable {
         if (install_start_ns != 0) {
           manager->RecordHolderInstallRpcLatency(
               RecoveryProfileNowNs() - install_start_ns);
         }
 
-        if (!status.ok() ||
-            !install_reply.stored() ||
-            install_reply.reservation_id() != reservation_id) {
-          manager->AbortHolderAdmission(reservation_id);
-
-          reply->set_result(
-              rpc::ReportRecoveryCandidateReply::NO_SLOT);
-
-          if (!latest_manifest.task_id().empty()) {
-            reply->mutable_latest_manifest()->CopyFrom(
-                latest_manifest);
+        bool already_aborted = false;
+        rpc::RecoveryManifest abort_manifest;
+        {
+          absl::MutexLock lock(&recovery_holder_admission_mutex_);
+          already_aborted = state->aborted;
+          if (already_aborted) {
+            abort_manifest.CopyFrom(state->abort_manifest);
           }
+        }
 
-          send_reply_callback(
-              Status::OK(),
-              nullptr,
-              nullptr);
+        if (already_aborted) {
+          // The lower-rank failure may have raced with this Install RPC. If the
+          // candidate stored the provisional lineage after the first cleanup,
+          // send cleanup again now that installation has definitively finished.
+          if (status.ok() && install_reply.stored()) {
+            SendRecoveryHolderRollback(state, abort_manifest);
+          }
           return;
         }
 
-        FinishRecoveryHolderAdmission(
-            reservation_id,
-            task_id,
-            std::move(candidate_address),
-            true,
-            std::move(latest_manifest),
-            std::move(proposed_manifest),
-            admission_start_ns,
-            reply,
-            std::move(send_reply_callback));
+        if (!status.ok() || !install_reply.stored() ||
+            install_reply.reservation_id() != state->reservation_id) {
+          AbortRecoveryHolderAdmissionSuffix(
+              state,
+              rpc::ReportRecoveryCandidateReply::NO_SLOT,
+              state->latest_manifest);
+          return;
+        }
+
+        {
+          absl::MutexLock lock(&recovery_holder_admission_mutex_);
+          if (state->aborted) {
+            abort_manifest.CopyFrom(state->abort_manifest);
+            already_aborted = true;
+          } else {
+            state->installed = true;
+          }
+        }
+
+        if (already_aborted) {
+          SendRecoveryHolderRollback(state, abort_manifest);
+          return;
+        }
+
+        TryAdvanceRecoveryHolderAdmissions(state->task_id);
       });
-      
-
-
 }
 
 void CoreWorker::HandleInstallRecoveryHolder(rpc::InstallRecoveryHolderRequest request,
