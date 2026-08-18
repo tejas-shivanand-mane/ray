@@ -496,9 +496,26 @@ def measure_protection_ready(
         num_cpus=1,
     ).remote(request_id, payload_bytes, *padding)
 
+    # Wait for producer completion before forwarding the ObjectRef.
+    #
+    # IMPORTANT: payload_ref itself stays strongly referenced throughout
+    # protection formation. This separates pending-ref metadata propagation
+    # from actual Recovery Succession holder formation.
+    payload = ray.get(payload_ref)
+    if len(payload) < 8:
+        raise RuntimeError("protection canary producer payload too small")
+
+    observed = int.from_bytes(payload[:8], "little", signed=False)
+    if observed != request_id:
+        raise RuntimeError(
+            "protection canary producer validation failed: "
+            f"expected {request_id}, got {observed}"
+        )
+
+    # Measure protection formation only after the producer object is ready.
     start_ns = time.perf_counter_ns()
 
-    # Direct fan-out: all B borrowers receive the owner's original ref.
+    # Direct fan-out: all B borrowers receive the owner's original, still-live ref.
     stage_refs = [
         consumers[i].touch.remote([payload_ref])
         for i in range(borrower_count)
@@ -866,8 +883,6 @@ def run_live_state_batch(
     producer_refs: list[ray.ObjectRef] = []
     request_ids: list[int] = []
 
-    start_ns = time.perf_counter_ns()
-
     for i in range(args.state_task_count):
         request_id = request_id_base + i
         request_ids.append(request_id)
@@ -882,17 +897,32 @@ def run_live_state_batch(
             )
         )
 
-    if borrower_count == 0:
-        payloads = ray.get(producer_refs)
-        for request_id, payload in zip(request_ids, payloads):
-            if len(payload) < 8:
-                raise RuntimeError("live-state producer payload too small")
-            observed = int.from_bytes(payload[:8], "little", signed=False)
-            if observed != request_id:
-                raise RuntimeError(
-                    f"live-state validation failed: expected {request_id}, got {observed}"
-                )
-    else:
+    # Producer-completion barrier.
+    #
+    # Keep all original ObjectRefs strongly referenced in producer_refs, but
+    # wait until the producer tasks have completed before handing those refs
+    # to borrowers. This makes the live-state phase test:
+    #
+    #   completed producer + live ObjectRef -> holder formation
+    #
+    # rather than also testing pending-ref recovery-metadata propagation.
+    payloads = ray.get(producer_refs)
+
+    for request_id, payload in zip(request_ids, payloads):
+        if len(payload) < 8:
+            raise RuntimeError("live-state producer payload too small")
+
+        observed = int.from_bytes(payload[:8], "little", signed=False)
+        if observed != request_id:
+            raise RuntimeError(
+                "live-state producer validation failed: "
+                f"expected {request_id}, got {observed}"
+            )
+
+    # Formation time starts only after all producer objects are ready.
+    start_ns = time.perf_counter_ns()
+
+    if borrower_count > 0:
         stage_refs: list[ray.ObjectRef] = []
         expected_ids: list[int] = []
 
