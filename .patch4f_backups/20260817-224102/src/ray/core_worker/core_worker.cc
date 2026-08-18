@@ -62,6 +62,7 @@ namespace ray::core {
 
 // Patch 4D: pipelined holder admission.
 // Patch 4E: batched recovery control RPCs.
+// Patch 4E-1: first-holder candidate-report fast path.
 
 namespace {
 // Default capacity for serialization caches.
@@ -5076,8 +5077,18 @@ void CoreWorker::QueueRecoveryCandidateReport(
   // Preserve deterministic failure-injection semantics. A batch has one gRPC
   // status for all logical items, so the post-witness/pre-commit test continues
   // to use the original single-item RPC path.
+  //
+  // Patch 4E-1: also fast-path the first real holder (H1). When the cached
+  // succession contains only the owner, delaying this report for the 4E
+  // coalescing window adds latency/control-path pressure without batching
+  // multiple holders for this task. H2+ still use the normal 4E batching path.
+  const bool first_holder_candidate =
+      !request.has_cached_manifest() ||
+      request.cached_manifest().succession_size() <= 1;
+
   if (RayConfig::instance().recovery_succession_test_fail_after_witness_ack() ||
-      coordinator_address.worker_id().empty()) {
+      coordinator_address.worker_id().empty() ||
+      first_holder_candidate) {
     auto manager = recovery_succession_manager_;
     auto client = core_worker_client_pool_->GetOrConnect(coordinator_address);
     client->ReportRecoveryCandidate(

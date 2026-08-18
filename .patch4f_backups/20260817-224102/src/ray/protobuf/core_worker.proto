@@ -474,9 +474,7 @@ message ReportRecoveryCandidateRequest {
   Address candidate_address = 2;
   RecoveryManifest cached_manifest = 3;
 
-  // True when the candidate already has the full producer TaskSpec.
-  // Patch 4F sets this only after a downstream borrower consumes the
-  // transport-only first_holder_task_spec sidecar.
+  // True for the executor because PushTask already delivered the TaskSpec.
   bool already_stores_task_spec = 4;
 }
 

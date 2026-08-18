@@ -1210,10 +1210,4 @@ message RecoveryObjectMetadata {
   bytes task_id = 1;
   uint32 return_index = 2;
   RecoveryManifest manifest = 3;
-
-  // Patch 4F: first-holder TaskSpec piggyback.
-  // Transport-only serialized producer TaskSpec. Receivers consume and strip
-  // this before retaining/re-exporting ObjectRef metadata. Possessing these
-  // bytes does NOT make the borrower a committed recovery holder.
-  bytes first_holder_task_spec = 4;
 }

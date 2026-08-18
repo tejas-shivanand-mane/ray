@@ -77,9 +77,6 @@ PROFILE_KEYS = [
     "manifest_bytes_sent",
     "owner_task_spec_copy_count",
     "owner_task_spec_copy_time_ns",
-    "first_holder_piggyback_copies_sent",
-    "first_holder_piggyback_bytes_sent",
-    "first_holder_piggyback_serialize_time_ns",
     "holder_install_rpc_time_ns",
     "holder_commit_rpc_time_ns",
     "witness_update_rpc_time_ns",
@@ -416,10 +413,6 @@ def add_profile_metrics(
         profile["owner_task_spec_copy_time_ns"],
         profile["owner_task_spec_copy_count"],
     )
-    summary["profile_first_holder_piggyback_serialize_avg_us"] = avg_us(
-        profile["first_holder_piggyback_serialize_time_ns"],
-        profile["first_holder_piggyback_copies_sent"],
-    )
     summary["profile_holder_install_rpc_avg_us"] = avg_us(
         profile["holder_install_rpc_time_ns"],
         profile["holder_install_rpcs_completed"],
@@ -463,18 +456,6 @@ def add_profile_metrics(
 
 
     total_tasks = int(summary["total_pipeline_submitted"])
-
-    # Patch 4F changes H1 transport, not lineage replication semantics.
-    logical_task_spec_copies = (
-        int(profile["holder_install_rpcs_sent"])
-        + int(profile["first_holder_piggyback_copies_sent"])
-    )
-    summary["profile_logical_task_spec_copies_sent"] = logical_task_spec_copies
-    summary["profile_logical_task_spec_copies_per_task"] = (
-        logical_task_spec_copies / total_tasks
-        if total_tasks > 0
-        else math.nan
-    )
 
     control_bytes = (
         int(profile["task_spec_bytes_sent"])

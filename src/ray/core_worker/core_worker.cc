@@ -63,6 +63,7 @@ namespace ray::core {
 // Patch 4D: pipelined holder admission.
 // Patch 4E: batched recovery control RPCs.
 // Patch 4E-1: first-holder candidate-report fast path.
+// Patch 4F: first-holder TaskSpec piggyback.
 
 namespace {
 // Default capacity for serialization caches.
@@ -1214,6 +1215,13 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.owner_task_spec_copy_count;
   result["owner_task_spec_copy_time_ns"] =
       profile.owner_task_spec_copy_time_ns;
+  // Patch 4F TaskSpecs transported through normal downstream PushTask.
+  result["first_holder_piggyback_copies_sent"] =
+      profile.first_holder_piggyback_copies_sent;
+  result["first_holder_piggyback_bytes_sent"] =
+      profile.first_holder_piggyback_bytes_sent;
+  result["first_holder_piggyback_serialize_time_ns"] =
+      profile.first_holder_piggyback_serialize_time_ns;
 
   result["holder_install_rpc_time_ns"] =
       profile.holder_install_rpc_time_ns;
@@ -4996,9 +5004,10 @@ void CoreWorker::FinishRecoveryHolderAdmission(
           return;
         }
 
-        // Preserve the existing post-witness/pre-commit failure injection.
-        if (state->candidate_needs_commit_rpc &&
-            RayConfig::instance().recovery_succession_test_fail_after_witness_ack()) {
+        // Patch 4F remains provisional even without an install RPC. Keep
+        // the failure injection active after witness ACK and before the
+        // candidate learns the committed generation through the report reply.
+        if (RayConfig::instance().recovery_succession_test_fail_after_witness_ack()) {
           RAY_LOG(WARNING).WithField(state->task_id)
               << "TEST ONLY: injected recovery succession failure after "
                  "witness ACK before candidate commit";
@@ -5351,8 +5360,6 @@ CoreWorker::PrepareRecoveryCandidateAdmission(
   state->task_id = task_id;
   state->rank = candidate_holder->rank();
   state->candidate_address.CopyFrom(candidate_address);
-  state->candidate_needs_commit_rpc =
-      !admission_plan.candidate_already_stores_task_spec;
   state->latest_manifest.CopyFrom(latest_manifest);
   state->proposed_manifest.CopyFrom(proposed_manifest);
   state->admission_start_ns = admission_start_ns;

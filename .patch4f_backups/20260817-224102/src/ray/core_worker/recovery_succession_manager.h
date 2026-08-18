@@ -33,7 +33,6 @@
 namespace ray::core {
 
 /// Patch 4D: pipelined holder admission.
-/// Patch 4F: first-holder TaskSpec piggyback.
 /// Stores lineage, succession, and holder-admission state for the
 /// experimental recovery-succession implementation.
 class RecoverySuccessionManager {
@@ -49,9 +48,8 @@ class RecoverySuccessionManager {
     rpc::TaskSpec task_spec;
     rpc::RecoveryManifest proposed_manifest;
 
-    // True when the candidate already has the complete producer TaskSpec.
-    // Patch 4F uses this for a downstream borrower that consumed the
-    // transport-only TaskSpec sidecar. This does not imply commitment.
+    // True when the candidate is the executor of the original task and
+    // RegisterExecutorTask has already retained the complete TaskSpec.
     bool candidate_already_stores_task_spec = false;
   };
 
@@ -81,13 +79,6 @@ class RecoverySuccessionManager {
 
     uint64_t owner_task_spec_copy_count = 0;
     uint64_t owner_task_spec_copy_time_ns = 0;
-
-    // Patch 4F full-lineage copies moved through normal downstream PushTask
-    // transport instead of InstallRecoveryHolder. task_spec_bytes_sent also
-    // includes these bytes.
-    uint64_t first_holder_piggyback_copies_sent = 0;
-    uint64_t first_holder_piggyback_bytes_sent = 0;
-    uint64_t first_holder_piggyback_serialize_time_ns = 0;
 
     uint64_t holder_install_rpc_time_ns = 0;
     uint64_t holder_commit_rpc_time_ns = 0;
@@ -238,9 +229,7 @@ class RecoverySuccessionManager {
                                 rpc::RecoveryObjectMetadata *metadata) const;
 
   /// Adds recovery metadata to direct and nested ObjectRef arguments.
-  /// Patch 4F may atomically claim the one-shot H1 TaskSpec piggyback, so this
-  /// method intentionally mutates manager state.
-  void PopulateTaskArgumentMetadata(rpc::TaskSpec *task_spec);
+  void PopulateTaskArgumentMetadata(rpc::TaskSpec *task_spec) const;
 
   struct BorrowedObjectRecoveryPlan {
     TaskID task_id;
@@ -315,15 +304,6 @@ class RecoverySuccessionManager {
     // witness during owner-failure recovery.
     bool manifest_committed = true;
     std::string provisional_reservation_id;
-
-    // Owner-side one-shot transport claim. After the first full TaskSpec has
-    // been attached to a downstream PushTask, later holders use the ordinary
-    // Patch-4E install path when necessary.
-    bool first_holder_piggyback_sent = false;
-
-    // Borrower-side state: full TaskSpec is present, but replay remains blocked
-    // until a witness-confirmed manifest explicitly contains this worker.
-    bool provisional_piggyback_task_spec = false;
   };
 
   struct BorrowedObjectRecoveryState {

@@ -67,7 +67,6 @@ namespace ray::core {
 
 // Patch 4D: pipelined holder admission.
 // Patch 4E: batched recovery control RPCs.
-// Patch 4F: first-holder TaskSpec piggyback.
 
 JobID GetProcessJobID(const CoreWorkerOptions &options);
 
@@ -1675,6 +1674,7 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     TaskID task_id;
     uint32_t rank = 0;
     rpc::Address candidate_address;
+    bool candidate_needs_commit_rpc = true;
     rpc::RecoveryManifest latest_manifest;
     rpc::RecoveryManifest proposed_manifest;
     uint64_t admission_start_ns = 0;

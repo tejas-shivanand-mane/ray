@@ -22,7 +22,6 @@
 namespace ray::core {
 
 // Patch 4D: pipelined holder admission.
-// Patch 4F: first-holder TaskSpec piggyback.
 
 namespace {
 
@@ -63,30 +62,6 @@ int CompareManifestVersions(const rpc::RecoveryManifest &left,
   }
 
   return 0;
-}
-
-
-// Patch 4F transport sidecars must never become part of retained/replayed
-// lineage, otherwise a downstream TaskSpec could recursively contain upstream
-// full TaskSpecs.
-void ClearFirstHolderTaskSpecPiggybacks(rpc::TaskSpec *task_spec) {
-  if (task_spec == nullptr) {
-    return;
-  }
-
-  for (rpc::TaskArg &arg : *task_spec->mutable_args()) {
-    if (arg.has_object_ref() && arg.object_ref().has_recovery_metadata()) {
-      arg.mutable_object_ref()
-          ->mutable_recovery_metadata()
-          ->clear_first_holder_task_spec();
-    }
-
-    for (rpc::ObjectReference &nested_ref : *arg.mutable_nested_inlined_refs()) {
-      if (nested_ref.has_recovery_metadata()) {
-        nested_ref.mutable_recovery_metadata()->clear_first_holder_task_spec();
-      }
-    }
-  }
 }
 
 }  // namespace
@@ -170,14 +145,7 @@ void RecoverySuccessionManager::RegisterOwnedTask(
 
   TaskRecoveryState task_state;
   task_state.manifest.CopyFrom(task_proto.recovery_manifest());
-
-  rpc::TaskSpec stored_task_spec;
-  stored_task_spec.CopyFrom(task_proto);
-  ClearFirstHolderTaskSpecPiggybacks(&stored_task_spec);
-  stored_task_spec.mutable_recovery_manifest()->CopyFrom(
-      task_proto.recovery_manifest());
-
-  task_state.task_spec = std::move(stored_task_spec);
+  task_state.task_spec = task_proto;
   task_state.manifest_committed = true;
 
   absl::MutexLock lock(&mutex_);
@@ -240,7 +208,6 @@ bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
 
   rpc::TaskSpec stored_task_spec;
   stored_task_spec.CopyFrom(task_proto);
-  ClearFirstHolderTaskSpecPiggybacks(&stored_task_spec);
   stored_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
 
   task_state.task_spec = std::move(stored_task_spec);
@@ -304,31 +271,10 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
                                  !task_spec.task_id().empty();
 
   std::vector<CandidateReport> reports;
-  absl::flat_hash_set<TaskID> piggyback_task_ids;
 
   absl::MutexLock lock(&mutex_);
 
   for (const auto &[object_id, metadata] : received_metadata) {
-    // Parse the Patch-4F transport sidecar before normal metadata selection.
-    // The sidecar itself is never retained in object_recovery_metadata_.
-    rpc::TaskSpec piggyback_task_spec;
-    bool valid_piggyback = false;
-
-    if (!metadata.first_holder_task_spec().empty()) {
-      valid_piggyback =
-          piggyback_task_spec.ParseFromString(metadata.first_holder_task_spec()) &&
-          !piggyback_task_spec.task_id().empty() &&
-          piggyback_task_spec.task_id() == metadata.task_id() &&
-          IsEligibleTask(piggyback_task_spec);
-
-      if (valid_piggyback) {
-        ClearFirstHolderTaskSpecPiggybacks(&piggyback_task_spec);
-      } else {
-        RAY_LOG(DEBUG)
-            << "Ignoring invalid Patch 4F first-holder TaskSpec piggyback";
-      }
-    }
-
     rpc::RecoveryObjectMetadata effective_metadata;
     effective_metadata.CopyFrom(metadata);
 
@@ -340,17 +286,18 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
       effective_metadata.CopyFrom(existing_metadata->second);
     }
 
-    // Transport only: do not recursively forward full TaskSpecs.
-    effective_metadata.clear_first_holder_task_spec();
-
     const TaskID metadata_task_id =
         TaskID::FromBinary(effective_metadata.task_id());
 
+    // Do not recreate metadata for a task whose equal-or-newer tombstone
+    // has already been applied locally.
     const auto tombstone_it = task_states_.find(metadata_task_id);
+
     if (tombstone_it != task_states_.end() &&
         tombstone_it->second.manifest.tombstoned() &&
-        CompareManifestVersions(tombstone_it->second.manifest,
-                                effective_metadata.manifest()) >= 0) {
+        CompareManifestVersions(
+            tombstone_it->second.manifest,
+            effective_metadata.manifest()) >= 0) {
       continue;
     }
 
@@ -362,32 +309,6 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     object_recovery_metadata_[object_id] = effective_metadata;
     task_object_ids_[metadata_task_id].insert(object_id);
 
-    if (valid_piggyback &&
-        piggyback_task_spec.task_id() == effective_metadata.task_id()) {
-      const auto existing_task_it = task_states_.find(metadata_task_id);
-
-      if (existing_task_it == task_states_.end()) {
-        TaskRecoveryState piggyback_state;
-        piggyback_state.manifest.CopyFrom(effective_metadata.manifest());
-        piggyback_task_spec.mutable_recovery_manifest()->CopyFrom(
-            effective_metadata.manifest());
-        piggyback_state.task_spec = std::move(piggyback_task_spec);
-
-        // Critical 4F invariant: possession is provisional only. The local
-        // owner-only manifest does not yet make this worker a replayable H1.
-        piggyback_state.manifest_committed = false;
-        piggyback_state.provisional_piggyback_task_spec = true;
-
-        task_states_[metadata_task_id] = std::move(piggyback_state);
-        piggyback_task_ids.insert(metadata_task_id);
-      } else if (existing_task_it->second.provisional_piggyback_task_spec &&
-                 existing_task_it->second.task_spec.has_value()) {
-        // Duplicate delivery of the same downstream TaskSpec.
-        piggyback_task_ids.insert(metadata_task_id);
-      }
-      // Any other pre-existing TaskRecoveryState falls back conservatively to
-      // the normal InstallRecoveryHolder path.
-    }
   }
 
   if (should_store_task) {
@@ -398,38 +319,52 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     const bool stale_after_tombstone =
         existing_task_it != task_states_.end() &&
         existing_task_it->second.manifest.tombstoned() &&
-        CompareManifestVersions(existing_task_it->second.manifest,
-                                task_spec.recovery_manifest()) >= 0;
+        CompareManifestVersions(
+            existing_task_it->second.manifest,
+            task_spec.recovery_manifest()) >= 0;
 
     if (!stale_after_tombstone) {
       TaskRecoveryState &task_state = task_states_[task_id];
 
       if (task_state.manifest.task_id().empty() ||
-          CompareManifestVersions(task_spec.recovery_manifest(),
-                                  task_state.manifest) > 0) {
-        task_state.manifest.CopyFrom(task_spec.recovery_manifest());
+          CompareManifestVersions(
+              task_spec.recovery_manifest(),
+              task_state.manifest) > 0) {
+        task_state.manifest.CopyFrom(
+            task_spec.recovery_manifest());
       }
 
       rpc::TaskSpec stored_task_spec;
       stored_task_spec.CopyFrom(task_spec);
-      ClearFirstHolderTaskSpecPiggybacks(&stored_task_spec);
-      stored_task_spec.mutable_recovery_manifest()->CopyFrom(task_state.manifest);
+      stored_task_spec.mutable_recovery_manifest()->CopyFrom(
+          task_state.manifest);
 
       task_state.task_spec = std::move(stored_task_spec);
 
-      // IMPORTANT: the original executor is not admitted as a durable recovery
-      // holder. Holder admission still comes only from downstream borrowers.
+      // IMPORTANT:
+      //
+      // Do not admit the original task executor as a recovery
+      // succession holder.
+      //
+      // Although the executor may run on a node distinct from the
+      // task owner, Ray's worker lease is owned by the task submitter.
+      // If that owner's node dies, NodeManager::NodeRemoved() kills
+      // this leased executor as part of normal Ray cleanup.
+      //
+      // Therefore the executor is not failure-independent from the
+      // original owner and cannot provide owner-failure tolerance.
+      //
+      // The TaskSpec may still be retained locally for normal task
+      // bookkeeping, but holder admission must come from independent
+      // downstream borrowers.
     }
   }
+
 
   for (const auto &[object_id, metadata] : received_metadata) {
     static_cast<void>(object_id);
 
-    const TaskID metadata_task_id = TaskID::FromBinary(metadata.task_id());
-    MaybeAddCandidateReportLocked(
-        metadata.manifest(),
-        piggyback_task_ids.contains(metadata_task_id),
-        &reports);
+    MaybeAddCandidateReportLocked(metadata.manifest(), false, &reports);
   }
 
   return reports;
@@ -454,9 +389,6 @@ void RecoverySuccessionManager::RegisterBorrowedObject(
     effective_metadata.CopyFrom(existing_metadata->second);
   }
 
-  // Patch 4F TaskSpec bytes are valid only on downstream PushTask receipt.
-  effective_metadata.clear_first_holder_task_spec();
-
   const TaskID task_id =
     TaskID::FromBinary(effective_metadata.task_id());
 
@@ -464,8 +396,9 @@ void RecoverySuccessionManager::RegisterBorrowedObject(
 
   if (tombstone_it != task_states_.end() &&
       tombstone_it->second.manifest.tombstoned() &&
-      CompareManifestVersions(tombstone_it->second.manifest,
-                              effective_metadata.manifest()) >= 0) {
+      CompareManifestVersions(
+          tombstone_it->second.manifest,
+          effective_metadata.manifest()) >= 0) {
     return;
   }
 
@@ -476,6 +409,7 @@ void RecoverySuccessionManager::RegisterBorrowedObject(
   borrowed_objects_[object_id] = std::move(borrowed_state);
   object_recovery_metadata_[object_id] = effective_metadata;
   task_object_ids_[task_id].insert(object_id);
+
 }
 
 rpc::ReportRecoveryCandidateReply::Result
@@ -700,13 +634,11 @@ bool RecoverySuccessionManager::InstallRecoveryHolder(
 
   rpc::TaskSpec stored_task_spec;
   stored_task_spec.CopyFrom(request.task_spec());
-  ClearFirstHolderTaskSpecPiggybacks(&stored_task_spec);
   stored_task_spec.mutable_recovery_manifest()->CopyFrom(request.proposed_manifest());
 
   task_state.task_spec = std::move(stored_task_spec);
   task_state.manifest_committed = false;
   task_state.provisional_reservation_id = request.reservation_id();
-  task_state.provisional_piggyback_task_spec = false;
 
   candidate_reports_sent_.insert(task_id);
 
@@ -921,105 +853,40 @@ bool RecoverySuccessionManager::PopulateRecoveryMetadata(
 }
 
 void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
-    rpc::TaskSpec *task_spec) {
+    rpc::TaskSpec *task_spec) const {
   if (task_spec == nullptr) {
     return;
   }
 
   absl::MutexLock lock(&mutex_);
 
-  auto populate_one = [this](const ObjectID &object_id,
-                             rpc::ObjectReference *object_ref) {
-    if (object_ref == nullptr) {
-      return;
-    }
-
-    const auto metadata_it = object_recovery_metadata_.find(object_id);
-    if (metadata_it == object_recovery_metadata_.end()) {
-      return;
-    }
-
-    rpc::RecoveryObjectMetadata *out = object_ref->mutable_recovery_metadata();
-    out->CopyFrom(metadata_it->second);
-    out->clear_first_holder_task_spec();
-
-    // Keep the witness-as-holder baseline unchanged.
-    if (RayConfig::instance().enable_recovery_witness_holder_baseline() ||
-        out->task_id().empty() || !out->has_manifest()) {
-      return;
-    }
-
-    const TaskID producer_task_id = TaskID::FromBinary(out->task_id());
-    const auto task_it = task_states_.find(producer_task_id);
-    if (task_it == task_states_.end()) {
-      return;
-    }
-
-    TaskRecoveryState &state = task_it->second;
-
-    // Claim exactly one full-lineage piggyback while the committed succession
-    // is still [A]. Later holders use the ordinary Patch-4E install path.
-    if (state.first_holder_piggyback_sent ||
-        !state.manifest_committed ||
-        !state.task_spec.has_value() ||
-        state.manifest.tombstoned() ||
-        state.manifest.frozen() ||
-        state.manifest.succession_size() != 1 ||
-        state.manifest.task_id() != out->task_id()) {
-      return;
-    }
-
-    const rpc::RecoveryHolder *owner = FindHolderByRank(state.manifest, 0);
-    if (owner == nullptr || !SameWorker(owner->address(), self_address_)) {
-      return;
-    }
-
-    if (!IsEligibleTask(state.task_spec.value()) ||
-        !state.task_spec->has_recovery_manifest() ||
-        state.task_spec->task_id() != state.manifest.task_id()) {
-      return;
-    }
-
-    out->mutable_manifest()->CopyFrom(state.manifest);
-
-    const auto serialize_start = std::chrono::steady_clock::now();
-    std::string serialized_task_spec;
-    const bool ok = state.task_spec->SerializeToString(&serialized_task_spec);
-    const auto serialize_end = std::chrono::steady_clock::now();
-
-    if (!ok || serialized_task_spec.empty()) {
-      return;
-    }
-
-    out->set_first_holder_task_spec(serialized_task_spec);
-    state.first_holder_piggyback_sent = true;
-
-    if (profiling_enabled_) {
-      ++profile_.first_holder_piggyback_copies_sent;
-      profile_.first_holder_piggyback_bytes_sent +=
-          static_cast<uint64_t>(serialized_task_spec.size());
-      profile_.task_spec_bytes_sent +=
-          static_cast<uint64_t>(serialized_task_spec.size());
-      profile_.first_holder_piggyback_serialize_time_ns +=
-          static_cast<uint64_t>(
-              std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  serialize_end - serialize_start)
-                  .count());
-    }
-  };
-
   for (rpc::TaskArg &arg : *task_spec->mutable_args()) {
-    if (arg.has_object_ref() && !arg.object_ref().object_id().empty()) {
-      populate_one(
-          ObjectID::FromBinary(arg.object_ref().object_id()),
-          arg.mutable_object_ref());
+    if (arg.has_object_ref()) {
+      rpc::ObjectReference *object_ref = arg.mutable_object_ref();
+
+      if (!object_ref->object_id().empty()) {
+        const ObjectID object_id = ObjectID::FromBinary(object_ref->object_id());
+
+        const auto metadata_it = object_recovery_metadata_.find(object_id);
+
+        if (metadata_it != object_recovery_metadata_.end()) {
+          object_ref->mutable_recovery_metadata()->CopyFrom(metadata_it->second);
+        }
+      }
     }
 
     for (rpc::ObjectReference &nested_ref : *arg.mutable_nested_inlined_refs()) {
       if (nested_ref.object_id().empty()) {
         continue;
       }
-      populate_one(ObjectID::FromBinary(nested_ref.object_id()), &nested_ref);
+
+      const ObjectID nested_id = ObjectID::FromBinary(nested_ref.object_id());
+
+      const auto metadata_it = object_recovery_metadata_.find(nested_id);
+
+      if (metadata_it != object_recovery_metadata_.end()) {
+        nested_ref.mutable_recovery_metadata()->CopyFrom(metadata_it->second);
+      }
     }
   }
 }
@@ -1084,27 +951,11 @@ void RecoverySuccessionManager::UpdateManifestForTaskLocked(
     bool committed) {
   TaskRecoveryState &task_state = task_states_[task_id];
 
-  const bool discard_unadmitted_piggyback =
-      committed &&
-      task_state.provisional_piggyback_task_spec &&
-      !ContainsWorker(manifest, self_address_);
-
   task_state.manifest.CopyFrom(manifest);
   task_state.manifest_committed = committed;
 
   if (committed) {
     task_state.provisional_reservation_id.clear();
-
-    if (task_state.provisional_piggyback_task_spec) {
-      task_state.provisional_piggyback_task_spec = false;
-
-      if (discard_unadmitted_piggyback) {
-        // Rollback/rejection must not leave an orphaned full TaskSpec that can
-        // later be mistaken for committed recovery lineage.
-        task_state.task_spec.reset();
-        candidate_reports_sent_.erase(task_id);
-      }
-    }
   }
 
   // Do not copy the new manifest into the stored TaskSpec here.
@@ -1118,11 +969,11 @@ void RecoverySuccessionManager::UpdateManifestForTaskLocked(
   }
 
   for (const ObjectID &object_id : object_ids_it->second) {
-    const auto metadata_it = object_recovery_metadata_.find(object_id);
+    const auto metadata_it =
+        object_recovery_metadata_.find(object_id);
 
     if (metadata_it != object_recovery_metadata_.end()) {
       metadata_it->second.mutable_manifest()->CopyFrom(manifest);
-      metadata_it->second.clear_first_holder_task_spec();
     }
   }
 }
@@ -1192,15 +1043,12 @@ RecoverySuccessionManager::PrepareTaskReplay(const rpc::RecoverTaskOutputRequest
   }
 
   if (!state.manifest_committed) {
-    // Both an installed holder and a Patch-4F piggyback holder remain
-    // non-replayable until this worker independently verifies witnesses.
-    const bool installed_provisional =
-        !state.provisional_reservation_id.empty() &&
-        ContainsWorker(state.manifest, self_address_);
-    const bool piggyback_provisional =
-        state.provisional_piggyback_task_spec;
-
-    if (!installed_provisional && !piggyback_provisional) {
+    // The TaskSpec is durable locally, but this holder was installed only
+    // provisionally. Do not trust the requester's cached manifest to promote
+    // it. CoreWorker must verify the manifest directly with the compact
+    // witnesses first.
+    if (state.provisional_reservation_id.empty() ||
+        !ContainsWorker(state.manifest, self_address_)) {
       return ReplayPreparationResult::TASK_NOT_FOUND;
     }
 
@@ -1305,35 +1153,26 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
 
   if (state.manifest.task_id() != witness_manifest.task_id() ||
       state.manifest.tombstoned() ||
+      !ContainsWorker(state.manifest, self_address_) ||
       !ContainsWorker(witness_manifest, self_address_)) {
     return false;
   }
 
-  const bool installed_provisional =
-      !state.provisional_reservation_id.empty() &&
-      ContainsWorker(state.manifest, self_address_);
-  const bool piggyback_provisional =
-      state.provisional_piggyback_task_spec;
-
-  // A normal committed holder must already appear in its local manifest.
-  // Patch 4F is intentionally different only while provisional: H1 initially
-  // has [A] locally, and may promote only if a directly fetched witness
-  // manifest contains this worker.
-  if (state.manifest_committed &&
-      !ContainsWorker(state.manifest, self_address_)) {
-    return false;
-  }
-
+  // If the normal CommitRecoveryManifest RPC has not arrived, this must
+  // still be a genuine provisional holder installation.
   if (!state.manifest_committed &&
-      !installed_provisional &&
-      !piggyback_provisional) {
+      state.provisional_reservation_id.empty()) {
     return false;
   }
 
   const int comparison =
-      CompareManifestVersions(witness_manifest, state.manifest);
+      CompareManifestVersions(
+          witness_manifest,
+          state.manifest);
 
   if (comparison < 0) {
+    // The normal commit RPC may have won the race while the witness query
+    // was in flight. In that case keep the newer local committed state.
     if (!state.manifest_committed) {
       return false;
     }
@@ -1343,18 +1182,31 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
   }
 
   if (comparison == 0 &&
-      witness_manifest.SerializeAsString() != state.manifest.SerializeAsString()) {
+      witness_manifest.SerializeAsString() !=
+          state.manifest.SerializeAsString()) {
     return false;
   }
 
   if (comparison > 0 || !state.manifest_committed) {
-    UpdateManifestForTaskLocked(task_id, witness_manifest, true);
+    // This manifest was fetched directly from a preassigned compact witness,
+    // so it can safely convert the provisional holder into a replayable one.
+    UpdateManifestForTaskLocked(
+        task_id,
+        witness_manifest,
+        true);
   }
 
   candidate_reports_sent_.insert(task_id);
+
   confirmed_manifest->CopyFrom(state.manifest);
+
   return true;
 }
+
+
+
+
+
 
 void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
     const ObjectID &object_id,
@@ -1455,7 +1307,6 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
   state.manifest_committed = true;
   state.task_spec.reset();
   state.provisional_reservation_id.clear();
-  state.provisional_piggyback_task_spec = false;
 
   EraseTaskObjectMetadataLocked(task_id);
 
