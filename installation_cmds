@@ -4,6 +4,7 @@ export BAZEL_ARGS="--local_resources=cpu=6 \
 --local_resources=memory=HOST_RAM*.35 \
 --disk_cache=$HOME/bazel-cache"
 
+
 set -o pipefail; \
 nice -n 10 python -m pip install -e python/ --verbose 2>&1 \
   | tee ray-build.log \
