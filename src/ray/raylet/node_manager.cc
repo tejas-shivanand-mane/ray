@@ -212,6 +212,98 @@ bool ValidRecoveryManifest(const rpc::RecoveryManifest &manifest) {
          manifest.version().generation() > 0;
 }
 
+
+bool SameRecoveryWorker(const rpc::Address &left, const rpc::Address &right) {
+  return !left.worker_id().empty() && left.worker_id() == right.worker_id();
+}
+
+bool ValidRecoveryHolderCertificate(const rpc::RecoveryHolderCertificate &certificate) {
+  return certificate.task_id().size() == TaskID::Size() &&
+         certificate.generation() > 0 && certificate.slot() > 0 &&
+         certificate.has_holder() &&
+         certificate.holder().address().worker_id().size() == WorkerID::Size() &&
+         certificate.holder().address().node_id().size() == NodeID::Size();
+}
+
+// Merge one owner-issued certificate into the witness's materialized manifest.
+// The logical state is a grow-only set keyed by holder worker_id.  The repeated
+// `succession` field remains a compatibility/materialization format: after each
+// merge we deterministically sort non-owner holders by worker_id and derive
+// contiguous ranks 1..N.  Rank is therefore no longer the admission dependency.
+bool MergeRecoveryHolderCertificate(
+    const rpc::RecoveryHolderCertificate &certificate,
+    rpc::RecoveryManifest *manifest) {
+  if (manifest == nullptr || !ValidRecoveryManifest(*manifest) ||
+      !ValidRecoveryHolderCertificate(certificate) ||
+      manifest->task_id() != certificate.task_id() || manifest->tombstoned()) {
+    return false;
+  }
+
+  const rpc::RecoveryHolder *owner = nullptr;
+  std::vector<rpc::RecoveryHolder> non_owner;
+  non_owner.reserve(static_cast<size_t>(manifest->succession_size()) + 1);
+
+  for (const rpc::RecoveryHolder &holder : manifest->succession()) {
+    if (holder.rank() == 0) {
+      owner = &holder;
+      continue;
+    }
+    if (SameRecoveryWorker(holder.address(), certificate.holder().address())) {
+      // Idempotent retry of an already-merged certificate.
+      manifest->mutable_version()->set_generation(
+          std::max(manifest->version().generation(), certificate.generation()));
+      return true;
+    }
+    non_owner.push_back(holder);
+  }
+
+  if (owner == nullptr ||
+      static_cast<uint32_t>(non_owner.size()) >= manifest->target_holder_count()) {
+    return false;
+  }
+
+  // Preserve the current failure-domain invariant.  The owner remains the
+  // single writer and already performs this check, but the witness validates it
+  // as a defensive invariant before accepting a delta.
+  const std::string &new_domain = certificate.holder().failure_domain_id();
+  if (new_domain.empty()) {
+    return false;
+  }
+  if (owner->failure_domain_id() == new_domain) {
+    return false;
+  }
+  for (const rpc::RecoveryHolder &holder : non_owner) {
+    if (holder.failure_domain_id() == new_domain) {
+      return false;
+    }
+  }
+
+  non_owner.push_back(certificate.holder());
+  std::sort(non_owner.begin(), non_owner.end(),
+            [](const rpc::RecoveryHolder &a, const rpc::RecoveryHolder &b) {
+              return a.address().worker_id() < b.address().worker_id();
+            });
+
+  rpc::RecoveryHolder owner_copy;
+  owner_copy.CopyFrom(*owner);
+  manifest->clear_succession();
+  rpc::RecoveryHolder *out_owner = manifest->add_succession();
+  out_owner->CopyFrom(owner_copy);
+  out_owner->set_rank(0);
+
+  for (size_t i = 0; i < non_owner.size(); ++i) {
+    rpc::RecoveryHolder *out = manifest->add_succession();
+    out->CopyFrom(non_owner[i]);
+    out->set_rank(static_cast<uint32_t>(i + 1));
+  }
+
+  manifest->mutable_version()->set_generation(
+      std::max(manifest->version().generation(), certificate.generation()));
+  manifest->set_frozen(static_cast<uint32_t>(non_owner.size()) >=
+                       manifest->target_holder_count());
+  return true;
+}
+
 }  // namespace
 
 NodeManager::NodeManager(
@@ -364,8 +456,72 @@ void NodeManager::HandleUpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest request,
     rpc::UpdateRecoveryWitnessReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
-  if (!RayConfig::instance().enable_recovery_succession() || !request.has_manifest() ||
-      !ValidRecoveryManifest(request.manifest())) {
+  if (!RayConfig::instance().enable_recovery_succession()) {
+    reply->set_stored(false);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  const bool baseline_enabled =
+      RayConfig::instance().enable_recovery_witness_holder_baseline();
+  const bool certificate_mode =
+      RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !baseline_enabled;
+
+  // Patch 4M-CERT delta path.  A certificate is accepted only when this
+  // witness already has the task's base manifest.  This preserves lazy
+  // activation and keeps tombstones as absorbing state.
+  if (request.has_holder_certificate()) {
+    if (!certificate_mode || request.has_task_spec() ||
+        !ValidRecoveryHolderCertificate(request.holder_certificate()) ||
+        (request.has_manifest() &&
+         (!ValidRecoveryManifest(request.manifest()) ||
+          request.manifest().task_id() != request.holder_certificate().task_id() ||
+          request.manifest().tombstoned()))) {
+      reply->set_stored(false);
+      send_reply_callback(Status::OK(), nullptr, nullptr);
+      return;
+    }
+
+    const rpc::RecoveryHolderCertificate &certificate =
+        request.holder_certificate();
+    const TaskID task_id = TaskID::FromBinary(certificate.task_id());
+
+    {
+      absl::MutexLock lock(&recovery_witness_mutex_);
+      auto it = recovery_witness_manifests_.find(task_id);
+      if (it == recovery_witness_manifests_.end() && request.has_manifest()) {
+        recovery_witness_manifests_[task_id].CopyFrom(request.manifest());
+        it = recovery_witness_manifests_.find(task_id);
+      }
+      if (it == recovery_witness_manifests_.end()) {
+        reply->set_stored(false);
+      } else if (it->second.tombstoned()) {
+        reply->set_stored(false);
+        reply->mutable_latest_manifest()->CopyFrom(it->second);
+      } else {
+        rpc::RecoveryManifest merged;
+        merged.CopyFrom(it->second);
+        if (MergeRecoveryHolderCertificate(certificate, &merged)) {
+          it->second.CopyFrom(merged);
+          reply->set_stored(true);
+          // Useful for diagnostics and for callers that want the witness's
+          // materialized set.  Success does not require consuming this field.
+          reply->mutable_latest_manifest()->CopyFrom(it->second);
+        } else {
+          reply->set_stored(false);
+          reply->mutable_latest_manifest()->CopyFrom(it->second);
+        }
+      }
+    }
+
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  // Existing full-manifest path: initial activation, tombstones, and the
+  // witness-as-holder baseline retain Patch 4L/4K behavior.
+  if (!request.has_manifest() || !ValidRecoveryManifest(request.manifest())) {
     reply->set_stored(false);
     send_reply_callback(Status::OK(), nullptr, nullptr);
     return;
@@ -373,10 +529,6 @@ void NodeManager::HandleUpdateRecoveryWitness(
 
   const rpc::RecoveryManifest &incoming = request.manifest();
   const TaskID task_id = TaskID::FromBinary(incoming.task_id());
-
-  const bool baseline_enabled =
-    RayConfig::instance().enable_recovery_succession() &&
-    RayConfig::instance().enable_recovery_witness_holder_baseline();
 
   if (request.has_task_spec()) {
     if (!baseline_enabled ||
@@ -394,7 +546,6 @@ void NodeManager::HandleUpdateRecoveryWitness(
     absl::MutexLock lock(&recovery_witness_mutex_);
 
     auto existing_it = recovery_witness_manifests_.find(task_id);
-
     if (existing_it == recovery_witness_manifests_.end()) {
       recovery_witness_manifests_[task_id].CopyFrom(incoming);
       reply->set_stored(true);
@@ -402,12 +553,16 @@ void NodeManager::HandleUpdateRecoveryWitness(
       rpc::RecoveryManifest &existing = existing_it->second;
       const int comparison = CompareRecoveryManifestVersions(incoming, existing);
 
-      if (comparison > 0) {
+      // Patch 4M-CERT: a terminal tombstone wins an equal-generation race
+      // against an in-flight holder certificate.  Older tombstones still lose.
+      if (certificate_mode && incoming.tombstoned() && comparison >= 0) {
+        existing.CopyFrom(incoming);
+        reply->set_stored(true);
+      } else if (comparison > 0) {
         existing.CopyFrom(incoming);
         reply->set_stored(true);
       } else if (comparison == 0 &&
                  incoming.SerializeAsString() == existing.SerializeAsString()) {
-        // Idempotent retry.
         reply->set_stored(true);
       } else {
         reply->set_stored(false);
@@ -416,30 +571,24 @@ void NodeManager::HandleUpdateRecoveryWitness(
     }
 
     if (reply->stored()) {
-      if (incoming.tombstoned()) {
+      rpc::RecoveryManifest &stored = recovery_witness_manifests_[task_id];
+      if (stored.tombstoned()) {
         recovery_witness_task_specs_.erase(task_id);
         recovery_witness_claims_.erase(task_id);
       } else if (baseline_enabled && request.has_task_spec()) {
-        recovery_witness_task_specs_[task_id].CopyFrom(
-            request.task_spec());
+        recovery_witness_task_specs_[task_id].CopyFrom(request.task_spec());
       } else {
-        // Keep an already-retained baseline TaskSpec synchronized with
-        // any newer manifest published later.
-        auto task_spec_it =
-            recovery_witness_task_specs_.find(task_id);
-
+        auto task_spec_it = recovery_witness_task_specs_.find(task_id);
         if (task_spec_it != recovery_witness_task_specs_.end()) {
-          task_spec_it->second.mutable_recovery_manifest()->CopyFrom(
-              incoming);
+          task_spec_it->second.mutable_recovery_manifest()->CopyFrom(stored);
         }
       }
     }
-
-    
   }
 
   send_reply_callback(Status::OK(), nullptr, nullptr);
 }
+
 
 void NodeManager::HandleUpdateRecoveryWitnessBatch(
     rpc::UpdateRecoveryWitnessBatchRequest request,

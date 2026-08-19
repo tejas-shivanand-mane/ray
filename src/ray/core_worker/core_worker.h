@@ -1650,6 +1650,14 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     RecoveryWitnessPublishCallback callback,
     const rpc::TaskSpec *task_spec = nullptr) const;
 
+
+  // Patch 4M-CERT delta publication.  Same witness durability rule as normal
+  // Succession, but only one owner-issued holder certificate is transmitted.
+  void PublishRecoveryHolderCertificateToWitnesses(
+      const rpc::RecoveryManifest &manifest,
+      const rpc::RecoveryHolderCertificate &certificate,
+      RecoveryWitnessPublishCallback callback) const;
+
   // Patch 4E sender-side coalescing state. The queue is per coordinator so
   // unrelated owners never share a physical RPC.
   struct PendingRecoveryCandidateReport {
@@ -1683,6 +1691,9 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     rpc::SendReplyCallback send_reply_callback;
     bool installed = false;
     bool aborted = false;
+    // Patch 4M-CERT: prevents duplicate concurrent publication of this
+    // independent certificate while retaining the old per-task rank gate.
+    bool witness_publish_started = false;
     rpc::RecoveryManifest abort_manifest;
   };
 
@@ -1715,6 +1726,10 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
       rpc::InstallRecoveryHolderReply install_reply);
 
   void FinishRecoveryHolderAdmission(
+      std::shared_ptr<PendingRecoveryHolderAdmission> state);
+
+
+  void FinishRecoveryHolderAdmissionCertificate(
       std::shared_ptr<PendingRecoveryHolderAdmission> state);
 
   void TryAdvanceRecoveryHolderAdmissions(const TaskID &task_id);

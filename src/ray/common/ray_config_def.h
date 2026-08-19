@@ -216,6 +216,13 @@ RAY_CONFIG(uint32_t, recovery_succession_target_holder_count, 2)
 RAY_CONFIG(uint32_t, recovery_succession_witness_count, 2)
 
 
+/// Patch 4M-CERT experimental mode.  When true, normal Recovery Succession
+/// keeps the owner as the single admission authority but witness-confirms each
+/// installed holder with an independently mergeable certificate.  Certificate
+/// publications may overlap; the default false preserves Patch 4L/4K exactly.
+RAY_CONFIG(bool, enable_recovery_succession_certificate_admission, false)
+
+
 /// Enables lightweight profiling of recovery-succession holder formation.
 /// Intended only for experiments/debugging. When false, no timing or
 /// protobuf-size measurements are performed.

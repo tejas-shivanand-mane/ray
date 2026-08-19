@@ -1186,6 +1186,18 @@ message RecoveryHolder {
   bytes failure_domain_id = 3;
 }
 
+
+// Patch 4M-CERT: one independently mergeable holder-confirmation fact.
+// `generation` is the owner-issued admission generation.  It is NOT used as
+// last-writer-wins for certificates: same-task certificates are unioned by
+// witnesses, and the materialized RecoveryManifest stores the max generation.
+message RecoveryHolderCertificate {
+  bytes task_id = 1;
+  uint64 generation = 2;
+  uint32 slot = 3;
+  RecoveryHolder holder = 4;
+}
+
 message RecoveryManifest {
   bytes task_id = 1;
   bytes job_id = 2;

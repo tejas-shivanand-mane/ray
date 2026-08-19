@@ -15,6 +15,7 @@
 #include "ray/core_worker/recovery_succession_manager.h"
 #include "ray/common/ray_config.h"
 #include "absl/cleanup/cleanup.h"
+#include <algorithm>
 #include <cstddef>
 #include <utility>
 #include <chrono>
@@ -70,6 +71,116 @@ int CompareManifestVersions(const rpc::RecoveryManifest &left,
   }
 
   return 0;
+}
+
+
+bool MergeRecoveryHolderSets(const rpc::RecoveryManifest &incoming,
+                             rpc::RecoveryManifest *state) {
+  if (state == nullptr || incoming.task_id().empty() || !incoming.has_version()) {
+    return false;
+  }
+  if (state->task_id().empty()) {
+    state->CopyFrom(incoming);
+    return true;
+  }
+  if (state->task_id() != incoming.task_id() || !state->has_version()) {
+    return false;
+  }
+
+  // Tombstones are terminal.  An equal-generation tombstone may race with an
+  // independently published certificate; terminal state wins that tie.
+  if (incoming.tombstoned()) {
+    if (incoming.version().generation() >= state->version().generation()) {
+      state->CopyFrom(incoming);
+      return true;
+    }
+    return false;
+  }
+  if (state->tombstoned()) {
+    return true;
+  }
+
+  const rpc::RecoveryHolder *owner = FindHolderByRank(*state, 0);
+  if (owner == nullptr) {
+    owner = FindHolderByRank(incoming, 0);
+  }
+  if (owner == nullptr) {
+    return false;
+  }
+
+  std::vector<rpc::RecoveryHolder> holders;
+  auto add_unique = [&holders, owner](const rpc::RecoveryManifest &manifest) {
+    for (const rpc::RecoveryHolder &holder : manifest.succession()) {
+      if (holder.rank() == 0 || SameWorker(holder.address(), owner->address())) {
+        continue;
+      }
+      bool duplicate = false;
+      for (const rpc::RecoveryHolder &existing : holders) {
+        if (SameWorker(existing.address(), holder.address())) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) {
+        holders.push_back(holder);
+      }
+    }
+  };
+
+  add_unique(*state);
+  add_unique(incoming);
+  if (holders.size() > static_cast<size_t>(state->target_holder_count())) {
+    return false;
+  }
+
+  std::sort(holders.begin(), holders.end(),
+            [](const rpc::RecoveryHolder &a, const rpc::RecoveryHolder &b) {
+              return a.address().worker_id() < b.address().worker_id();
+            });
+
+  rpc::RecoveryHolder owner_copy;
+  owner_copy.CopyFrom(*owner);
+  state->clear_succession();
+  rpc::RecoveryHolder *out_owner = state->add_succession();
+  out_owner->CopyFrom(owner_copy);
+  out_owner->set_rank(0);
+  for (size_t i = 0; i < holders.size(); ++i) {
+    rpc::RecoveryHolder *out = state->add_succession();
+    out->CopyFrom(holders[i]);
+    out->set_rank(static_cast<uint32_t>(i + 1));
+  }
+
+  state->mutable_version()->set_generation(
+      std::max(state->version().generation(), incoming.version().generation()));
+  state->set_recovery_attempt(
+      std::max(state->recovery_attempt(), incoming.recovery_attempt()));
+  state->set_frozen(static_cast<uint32_t>(holders.size()) >=
+                    state->target_holder_count());
+  return true;
+}
+
+bool MergeConfirmedHolder(const rpc::RecoveryHolder &candidate,
+                          uint64_t certificate_generation,
+                          rpc::RecoveryManifest *manifest) {
+  if (manifest == nullptr || manifest->task_id().empty() || manifest->tombstoned() ||
+      candidate.address().worker_id().empty()) {
+    return false;
+  }
+
+  rpc::RecoveryManifest delta;
+  delta.CopyFrom(*manifest);
+  delta.clear_succession();
+
+  const rpc::RecoveryHolder *owner = FindHolderByRank(*manifest, 0);
+  if (owner == nullptr) {
+    return false;
+  }
+  delta.add_succession()->CopyFrom(*owner);
+  rpc::RecoveryHolder *holder = delta.add_succession();
+  holder->CopyFrom(candidate);
+  holder->set_rank(1);
+  delta.mutable_version()->set_generation(certificate_generation);
+  return MergeRecoveryHolderSets(delta, manifest);
 }
 
 
@@ -1096,6 +1207,50 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
   const rpc::RecoveryManifest &current = task_it->second.manifest;
   const rpc::RecoveryManifest &proposed = reservation.proposed_manifest;
 
+
+  // Patch 4M-CERT independent commit.  Witness ACK authorizes exactly this
+  // reservation's candidate; it does not require lower admission slots to have
+  // committed first.  Materialized ranks are derived deterministically.
+  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    const rpc::RecoveryHolder *candidate =
+        FindHolderByRank(proposed, reservation.proposed_rank);
+    if (candidate == nullptr ||
+        !SameWorker(candidate->address(), reservation.candidate_address)) {
+      return false;
+    }
+
+    rpc::RecoveryManifest merged;
+    merged.CopyFrom(current);
+    if (!MergeConfirmedHolder(*candidate,
+                              proposed.version().generation(),
+                              &merged)) {
+      return false;
+    }
+
+    UpdateManifestForTaskLocked(task_id, merged, true);
+
+    if (profiling_enabled_) {
+      ++profile_.holder_admissions_committed;
+      ++profile_.manifest_generations_committed;
+      profile_.max_generation =
+          std::max(profile_.max_generation, merged.version().generation());
+      const uint64_t non_owner_holders =
+          merged.succession_size() > 0
+              ? static_cast<uint64_t>(merged.succession_size() - 1)
+              : 0;
+      profile_.max_non_owner_holders =
+          std::max(profile_.max_non_owner_holders, non_owner_holders);
+      if (merged.frozen()) {
+        ++profile_.frozen_commits;
+      }
+    }
+
+    committed_manifest->CopyFrom(merged);
+    EraseHolderReservationLocked(reservation_id);
+    return true;
+  }
+
   // Patch 4D: only the next contiguous rank may become durable. Install RPCs
   // may complete in any order, but commits must remain H1,H2,...
   if (reservation.proposed_rank !=
@@ -1156,6 +1311,15 @@ void RecoverySuccessionManager::AbortHolderAdmission(
 
   const TaskID task_id = reservation_it->second.task_id;
   const uint32_t failed_rank = reservation_it->second.proposed_rank;
+
+
+  // Patch 4M-CERT independent abort: another certificate does not depend on
+  // this reservation's prefix, so do not invalidate higher slots.
+  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    EraseHolderReservationLocked(reservation_id);
+    return;
+  }
 
   const auto task_index_it = holder_reservation_by_task_.find(task_id);
   if (task_index_it == holder_reservation_by_task_.end()) {
@@ -1220,8 +1384,28 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
   }
 
   const TaskID task_id = TaskID::FromBinary(manifest.task_id());
-
   absl::MutexLock lock(&mutex_);
+
+  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    // Patch 4M-CERT set merge: equal-generation different subsets are valid
+    // partial views and must converge by union, not fail byte-equality checks.
+    auto it = task_states_.find(task_id);
+    rpc::RecoveryManifest merged;
+    if (it == task_states_.end() || it->second.manifest.task_id().empty()) {
+      merged.CopyFrom(manifest);
+    } else {
+      merged.CopyFrom(it->second.manifest);
+      if (!MergeRecoveryHolderSets(manifest, &merged)) {
+        return false;
+      }
+    }
+    UpdateManifestForTaskLocked(task_id, merged, true);
+    if (ContainsWorker(merged, self_address_)) {
+      candidate_reports_sent_.insert(task_id);
+    }
+    return true;
+  }
 
   const auto task_it = task_states_.find(task_id);
 
@@ -1258,6 +1442,7 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
 
   return true;
 }
+
 
 
 bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
@@ -1786,44 +1971,55 @@ RecoverySuccessionManager::PrepareTaskReplay(
     return ReplayPreparationResult::WITNESS_CONFIRMATION_REQUIRED;
   }
 
+  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    rpc::RecoveryManifest merged;
+    merged.CopyFrom(state.manifest);
+    if (!MergeRecoveryHolderSets(request.requester_manifest(), &merged)) {
+      return ReplayPreparationResult::MANIFEST_STALE;
+    }
+    if (merged.tombstoned()) {
+      latest_manifest->CopyFrom(merged);
+      return ReplayPreparationResult::TOMBSTONED;
+    }
+    state.manifest.CopyFrom(merged);
+    state.manifest_committed = true;
+    latest_manifest->CopyFrom(state.manifest);
+  } else {
     const int requester_comparison =
       CompareManifestVersions(
           request.requester_manifest(),
           state.manifest);
 
-  if (requester_comparison < 0) {
-    return ReplayPreparationResult::MANIFEST_STALE;
-  }
+    if (requester_comparison < 0) {
+      return ReplayPreparationResult::MANIFEST_STALE;
+    }
 
-  if (requester_comparison == 0 &&
-      request.requester_manifest().SerializeAsString() !=
-          state.manifest.SerializeAsString()) {
-    return ReplayPreparationResult::MANIFEST_STALE;
-  }
+    if (requester_comparison == 0 &&
+        request.requester_manifest().SerializeAsString() !=
+            state.manifest.SerializeAsString()) {
+      return ReplayPreparationResult::MANIFEST_STALE;
+    }
 
-  if (requester_comparison > 0) {
-    if (request.requester_manifest().tombstoned()) {
-      latest_manifest->CopyFrom(
+    if (requester_comparison > 0) {
+      if (request.requester_manifest().tombstoned()) {
+        latest_manifest->CopyFrom(
+            request.requester_manifest());
+        return ReplayPreparationResult::TOMBSTONED;
+      }
+
+      if (!ContainsWorker(
+              request.requester_manifest(),
+              self_address_)) {
+        return ReplayPreparationResult::WRONG_HOLDER;
+      }
+
+      state.manifest.CopyFrom(
           request.requester_manifest());
-
-      return ReplayPreparationResult::TOMBSTONED;
+      state.manifest_committed = true;
+      latest_manifest->CopyFrom(
+          state.manifest);
     }
-
-    // A newer manifest may be accepted only if this worker remains a
-    // member of the committed succession list.
-    if (!ContainsWorker(
-            request.requester_manifest(),
-            self_address_)) {
-      return ReplayPreparationResult::WRONG_HOLDER;
-    }
-
-    state.manifest.CopyFrom(
-        request.requester_manifest());
-
-    state.manifest_committed = true;
-
-    latest_manifest->CopyFrom(
-        state.manifest);
   }
 
   const int32_t max_recovery_attempts = state.manifest.max_recovery_attempts();
@@ -1888,6 +2084,32 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
     return false;
   }
 
+
+  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    // Patch 4M-CERT witness set promotion.  Presence in a directly queried
+    // witness's merged set is the durability proof; rank/prefix is irrelevant.
+    const bool installed_provisional =
+        !state.provisional_reservation_id.empty() &&
+        ContainsWorker(state.manifest, self_address_);
+    const bool piggyback_provisional = state.provisional_piggyback_task_spec;
+    if (!state.manifest_committed &&
+        !installed_provisional && !piggyback_provisional) {
+      return false;
+    }
+
+    rpc::RecoveryManifest merged;
+    merged.CopyFrom(state.manifest);
+    if (!MergeRecoveryHolderSets(witness_manifest, &merged) ||
+        !ContainsWorker(merged, self_address_)) {
+      return false;
+    }
+    UpdateManifestForTaskLocked(task_id, merged, true);
+    candidate_reports_sent_.insert(task_id);
+    confirmed_manifest->CopyFrom(task_states_[task_id].manifest);
+    return true;
+  }
+
   const bool installed_provisional =
       !state.provisional_reservation_id.empty() &&
       ContainsWorker(state.manifest, self_address_);
@@ -1948,6 +2170,25 @@ void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
   const auto borrowed_it = borrowed_objects_.find(object_id);
   if (borrowed_it == borrowed_objects_.end() ||
       borrowed_it->second.task_id.Binary() != manifest.task_id()) {
+    return;
+  }
+
+
+  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    // Patch 4M-CERT borrowed-view merge.
+    const TaskID task_id = borrowed_it->second.task_id;
+    auto task_it = task_states_.find(task_id);
+    rpc::RecoveryManifest merged;
+    if (task_it == task_states_.end() || task_it->second.manifest.task_id().empty()) {
+      merged.CopyFrom(manifest);
+    } else {
+      merged.CopyFrom(task_it->second.manifest);
+      if (!MergeRecoveryHolderSets(manifest, &merged)) {
+        return;
+      }
+    }
+    UpdateManifestForTaskLocked(task_id, merged, true);
     return;
   }
 

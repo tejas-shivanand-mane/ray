@@ -309,8 +309,9 @@ class RecoverySuccessionManager {
   bool CommitHolderAdmission(const std::string &reservation_id,
                              rpc::RecoveryManifest *committed_manifest);
 
-  /// Patch 4D: removes a failed provisional reservation and every
-  /// speculative reservation at a higher rank for the same task.
+  /// Removes a failed provisional reservation.  Patch 4D removes the
+  /// speculative suffix; Patch 4M-CERT removes only the failed independent
+  /// certificate reservation.
   void AbortHolderAdmission(const std::string &reservation_id);
 
   /// Allows a borrower whose candidate report was rejected/aborted to
@@ -448,7 +449,9 @@ class RecoverySuccessionManager {
     TaskID task_id;
     rpc::Address candidate_address;
     rpc::RecoveryManifest proposed_manifest;
-    uint32_t proposed_rank = 0;  // Patch 4D: speculative contiguous rank.
+    // Patch 4M-CERT: in certificate mode this is an owner-issued admission
+    // slot/token.  The committed recovery rank is derived later from the merged set.
+    uint32_t proposed_rank = 0;
   };
 
   void MaybeAddCandidateReportLocked(const rpc::RecoveryManifest &manifest,

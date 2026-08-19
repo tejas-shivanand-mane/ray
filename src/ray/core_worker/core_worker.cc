@@ -219,6 +219,88 @@ int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
   return 0;
 }
 
+
+bool MergeRecoveryWitnessViews(const rpc::RecoveryManifest &incoming,
+                               rpc::RecoveryManifest *state) {
+  if (state == nullptr || incoming.task_id().empty() || !incoming.has_version()) {
+    return false;
+  }
+  if (state->task_id().empty()) {
+    state->CopyFrom(incoming);
+    return true;
+  }
+  if (state->task_id() != incoming.task_id() || !state->has_version()) {
+    return false;
+  }
+
+  if (incoming.tombstoned()) {
+    if (incoming.version().generation() >= state->version().generation()) {
+      state->CopyFrom(incoming);
+    }
+    return true;
+  }
+  if (state->tombstoned()) {
+    return true;
+  }
+
+  rpc::RecoveryHolder owner;
+  bool have_owner = false;
+  std::vector<rpc::RecoveryHolder> holders;
+
+  auto absorb = [&](const rpc::RecoveryManifest &manifest) {
+    for (const rpc::RecoveryHolder &holder : manifest.succession()) {
+      if (holder.rank() == 0) {
+        if (!have_owner) {
+          owner.CopyFrom(holder);
+          have_owner = true;
+        }
+        continue;
+      }
+      bool duplicate = false;
+      for (const rpc::RecoveryHolder &existing : holders) {
+        if (!existing.address().worker_id().empty() &&
+            existing.address().worker_id() == holder.address().worker_id()) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) {
+        holders.push_back(holder);
+      }
+    }
+  };
+
+  absorb(*state);
+  absorb(incoming);
+  if (!have_owner ||
+      holders.size() > static_cast<size_t>(state->target_holder_count())) {
+    return false;
+  }
+
+  std::sort(holders.begin(), holders.end(),
+            [](const rpc::RecoveryHolder &a, const rpc::RecoveryHolder &b) {
+              return a.address().worker_id() < b.address().worker_id();
+            });
+
+  state->clear_succession();
+  rpc::RecoveryHolder *out_owner = state->add_succession();
+  out_owner->CopyFrom(owner);
+  out_owner->set_rank(0);
+  for (size_t i = 0; i < holders.size(); ++i) {
+    rpc::RecoveryHolder *out = state->add_succession();
+    out->CopyFrom(holders[i]);
+    out->set_rank(static_cast<uint32_t>(i + 1));
+  }
+
+  state->mutable_version()->set_generation(
+      std::max(state->version().generation(), incoming.version().generation()));
+  state->set_recovery_attempt(
+      std::max(state->recovery_attempt(), incoming.recovery_attempt()));
+  state->set_frozen(static_cast<uint32_t>(holders.size()) >=
+                    state->target_holder_count());
+  return true;
+}
+
 }  // namespace
 
 JobID GetProcessJobID(const CoreWorkerOptions &options) {
@@ -5126,6 +5208,42 @@ void CoreWorker::AbortRecoveryHolderAdmissionSuffix(
     return;
   }
 
+
+  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !recovery_witness_holder_baseline_enabled_) {
+    // Patch 4M-CERT independent failure cleanup: only this certificate fails.
+    recovery_succession_manager_->AbortHolderAdmission(
+        failed_state->reservation_id);
+
+    {
+      absl::MutexLock lock(&recovery_holder_admission_mutex_);
+      auto task_it = recovery_holder_admission_states_.find(failed_state->task_id);
+      if (task_it != recovery_holder_admission_states_.end()) {
+        auto rank_it = task_it->second.pending_by_rank.find(failed_state->rank);
+        if (rank_it != task_it->second.pending_by_rank.end() &&
+            rank_it->second->reservation_id == failed_state->reservation_id) {
+          rank_it->second->aborted = true;
+          rank_it->second->abort_manifest.CopyFrom(committed_manifest);
+          task_it->second.pending_by_rank.erase(rank_it);
+        }
+        if (task_it->second.pending_by_rank.empty()) {
+          recovery_holder_admission_states_.erase(task_it);
+        }
+      }
+    }
+
+    if (failed_state->reply != nullptr) {
+      failed_state->reply->set_result(failed_result);
+      if (!committed_manifest.task_id().empty()) {
+        failed_state->reply->mutable_latest_manifest()->CopyFrom(committed_manifest);
+      }
+    }
+    SendRecoveryHolderRollback(failed_state, committed_manifest);
+    failed_state->send_reply_callback(Status::OK(), nullptr, nullptr);
+    TryAdvanceRecoveryHolderAdmissions(failed_state->task_id);
+    return;
+  }
+
   // First remove the owner-side reservations. Manager semantics remove the
   // failed rank and every speculative rank above it.
   recovery_succession_manager_->AbortHolderAdmission(failed_state->reservation_id);
@@ -5173,8 +5291,35 @@ void CoreWorker::AbortRecoveryHolderAdmissionSuffix(
 }
 
 void CoreWorker::TryAdvanceRecoveryHolderAdmissions(const TaskID &task_id) {
-  std::shared_ptr<PendingRecoveryHolderAdmission> next;
+  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !recovery_witness_holder_baseline_enabled_) {
+    std::vector<std::shared_ptr<PendingRecoveryHolderAdmission>> ready;
+    {
+      absl::MutexLock lock(&recovery_holder_admission_mutex_);
+      const auto task_it = recovery_holder_admission_states_.find(task_id);
+      if (task_it == recovery_holder_admission_states_.end()) {
+        return;
+      }
+      for (auto &[slot, state] : task_it->second.pending_by_rank) {
+        static_cast<void>(slot);
+        if (state->installed && !state->aborted && !state->witness_publish_started) {
+          state->witness_publish_started = true;
+          ready.push_back(state);
+        }
+      }
+    }
 
+    // No rank gate: every installed independent certificate can enter witness
+    // confirmation concurrently.
+    for (auto &state : ready) {
+      FinishRecoveryHolderAdmissionCertificate(std::move(state));
+    }
+    return;
+  }
+
+  // Patch 4D/4K fallback: installs may overlap but witness publication and
+  // durable commit remain strictly rank ordered.
+  std::shared_ptr<PendingRecoveryHolderAdmission> next;
   {
     absl::MutexLock lock(&recovery_holder_admission_mutex_);
     const auto task_it = recovery_holder_admission_states_.find(task_id);
@@ -5197,6 +5342,118 @@ void CoreWorker::TryAdvanceRecoveryHolderAdmissions(const TaskID &task_id) {
   }
 
   FinishRecoveryHolderAdmission(std::move(next));
+}
+
+
+void CoreWorker::FinishRecoveryHolderAdmissionCertificate(
+    std::shared_ptr<PendingRecoveryHolderAdmission> state) {
+  if (state == nullptr) {
+    return;
+  }
+
+  const rpc::RecoveryHolder *holder = nullptr;
+  for (const rpc::RecoveryHolder &candidate : state->proposed_manifest.succession()) {
+    if (candidate.rank() == state->rank &&
+        candidate.address().worker_id() == state->candidate_address.worker_id()) {
+      holder = &candidate;
+      break;
+    }
+  }
+  if (holder == nullptr) {
+    AbortRecoveryHolderAdmissionSuffix(
+        state, rpc::ReportRecoveryCandidateReply::STALE_MANIFEST, state->latest_manifest);
+    return;
+  }
+
+  rpc::RecoveryHolderCertificate certificate;
+  certificate.set_task_id(state->proposed_manifest.task_id());
+  certificate.set_generation(state->proposed_manifest.version().generation());
+  certificate.set_slot(state->rank);
+  certificate.mutable_holder()->CopyFrom(*holder);
+
+  auto manager = recovery_succession_manager_;
+  const uint64_t publish_start_ns =
+      recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+
+  PublishRecoveryHolderCertificateToWitnesses(
+      state->latest_manifest,
+      certificate,
+      [this, manager, state, publish_start_ns](
+          bool witness_stored,
+          std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
+        if (publish_start_ns != 0) {
+          manager->RecordWitnessPublishLatency(
+              RecoveryProfileNowNs() - publish_start_ns);
+        }
+
+        if (!witness_stored) {
+          rpc::RecoveryManifest rollback;
+          if (newer_manifest.has_value()) {
+            rollback.CopyFrom(newer_manifest.value());
+            manager->ApplyCommittedManifest(newer_manifest.value());
+          } else {
+            rollback.CopyFrom(state->latest_manifest);
+          }
+          AbortRecoveryHolderAdmissionSuffix(
+              state,
+              rpc::ReportRecoveryCandidateReply::STALE_MANIFEST,
+              rollback);
+          return;
+        }
+
+        if (RayConfig::instance().recovery_succession_test_fail_after_witness_ack()) {
+          RAY_LOG(WARNING).WithField(state->task_id)
+              << "TEST ONLY: Patch 4M-CERT failure after certificate witness ACK";
+          state->send_reply_callback(
+              Status::IOError(
+                  "Injected Patch 4M-CERT failure after witness ACK before owner commit"),
+              nullptr,
+              nullptr);
+          return;
+        }
+
+        rpc::RecoveryManifest committed_manifest;
+        if (!manager->CommitHolderAdmission(state->reservation_id,
+                                            &committed_manifest)) {
+          AbortRecoveryHolderAdmissionSuffix(
+              state,
+              rpc::ReportRecoveryCandidateReply::STALE_MANIFEST,
+              state->latest_manifest);
+          return;
+        }
+
+        if (state->admission_start_ns != 0) {
+          manager->RecordHolderAdmissionLatency(
+              RecoveryProfileNowNs() - state->admission_start_ns);
+        }
+
+        state->reply->set_result(rpc::ReportRecoveryCandidateReply::ACCEPTED);
+        state->reply->mutable_latest_manifest()->CopyFrom(committed_manifest);
+        state->send_reply_callback(Status::OK(), nullptr, nullptr);
+
+        {
+          absl::MutexLock lock(&recovery_holder_admission_mutex_);
+          auto task_it = recovery_holder_admission_states_.find(state->task_id);
+          if (task_it != recovery_holder_admission_states_.end()) {
+            auto rank_it = task_it->second.pending_by_rank.find(state->rank);
+            if (rank_it != task_it->second.pending_by_rank.end() &&
+                rank_it->second->reservation_id == state->reservation_id) {
+              task_it->second.pending_by_rank.erase(rank_it);
+            }
+            if (task_it->second.pending_by_rank.empty()) {
+              recovery_holder_admission_states_.erase(task_it);
+            }
+          }
+        }
+
+        RAY_LOG(INFO).WithField(state->task_id)
+            << "Patch 4M-CERT witness-confirmed independent holder slot "
+            << state->rank;
+        RAY_LOG(INFO).WithField(state->task_id)
+            << "Committed recovery succession manifest after witness publication with "
+            << committed_manifest.succession_size() << " total members";
+        TryAdvanceRecoveryHolderAdmissions(state->task_id);
+      });
 }
 
 void CoreWorker::FinishRecoveryHolderAdmission(
@@ -8384,6 +8641,94 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
   }
 }
 
+void CoreWorker::PublishRecoveryHolderCertificateToWitnesses(
+    const rpc::RecoveryManifest &manifest,
+    const rpc::RecoveryHolderCertificate &certificate,
+    RecoveryWitnessPublishCallback callback) const {
+  if (!recovery_succession_enabled_ || manifest.task_id().empty() ||
+      manifest.witness_raylets_size() == 0 || certificate.task_id() != manifest.task_id()) {
+    callback(false, std::nullopt);
+    return;
+  }
+
+  struct PublishState {
+    absl::Mutex mutex;
+    size_t completed ABSL_GUARDED_BY(mutex) = 0;
+    bool callback_sent ABSL_GUARDED_BY(mutex) = false;
+    std::optional<rpc::RecoveryManifest> newest ABSL_GUARDED_BY(mutex);
+  };
+
+  auto state = std::make_shared<PublishState>();
+  const size_t witness_count = static_cast<size_t>(manifest.witness_raylets_size());
+
+  for (const rpc::Address &witness : manifest.witness_raylets()) {
+    rpc::UpdateRecoveryWitnessRequest request;
+    // Carry the last committed/base view only as a bootstrap in case this
+    // witness missed lazy activation.  An existing witness never replaces its
+    // merged set with this base; it only unions the certificate.
+    request.mutable_manifest()->CopyFrom(manifest);
+    request.mutable_holder_certificate()->CopyFrom(certificate);
+
+    const uint64_t witness_start_ns =
+        recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+    if (witness_start_ns != 0) {
+      recovery_succession_manager_->RecordWitnessUpdateRpcSent(
+          0, static_cast<uint64_t>(certificate.ByteSizeLong()));
+    }
+
+    auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
+    witness_client->UpdateRecoveryWitness(
+        std::move(request),
+        [state,
+         witness_count,
+         callback,
+         manager = recovery_succession_manager_,
+         witness_start_ns](const Status &status,
+                           rpc::UpdateRecoveryWitnessReply &&reply) mutable {
+          if (witness_start_ns != 0) {
+            manager->RecordWitnessUpdateRpcLatency(
+                RecoveryProfileNowNs() - witness_start_ns);
+          }
+
+          bool success = false;
+          bool failure = false;
+          std::optional<rpc::RecoveryManifest> newest;
+          {
+            absl::MutexLock lock(&state->mutex);
+            ++state->completed;
+
+            if (reply.has_latest_manifest()) {
+              if (!state->newest.has_value() ||
+                  CompareRecoveryManifestVersions(reply.latest_manifest(),
+                                                  state->newest.value()) > 0) {
+                state->newest = reply.latest_manifest();
+              }
+            }
+
+            if (!state->callback_sent) {
+              if (status.ok() && reply.stored()) {
+                // Preserve current Succession durability semantics: one compact
+                // witness acknowledgement is sufficient.
+                state->callback_sent = true;
+                success = true;
+              } else if (state->completed == witness_count) {
+                state->callback_sent = true;
+                newest = state->newest;
+                failure = true;
+              }
+            }
+          }
+
+          if (success) {
+            callback(true, std::nullopt);
+          } else if (failure) {
+            callback(false, std::move(newest));
+          }
+        });
+  }
+}
+
+
 void CoreWorker::LookupRecoveryManifestFromWitnesses(
     const rpc::RecoveryManifest &cached_manifest,
     RecoveryWitnessLookupCallback callback) {
@@ -8395,55 +8740,60 @@ void CoreWorker::LookupRecoveryManifestFromWitnesses(
 
   struct LookupState {
     absl::Mutex mutex;
-
     size_t completed ABSL_GUARDED_BY(mutex) = 0;
-
-    std::optional<rpc::RecoveryManifest> newest ABSL_GUARDED_BY(mutex);
+    std::optional<rpc::RecoveryManifest> merged ABSL_GUARDED_BY(mutex);
   };
 
   auto state = std::make_shared<LookupState>();
-
   const size_t witness_count =
       static_cast<size_t>(cached_manifest.witness_raylets_size());
+  const bool certificate_mode =
+      RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+      !recovery_witness_holder_baseline_enabled_;
 
   for (const rpc::Address &witness : cached_manifest.witness_raylets()) {
     rpc::GetRecoveryWitnessRequest request;
     request.set_task_id(cached_manifest.task_id());
-
     auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
 
     witness_client->GetRecoveryWitness(
         std::move(request),
-        [state, witness_count, callback](const Status &status,
-                                         rpc::GetRecoveryWitnessReply &&reply) mutable {
+        [state, witness_count, certificate_mode, callback](
+            const Status &status,
+            rpc::GetRecoveryWitnessReply &&reply) mutable {
           bool finished = false;
-
-          std::optional<rpc::RecoveryManifest> newest;
-
+          std::optional<rpc::RecoveryManifest> result;
           {
             absl::MutexLock lock(&state->mutex);
-
             ++state->completed;
 
             if (status.ok() && reply.found() && reply.has_manifest()) {
-              if (!state->newest.has_value() ||
-                  CompareRecoveryManifestVersions(reply.manifest(),
-                                                  state->newest.value()) > 0) {
-                state->newest = reply.manifest();
+              if (!state->merged.has_value()) {
+                state->merged = reply.manifest();
+              } else if (certificate_mode) {
+                rpc::RecoveryManifest merged;
+                merged.CopyFrom(state->merged.value());
+                if (MergeRecoveryWitnessViews(reply.manifest(), &merged)) {
+                  state->merged = std::move(merged);
+                }
+              } else if (CompareRecoveryManifestVersions(
+                             reply.manifest(), state->merged.value()) > 0) {
+                state->merged = reply.manifest();
               }
             }
 
             if (state->completed == witness_count) {
-              newest = state->newest;
+              result = state->merged;
               finished = true;
             }
           }
 
           if (finished) {
-            callback(std::move(newest));
+            callback(std::move(result));
           }
         });
   }
 }
+
 
 }  // namespace ray::core

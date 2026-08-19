@@ -471,6 +471,11 @@ message UpdateRecoveryWitnessRequest {
   // Populated only by the witness-as-holder baseline.
   // Baseline witnesses retain the complete replayable lineage.
   optional TaskSpec task_spec = 2;
+
+  // Patch 4M-CERT: delta update for normal Succession.  The witness unions
+  // independently confirmed holder certificates into its materialized
+  // RecoveryManifest instead of replacing the whole manifest per holder.
+  optional RecoveryHolderCertificate holder_certificate = 3;
 }
 
 message UpdateRecoveryWitnessReply {

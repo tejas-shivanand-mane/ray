@@ -70,9 +70,15 @@ def system_config(
     recovery_succession_target_holder_count value R.  The baseline is selected
     only by enable_recovery_witness_holder_baseline.
     """
+    certificate_admission = (
+        os.environ.get("RAY_RECOVERY_CERTIFICATE_ADMISSION", "0") == "1"
+        and method.recovery_enabled
+        and not method.baseline_enabled
+    )
     config: dict[str, Any] = {
         "enable_recovery_succession": method.recovery_enabled,
         "enable_recovery_witness_holder_baseline": method.baseline_enabled,
+        "enable_recovery_succession_certificate_admission": certificate_admission,
         "recovery_succession_witness_count": max(1, int(witness_count)),
         "enable_recovery_succession_profiling": bool(profiling_enabled),
         "recovery_succession_benchmark_ablation_mode": str(ablation_mode),
