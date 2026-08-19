@@ -1560,12 +1560,35 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
           }
 
           if (!stored) {
+            // A completed task may legitimately leave application scope while
+            // this baseline's R full-TaskSpec witness-holder writes are still
+            // in flight. Patch 4L cleanup then publishes a newer tombstone.
+            // Any witness that sees that tombstone first must reject this older
+            // install. That is cancellation/supersession, not a durability
+            // failure, because the object no longer needs protection.
+            //
+            // Keep every other failure fatal so this does NOT weaken the
+            // live-reference requirement that all R baseline holders store the
+            // full TaskSpec while the producer ObjectRef remains live.
+            if (newer_manifest.has_value() &&
+                newer_manifest->tombstoned()) {
+              manager->ApplyRecoveryTombstone(
+                  newer_manifest.value());
+
+              RAY_LOG(DEBUG)
+                  .WithField(task_id)
+                  << "Lazy witness-holder baseline install was superseded by "
+                     "a newer tombstone at generation "
+                  << newer_manifest->version().generation();
+              return;
+            }
+
             RAY_LOG(FATAL)
                 .WithField(task_id)
                 << "Lazy witness-holder baseline failed to install "
                 << "the full TaskSpec on every configured holder."
                 << (newer_manifest.has_value()
-                        ? " A newer witness manifest was observed."
+                        ? " A newer non-tombstone witness manifest was observed."
                         : "");
           }
 
