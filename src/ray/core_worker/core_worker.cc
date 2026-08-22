@@ -1704,9 +1704,13 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
       recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
   for (const rpc::TaskArg &arg : task_spec->args()) {
     if (arg.has_object_ref() && !arg.object_ref().object_id().empty()) {
-      const ObjectID object_id =
-          ObjectID::FromBinary(arg.object_ref().object_id());
-      TryPopulateRecoveryMetadataForObject(object_id, nullptr);
+      const rpc::ObjectReference &object_ref = arg.object_ref();
+      if (!RayConfig::instance().enable_recovery_succession_metadata_reuse() ||
+          !object_ref.has_recovery_metadata()) {
+        const ObjectID object_id =
+            ObjectID::FromBinary(object_ref.object_id());
+        TryPopulateRecoveryMetadataForObject(object_id, nullptr);
+      }
     }
 
     for (const rpc::ObjectReference &nested_ref :
@@ -1715,9 +1719,12 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
         continue;
       }
 
-      const ObjectID nested_id =
-          ObjectID::FromBinary(nested_ref.object_id());
-      TryPopulateRecoveryMetadataForObject(nested_id, nullptr);
+      if (!RayConfig::instance().enable_recovery_succession_metadata_reuse() ||
+          !nested_ref.has_recovery_metadata()) {
+        const ObjectID nested_id =
+            ObjectID::FromBinary(nested_ref.object_id());
+        TryPopulateRecoveryMetadataForObject(nested_id, nullptr);
+      }
     }
   }
 

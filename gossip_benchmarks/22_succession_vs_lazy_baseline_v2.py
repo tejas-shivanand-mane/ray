@@ -330,7 +330,10 @@ def start_cluster(
         _system_config=system_config(
             method,
             witness_count=witness_count,
-            profiling_enabled=method.recovery_enabled,
+            profiling_enabled=(
+    method.recovery_enabled
+    and os.environ.get("RAY_RECOVERY_PROFILING", "1") == "1"
+),
             ablation_mode=os.environ.get("RAY_RECOVERY_ABLATION_MODE", "full"),
         ),
         include_dashboard=False,

@@ -231,6 +231,12 @@ RAY_CONFIG(bool, enable_recovery_succession_certificate_admission, false)
 RAY_CONFIG(bool, enable_recovery_succession_task_manager_pin, false)
 
 
+/// Patch 4O-META-REUSE experimental optimization. When true, task construction
+/// reuses valid recovery metadata already carried by nested ObjectReferences
+/// instead of rebuilding the same metadata from manager state.
+RAY_CONFIG(bool, enable_recovery_succession_metadata_reuse, false)
+
+
 /// Enables lightweight profiling of recovery-succession holder formation.
 /// Intended only for experiments/debugging. When false, no timing or
 /// protobuf-size measurements are performed.

@@ -1600,9 +1600,28 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     rpc::RecoveryObjectMetadata legacy_expanded;
     const rpc::RecoveryObjectMetadata *source = nullptr;
 
-    if (BuildRecoveryMetadataLocked(object_id, &source_storage)) {
+    const bool reuse_carried_metadata =
+        RayConfig::instance().enable_recovery_succession_metadata_reuse();
+
+    if (reuse_carried_metadata && had_legacy_transport) {
+      if (!legacy_transport.task_id().empty() && legacy_transport.has_manifest()) {
+        source = &legacy_transport;
+      } else {
+        rpc::ObjectReference synthetic_ref;
+        synthetic_ref.set_object_id(object_id.Binary());
+        if (object_ref->has_owner_address()) {
+          synthetic_ref.mutable_owner_address()->CopyFrom(object_ref->owner_address());
+        }
+        synthetic_ref.mutable_recovery_metadata()->CopyFrom(legacy_transport);
+        if (ExpandTaskArgumentRecoveryMetadata(synthetic_ref, &legacy_expanded)) {
+          source = &legacy_expanded;
+        }
+      }
+    }
+
+    if (source == nullptr && BuildRecoveryMetadataLocked(object_id, &source_storage)) {
       source = &source_storage;
-    } else if (had_legacy_transport) {
+    } else if (source == nullptr && had_legacy_transport) {
       rpc::ObjectReference synthetic_ref;
       synthetic_ref.set_object_id(object_id.Binary());
       if (object_ref->has_owner_address()) {

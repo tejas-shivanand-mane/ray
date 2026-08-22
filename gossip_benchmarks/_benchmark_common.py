@@ -79,11 +79,16 @@ def system_config(
         os.environ.get("RAY_RECOVERY_TASKMANAGER_PIN", "0") == "1"
         and method.recovery_enabled
     )
+    metadata_reuse = (
+        os.environ.get("RAY_RECOVERY_METADATA_REUSE", "0") == "1"
+        and method.recovery_enabled
+    )
     config: dict[str, Any] = {
         "enable_recovery_succession": method.recovery_enabled,
         "enable_recovery_witness_holder_baseline": method.baseline_enabled,
         "enable_recovery_succession_certificate_admission": certificate_admission,
         "enable_recovery_succession_task_manager_pin": task_manager_pin,
+        "enable_recovery_succession_metadata_reuse": metadata_reuse,
         "recovery_succession_witness_count": max(1, int(witness_count)),
         "enable_recovery_succession_profiling": bool(profiling_enabled),
         "recovery_succession_benchmark_ablation_mode": str(ablation_mode),
