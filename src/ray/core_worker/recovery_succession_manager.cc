@@ -374,7 +374,9 @@ const std::string &RecoveryBenchmarkAblationMode() {
   static const std::string mode =
       RayConfig::instance().recovery_succession_benchmark_ablation_mode();
   RAY_CHECK(mode == "full" || mode == "no_piggyback" ||
-            mode == "metadata_only" || mode == "piggyback_no_candidate" ||
+            mode == "metadata_only" || mode == "metadata_no_receiver" ||
+            mode == "metadata_no_transport" ||
+            mode == "piggyback_no_candidate" ||
             mode == "candidate_rpc_no_admit")
       << "Unknown recovery_succession_benchmark_ablation_mode=" << mode;
   return mode;
@@ -1671,6 +1673,8 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     // recreates the pre-4F H1 transport while keeping full admission semantics.
     const std::string &patch4g_mode = RecoveryBenchmarkAblationMode();
     if (patch4g_mode == "metadata_only" ||
+        patch4g_mode == "metadata_no_receiver" ||
+        patch4g_mode == "metadata_no_transport" ||
         patch4g_mode == "candidate_rpc_no_admit" ||
         patch4g_mode == "no_piggyback" ||
         patch4g_mode == "full") {
@@ -1799,6 +1803,8 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
 
   const std::string &patch4g_mode = RecoveryBenchmarkAblationMode();
   if (patch4g_mode == "metadata_only" ||
+      patch4g_mode == "metadata_no_receiver" ||
+      patch4g_mode == "metadata_no_transport" ||
       patch4g_mode == "piggyback_no_candidate") {
     return;
   }

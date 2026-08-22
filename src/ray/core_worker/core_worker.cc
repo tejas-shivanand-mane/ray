@@ -200,7 +200,9 @@ const std::string &RecoveryBenchmarkAblationMode() {
   static const std::string mode =
       RayConfig::instance().recovery_succession_benchmark_ablation_mode();
   RAY_CHECK(mode == "full" || mode == "no_piggyback" ||
-            mode == "metadata_only" || mode == "piggyback_no_candidate" ||
+            mode == "metadata_only" || mode == "metadata_no_receiver" ||
+            mode == "metadata_no_transport" ||
+            mode == "piggyback_no_candidate" ||
             mode == "candidate_rpc_no_admit")
       << "Unknown recovery_succession_benchmark_ablation_mode=" << mode;
   return mode;
@@ -3069,6 +3071,24 @@ void CoreWorker::BuildCommonTaskSpec(
       !args.empty()) {
     EnsureRecoverySuccessionForTaskArguments(builder.MutableMessage());
 
+    if (RecoveryBenchmarkAblationMode() == "metadata_no_transport") {
+      rpc::TaskSpec *outgoing_task_spec = builder.MutableMessage();
+
+      // Patch 4I primary sidecars.
+      outgoing_task_spec->clear_recovery_argument_metadata();
+
+      // Backward-compatible embedded metadata paths, if any were populated.
+      for (rpc::TaskArg &arg : *outgoing_task_spec->mutable_args()) {
+        if (arg.has_object_ref()) {
+          arg.mutable_object_ref()->clear_recovery_metadata();
+        }
+        for (rpc::ObjectReference &nested_ref :
+             *arg.mutable_nested_inlined_refs()) {
+          nested_ref.clear_recovery_metadata();
+        }
+      }
+    }
+
     absl::flat_hash_map<TaskID, rpc::TaskSpec> owner_recovery_task_specs;
     const std::string &recovery_mode = RecoveryBenchmarkAblationMode();
     // Patch 4K: normal/full mode uses ordinary async holder installation.
@@ -4964,6 +4984,8 @@ void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
 
   if (recovery_succession_enabled_ &&
       recovery_succession_manager_ != nullptr &&
+      RecoveryBenchmarkAblationMode() != "metadata_no_receiver" &&
+      RecoveryBenchmarkAblationMode() != "metadata_no_transport" &&
       RecoverySuccessionManager::CarriesRecoveryMetadata(
           request.task_spec())) {
     auto candidate_reports =

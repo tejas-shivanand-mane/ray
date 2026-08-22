@@ -241,7 +241,9 @@ RAY_CONFIG(bool, enable_recovery_succession_profiling, false)
 /// Supported values:
 ///   full                    - ordinary Patch-4F behavior
 ///   no_piggyback            - full admission, but H1 uses InstallRecoveryHolder
-///   metadata_only           - compact metadata propagation; no TaskSpec piggyback/report
+///   metadata_only           - compact metadata propagation + receiver processing; no candidate report
+///   metadata_no_receiver    - compact metadata transported, but receiver recovery processing is skipped
+///   metadata_no_transport   - sender builds metadata, then strips it before TaskSpec transport
 ///   piggyback_no_candidate  - metadata + H1 TaskSpec sidecar; no candidate report
 ///   candidate_rpc_no_admit  - metadata + candidate RPC; owner replies NO_SLOT
 RAY_CONFIG(std::string, recovery_succession_benchmark_ablation_mode, "full")
