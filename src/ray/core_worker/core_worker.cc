@@ -3227,6 +3227,12 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
       recovery_succession_manager_ != nullptr &&
       !task_spec.GetMessage().has_recovery_manifest() &&
       RecoverySuccessionManager::IsEligibleTask(task_spec.GetMessage())) {
+    if (RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
+      RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
+          << "Eligible recovery task disappeared before TaskManager pin: "
+          << task_spec.TaskId();
+    }
+
     recovery_succession_manager_->RetainOwnerTaskSpecForLazyRecovery(
         task_spec, returned_refs);
 
@@ -3238,8 +3244,17 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
 
       const TaskID deleted_task_id = deleted_object_id.TaskId();
 
-      if (!recovery_succession_manager_->HandleOwnerReturnRefDeleted(
-              deleted_object_id)) {
+      bool final_return_deleted = false;
+      const bool should_tombstone =
+          recovery_succession_manager_->HandleOwnerReturnRefDeleted(
+              deleted_object_id, &final_return_deleted);
+
+      if (final_return_deleted &&
+          RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
+        task_manager_->ReleaseTaskForRecoverySuccession(deleted_task_id);
+      }
+
+      if (!should_tombstone) {
         return;
       }
 

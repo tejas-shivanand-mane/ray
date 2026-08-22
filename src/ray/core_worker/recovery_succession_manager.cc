@@ -544,20 +544,31 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
   }
 
   const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
-
-  const auto retained_copy_start = std::chrono::steady_clock::now();
+  const bool task_manager_pin =
+      RayConfig::instance().enable_recovery_succession_task_manager_pin();
 
   OwnerRetainedTaskState retained;
-  retained.task_spec.CopyFrom(task_proto);
-  ClearFirstHolderTaskSpecPiggybacks(&retained.task_spec);
-  retained.task_spec_bytes =
-      static_cast<uint64_t>(retained.task_spec.ByteSizeLong());
+  uint64_t retained_copy_ns = 0;
 
-  const auto retained_copy_end = std::chrono::steady_clock::now();
-  const uint64_t retained_copy_ns = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          retained_copy_end - retained_copy_start)
-          .count());
+  if (task_manager_pin) {
+    // TaskManager already owns the TaskSpec. Keep only lifetime bookkeeping
+    // here. ByteSizeLong remains for apples-to-apples benchmark accounting.
+    retained.task_spec_bytes =
+        static_cast<uint64_t>(task_proto.ByteSizeLong());
+  } else {
+    const auto retained_copy_start = std::chrono::steady_clock::now();
+
+    retained.task_spec.CopyFrom(task_proto);
+    ClearFirstHolderTaskSpecPiggybacks(&retained.task_spec);
+    retained.task_spec_bytes =
+        static_cast<uint64_t>(retained.task_spec.ByteSizeLong());
+
+    const auto retained_copy_end = std::chrono::steady_clock::now();
+    retained_copy_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            retained_copy_end - retained_copy_start)
+            .count());
+  }
 
   for (const rpc::ObjectReference &returned_ref : returned_refs) {
     if (returned_ref.object_id().size() != ObjectID::Size()) {
@@ -586,6 +597,10 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
       profile_.owner_retained_task_spec_bytes_current +=
           retained.task_spec_bytes;
       profile_.owner_retained_task_spec_copy_time_ns += retained_copy_ns;
+
+      if (task_manager_pin) {
+        ++profile_.owner_lazy_task_spec_copies_avoided;
+      }
 
       if (profile_.owner_retained_task_specs_current >
           profile_.owner_retained_task_specs_peak) {
@@ -620,7 +635,9 @@ bool RecoverySuccessionManager::GetRetainedOwnerTaskSpec(
 
   const auto it = owner_retained_tasks_.find(task_id);
   if (it == owner_retained_tasks_.end() ||
-      it->second.live_return_ids.empty()) {
+      it->second.live_return_ids.empty() ||
+      it->second.task_spec.task_id().empty()) {
+    // In 4N-PIN mode the dormant TaskSpec lives in TaskManager.
     return false;
   }
 
@@ -641,7 +658,12 @@ bool RecoverySuccessionManager::OwnerTaskHasLiveReturns(
 }
 
 bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
-    const ObjectID &object_id) {
+    const ObjectID &object_id,
+    bool *final_return_deleted) {
+  if (final_return_deleted != nullptr) {
+    *final_return_deleted = false;
+  }
+
   if (object_id.IsNil()) {
     return false;
   }
@@ -663,6 +685,10 @@ bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
     return false;
   }
 
+  if (final_return_deleted != nullptr) {
+    *final_return_deleted = true;
+  }
+
   const uint64_t retained_bytes = retained_it->second.task_spec_bytes;
 
   if (profiling_enabled_) {
@@ -675,8 +701,6 @@ bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
     if (profile_.owner_retained_task_spec_bytes_current >= retained_bytes) {
       profile_.owner_retained_task_spec_bytes_current -= retained_bytes;
     } else {
-      // Profiling resets reconstruct current state, so this should only be a
-      // defensive fallback rather than a normal path.
       profile_.owner_retained_task_spec_bytes_current = 0;
     }
   }
@@ -1089,7 +1113,8 @@ RecoverySuccessionManager::PrepareHolderAdmission(
       // while the application still owns a return ObjectRef.
       const auto retained_it = owner_retained_tasks_.find(task_id);
       if (retained_it != owner_retained_tasks_.end() &&
-          !retained_it->second.live_return_ids.empty()) {
+          !retained_it->second.live_return_ids.empty() &&
+          !retained_it->second.task_spec.task_id().empty()) {
         lineage_task_spec = &retained_it->second.task_spec;
       }
     }
@@ -1944,7 +1969,8 @@ RecoverySuccessionManager::PrepareTaskReplay(
     // Patch 4L: owner replay may outlive TaskManager's ordinary lineage entry.
     const auto retained_it = owner_retained_tasks_.find(task_id);
     if (retained_it != owner_retained_tasks_.end() &&
-        !retained_it->second.live_return_ids.empty()) {
+        !retained_it->second.live_return_ids.empty() &&
+        !retained_it->second.task_spec.task_id().empty()) {
       lineage_task_spec = &retained_it->second.task_spec;
     }
   }

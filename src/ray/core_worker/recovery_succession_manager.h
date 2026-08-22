@@ -285,7 +285,10 @@ class RecoverySuccessionManager {
 
   /// Records actual ObjectRef deletion. Returns true iff this was the final
   /// owner return and an activated recovery task should now be tombstoned.
-  bool HandleOwnerReturnRefDeleted(const ObjectID &object_id);
+  /// If final_return_deleted is non-null, it is set when this deletion removed
+  /// the final tracked owner return regardless of whether recovery was activated.
+  bool HandleOwnerReturnRefDeleted(const ObjectID &object_id,
+                                   bool *final_return_deleted = nullptr);
 
   /// Records a received TaskSpec and returns candidate reports that should be
   /// sent to the coordinators of the received task and its dependencies.
@@ -435,6 +438,8 @@ class RecoverySuccessionManager {
   };
 
   struct OwnerRetainedTaskState {
+    // Legacy Patch-4L mode stores the duplicate TaskSpec here. In 4N-PIN mode
+    // this remains empty because TaskManager owns the sole dormant recipe.
     rpc::TaskSpec task_spec;
     uint64_t task_spec_bytes = 0;
     absl::flat_hash_set<ObjectID> live_return_ids;

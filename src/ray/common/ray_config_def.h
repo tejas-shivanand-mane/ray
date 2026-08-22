@@ -223,6 +223,14 @@ RAY_CONFIG(uint32_t, recovery_succession_witness_count, 2)
 RAY_CONFIG(bool, enable_recovery_succession_certificate_admission, false)
 
 
+/// Patch 4N-PIN experimental mode. When true, an eligible owner's existing
+/// TaskManager entry is retained while any static return ObjectRef is live,
+/// avoiding Patch-4L's eager second TaskSpec copy. Normal Ray dependency
+/// lineage is released exactly as before; only the TaskSpec-bearing TaskEntry
+/// remains pinned for lazy Recovery Succession activation.
+RAY_CONFIG(bool, enable_recovery_succession_task_manager_pin, false)
+
+
 /// Enables lightweight profiling of recovery-succession holder formation.
 /// Intended only for experiments/debugging. When false, no timing or
 /// protobuf-size measurements are performed.

@@ -75,10 +75,15 @@ def system_config(
         and method.recovery_enabled
         and not method.baseline_enabled
     )
+    task_manager_pin = (
+        os.environ.get("RAY_RECOVERY_TASKMANAGER_PIN", "0") == "1"
+        and method.recovery_enabled
+    )
     config: dict[str, Any] = {
         "enable_recovery_succession": method.recovery_enabled,
         "enable_recovery_witness_holder_baseline": method.baseline_enabled,
         "enable_recovery_succession_certificate_admission": certificate_admission,
+        "enable_recovery_succession_task_manager_pin": task_manager_pin,
         "recovery_succession_witness_count": max(1, int(witness_count)),
         "enable_recovery_succession_profiling": bool(profiling_enabled),
         "recovery_succession_benchmark_ablation_mode": str(ablation_mode),

@@ -1375,8 +1375,15 @@ void TaskManager::CompletePendingTask(const TaskID &task_id,
         min_lineage_bytes_to_evict =
             total_lineage_footprint_bytes_ - (max_lineage_bytes_ / 2);
       }
-    } else {
+    } else if (!it->second.recovery_succession_pinned_) {
       submissible_tasks_.erase(it);
+    } else {
+      // Patch 4N-PIN: the result does not need ordinary Ray lineage, but a
+      // live owner ObjectRef still requires the producer recipe for possible
+      // lazy Recovery Succession activation. release_lineage intentionally
+      // remains true, so dependency-lineage accounting is unchanged.
+      RAY_LOG(DEBUG).WithField(task_id)
+          << "Keeping finished TaskSpec for lazy Recovery Succession";
     }
   }
 
@@ -1794,9 +1801,16 @@ int64_t TaskManager::RemoveLineageReference(const ObjectID &object_id,
     }
 
     total_lineage_footprint_bytes_ -= it->second.lineage_footprint_bytes_;
+    it->second.lineage_footprint_bytes_ = 0;
 
-    // The task has finished and none of its returns are in scope.
-    submissible_tasks_.erase(it);
+    // Normal Ray lineage is now gone. Patch 4N may still need the TaskSpec
+    // solely because the owner-side ObjectRef remains live.
+    if (!it->second.recovery_succession_pinned_) {
+      submissible_tasks_.erase(it);
+    } else {
+      RAY_LOG(DEBUG).WithField(task_id)
+          << "Normal lineage released; retaining TaskSpec for lazy recovery";
+    }
   }
 
   return total_lineage_footprint_bytes_ - total_lineage_footprint_bytes_prev;
@@ -1976,6 +1990,39 @@ std::optional<TaskSpecification> TaskManager::GetTaskSpec(const TaskID &task_id)
     return std::optional<TaskSpecification>();
   }
   return it->second.spec_;
+}
+
+bool TaskManager::PinTaskForRecoverySuccession(const TaskID &task_id) {
+  absl::MutexLock lock(&mu_);
+  auto it = submissible_tasks_.find(task_id);
+  if (it == submissible_tasks_.end()) {
+    return false;
+  }
+
+  it->second.recovery_succession_pinned_ = true;
+  return true;
+}
+
+void TaskManager::ReleaseTaskForRecoverySuccession(const TaskID &task_id) {
+  absl::MutexLock lock(&mu_);
+  auto it = submissible_tasks_.find(task_id);
+  if (it == submissible_tasks_.end()) {
+    return;
+  }
+
+  it->second.recovery_succession_pinned_ = false;
+
+  // Two valid orderings exist:
+  // 1. Normal Ray lineage disappeared first. RemoveLineageReference retained
+  //    this TaskEntry only because the recovery pin was set. Erase it now.
+  // 2. The recovery/ObjectRef pin disappeared first. If normal lineage still
+  //    exists, leave the entry alone; RemoveLineageReference erases it later.
+  if (!it->second.IsPending() &&
+      it->second.reconstructable_return_ids_.empty()) {
+    RAY_LOG(DEBUG).WithField(task_id)
+        << "Releasing dormant Recovery Succession TaskManager pin";
+    submissible_tasks_.erase(it);
+  }
 }
 
 std::vector<TaskID> TaskManager::GetPendingChildrenTasks(

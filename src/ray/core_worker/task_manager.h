@@ -575,6 +575,15 @@ class TaskManager : public TaskManagerInterface {
 
   std::optional<TaskSpecification> GetTaskSpec(const TaskID &task_id) const override;
 
+  /// Patch 4N-PIN: retain only this TaskManager entry for lazy Recovery
+  /// Succession. This does not retain normal dependency-lineage references.
+  /// Returns false if the task no longer exists.
+  bool PinTaskForRecoverySuccession(const TaskID &task_id);
+
+  /// Releases the Patch-4N recovery pin. If normal Ray lineage is already gone
+  /// and the task is finished, the dormant TaskEntry is erased immediately.
+  void ReleaseTaskForRecoverySuccession(const TaskID &task_id);
+
   /// Return specs for pending children tasks of the given parent task.
   std::vector<TaskID> GetPendingChildrenTasks(const TaskID &parent_task_id) const;
 
@@ -744,6 +753,11 @@ class TaskManager : public TaskManagerInterface {
     // lineage. We cache this because the task spec protobuf can mutate
     // out-of-band.
     int64_t lineage_footprint_bytes_ = 0;
+
+    // Patch 4N-PIN. This protects only the TaskEntry/spec_ from erasure.
+    // Ordinary Ray dependency lineage is still released normally.
+    bool recovery_succession_pinned_ = false;
+
     // Number of times this task successfully completed execution so far.
     int num_successful_executions_ = 0;
 
