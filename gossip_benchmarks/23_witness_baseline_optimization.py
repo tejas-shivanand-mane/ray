@@ -690,7 +690,15 @@ def run_parent(args: argparse.Namespace) -> None:
         rows = [dict(row) for row in read_csv(runs_path)]
 
     completed = {case_key(row) for row in rows}
-    variants = variants_for_study(args.study)
+    variants = (
+        list(args.variants)
+        if args.variants
+        else variants_for_study(args.study)
+    )
+    known_variants = set(variants_for_study("all"))
+    unknown = [variant for variant in variants if variant not in known_variants]
+    if unknown:
+        raise ValueError(f"unknown --variants entries: {unknown}")
 
     cases = [
         (variant, padding, repetition)
@@ -802,6 +810,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--study",
         choices=["compare", "ablation", "all"],
         default="compare",
+    )
+    p.add_argument(
+        "--variants",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional explicit variant subset. Examples: "
+            "all_optimized all_minus_serialize_once. "
+            "When supplied, this overrides --study's variant list."
+        ),
     )
     p.add_argument(
         "--output-dir",
