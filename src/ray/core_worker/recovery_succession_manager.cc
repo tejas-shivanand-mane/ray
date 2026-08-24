@@ -25,7 +25,7 @@ namespace ray::core {
 
 // Patch 4D: pipelined holder admission.
 // Patch 4F: first-holder TaskSpec piggyback.
-// Patch 4G: hot-path profiling and B1 ablations.
+// Patch 4G: hot-path profiling.
 // Patch 4H: compact task-argument recovery metadata.
 // Patch 4I: TaskSpec-level recovery argument sidecar.
 // Patch 4J: task-centric recovery state.
@@ -368,19 +368,6 @@ bool ExpandTaskSidecarRecoveryMetadata(
   }
   synthetic_ref.mutable_recovery_metadata()->CopyFrom(entry.recovery_metadata());
   return ExpandTaskArgumentRecoveryMetadata(synthetic_ref, expanded);
-}
-
-const std::string &RecoveryBenchmarkAblationMode() {
-  static const std::string mode =
-      RayConfig::instance().recovery_succession_benchmark_ablation_mode();
-  RAY_CHECK(mode == "full" || mode == "no_piggyback" ||
-            mode == "activation_only" || mode == "dormant_only" ||
-            mode == "metadata_only" || mode == "metadata_no_receiver" ||
-            mode == "metadata_no_transport" ||
-            mode == "piggyback_no_candidate" ||
-            mode == "candidate_rpc_no_admit")
-      << "Unknown recovery_succession_benchmark_ablation_mode=" << mode;
-  return mode;
 }
 
 }  // namespace
@@ -1561,8 +1548,7 @@ bool RecoverySuccessionManager::PopulateRecoveryMetadata(
 }
 
 void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
-    rpc::TaskSpec *task_spec,
-    const absl::flat_hash_map<TaskID, rpc::TaskSpec> *owner_task_specs) {
+    rpc::TaskSpec *task_spec) {
   if (task_spec == nullptr) {
     return;
   }
@@ -1574,7 +1560,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
   task_spec->clear_recovery_argument_metadata();
   absl::flat_hash_set<ObjectID> attached_object_ids;
 
-  auto populate_one = [this, task_spec, &attached_object_ids, owner_task_specs](
+  auto populate_one = [this, task_spec, &attached_object_ids](
                           const ObjectID &object_id,
                           rpc::ObjectReference *object_ref) {
     if (object_ref == nullptr || object_id.IsNil()) {
@@ -1601,28 +1587,9 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     rpc::RecoveryObjectMetadata legacy_expanded;
     const rpc::RecoveryObjectMetadata *source = nullptr;
 
-    const bool reuse_carried_metadata =
-        RayConfig::instance().enable_recovery_succession_metadata_reuse();
-
-    if (reuse_carried_metadata && had_legacy_transport) {
-      if (!legacy_transport.task_id().empty() && legacy_transport.has_manifest()) {
-        source = &legacy_transport;
-      } else {
-        rpc::ObjectReference synthetic_ref;
-        synthetic_ref.set_object_id(object_id.Binary());
-        if (object_ref->has_owner_address()) {
-          synthetic_ref.mutable_owner_address()->CopyFrom(object_ref->owner_address());
-        }
-        synthetic_ref.mutable_recovery_metadata()->CopyFrom(legacy_transport);
-        if (ExpandTaskArgumentRecoveryMetadata(synthetic_ref, &legacy_expanded)) {
-          source = &legacy_expanded;
-        }
-      }
-    }
-
-    if (source == nullptr && BuildRecoveryMetadataLocked(object_id, &source_storage)) {
+    if (BuildRecoveryMetadataLocked(object_id, &source_storage)) {
       source = &source_storage;
-    } else if (source == nullptr && had_legacy_transport) {
+    } else if (had_legacy_transport) {
       rpc::ObjectReference synthetic_ref;
       synthetic_ref.set_object_id(object_id.Binary());
       if (object_ref->has_owner_address()) {
@@ -1683,104 +1650,6 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
       }
     }
 
-    // Keep the witness-as-holder baseline unchanged.
-    if (RayConfig::instance().enable_recovery_witness_holder_baseline()) {
-      return;
-    }
-
-    // Patch 4G benchmark ablations that isolate compact metadata and/or the
-    // candidate RPC must not put the full TaskSpec on PushTask. no_piggyback
-    // recreates the pre-4F H1 transport while keeping full admission semantics.
-    const std::string &patch4g_mode = RecoveryBenchmarkAblationMode();
-    if (patch4g_mode == "metadata_only" ||
-        patch4g_mode == "metadata_no_receiver" ||
-        patch4g_mode == "metadata_no_transport" ||
-        patch4g_mode == "candidate_rpc_no_admit" ||
-        patch4g_mode == "no_piggyback" ||
-        patch4g_mode == "full") {
-      return;
-    }
-
-    const TaskID producer_task_id = TaskID::FromBinary(source->task_id());
-    const auto task_it = task_states_.find(producer_task_id);
-    if (task_it == task_states_.end()) {
-      return;
-    }
-
-    TaskRecoveryState &state = task_it->second;
-
-    // Claim exactly one full-lineage piggyback while the committed succession
-    // is still [A]. Later holders use the ordinary Patch-4E install path.
-    if (state.first_holder_piggyback_sent ||
-        !state.manifest_committed ||
-        state.manifest.tombstoned() ||
-        state.manifest.frozen() ||
-        state.manifest.succession_size() != 1 ||
-        state.manifest.task_id() != source->task_id()) {
-      return;
-    }
-
-    const rpc::RecoveryHolder *owner = FindHolderByRank(state.manifest, 0);
-    if (owner == nullptr || !SameWorker(owner->address(), self_address_)) {
-      return;
-    }
-
-    const rpc::TaskSpec *lineage_task_spec = nullptr;
-    if (state.task_spec.has_value()) {
-      lineage_task_spec = &state.task_spec.value();
-    } else if (owner_task_specs != nullptr) {
-      const auto lineage_it = owner_task_specs->find(producer_task_id);
-      if (lineage_it != owner_task_specs->end()) {
-        lineage_task_spec = &lineage_it->second;
-      }
-    }
-
-    if (lineage_task_spec == nullptr ||
-        !IsEligibleTask(*lineage_task_spec) ||
-        lineage_task_spec->task_id() != state.manifest.task_id()) {
-      return;
-    }
-
-    // Pair the piggybacked lineage with the manager's exact current manifest.
-    // If compact encoding cannot faithfully reproduce rank 0, retain the old
-    // full-manifest fallback rather than weakening recovery semantics.
-    if (!entry->has_owner_address() ||
-        !WriteCompactTaskArgumentRecoveryMetadata(
-            *source, state.manifest, entry->owner_address(), out)) {
-      out->CopyFrom(*source);
-      out->mutable_manifest()->CopyFrom(state.manifest);
-      out->clear_first_holder_task_spec();
-      out->clear_compact_manifest();
-    }
-
-    const auto serialize_start = std::chrono::steady_clock::now();
-    std::string serialized_task_spec;
-    rpc::TaskSpec piggyback_lineage;
-    piggyback_lineage.CopyFrom(*lineage_task_spec);
-    ClearFirstHolderTaskSpecPiggybacks(&piggyback_lineage);
-    piggyback_lineage.mutable_recovery_manifest()->CopyFrom(state.manifest);
-    const bool ok = piggyback_lineage.SerializeToString(&serialized_task_spec);
-    const auto serialize_end = std::chrono::steady_clock::now();
-
-    if (!ok || serialized_task_spec.empty()) {
-      return;
-    }
-
-    out->set_first_holder_task_spec(serialized_task_spec);
-    state.first_holder_piggyback_sent = true;
-
-    if (profiling_enabled_) {
-      ++profile_.first_holder_piggyback_copies_sent;
-      profile_.first_holder_piggyback_bytes_sent +=
-          static_cast<uint64_t>(serialized_task_spec.size());
-      profile_.task_spec_bytes_sent +=
-          static_cast<uint64_t>(serialized_task_spec.size());
-      profile_.first_holder_piggyback_serialize_time_ns +=
-          static_cast<uint64_t>(
-              std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  serialize_end - serialize_start)
-                  .count());
-    }
   };
 
   for (rpc::TaskArg &arg : *task_spec->mutable_args()) {
@@ -1820,14 +1689,6 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
           static_cast<uint64_t>(reports->size() - patch4g_reports_before);
     }
   };
-
-  const std::string &patch4g_mode = RecoveryBenchmarkAblationMode();
-  if (patch4g_mode == "metadata_only" ||
-      patch4g_mode == "metadata_no_receiver" ||
-      patch4g_mode == "metadata_no_transport" ||
-      patch4g_mode == "piggyback_no_candidate") {
-    return;
-  }
 
   if (RayConfig::instance().enable_recovery_succession() &&
       RayConfig::instance().enable_recovery_witness_holder_baseline()) {

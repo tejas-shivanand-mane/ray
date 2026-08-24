@@ -353,12 +353,6 @@ class ReferenceCounterInterface {
   virtual bool AddObjectRefDeletedCallback(
       const ObjectID &object_id, std::function<void(const ObjectID &)> callback) = 0;
 
-  /// Install one process-wide callback invoked when an owned Reference entry
-  /// is actually erased. Default no-op keeps alternate/test implementations
-  /// source compatible.
-  virtual void SetOwnedObjectRefDeletedCallback(
-      const std::function<void(const ObjectID &)> &) {}
-
   /// So we call PublishRefRemovedInternal when we are no longer borrowing this object
   /// (when our ref count goes to 0).
   ///

@@ -34,7 +34,7 @@ namespace ray::core {
 
 /// Patch 4D: pipelined holder admission.
 /// Patch 4F: first-holder TaskSpec piggyback.
-/// Patch 4G: hot-path profiling and B1 ablations.
+/// Patch 4G: hot-path profiling.
 /// Patch 4H: compact task-argument recovery metadata.
 /// Patch 4I: TaskSpec-level recovery argument sidecar.
 /// Patch 4J: task-centric recovery state and on-demand owner lineage.
@@ -333,11 +333,7 @@ class RecoverySuccessionManager {
   bool HasRecoveryMetadata(const ObjectID &object_id) const;
 
   /// Adds recovery metadata to direct and nested ObjectRef arguments.
-  /// Patch 4F may atomically claim the one-shot H1 TaskSpec piggyback, so this
-  /// method intentionally mutates manager state.
-  void PopulateTaskArgumentMetadata(
-      rpc::TaskSpec *task_spec,
-      const absl::flat_hash_map<TaskID, rpc::TaskSpec> *owner_task_specs = nullptr);
+  void PopulateTaskArgumentMetadata(rpc::TaskSpec *task_spec);
 
   struct BorrowedObjectRecoveryPlan {
     TaskID task_id;

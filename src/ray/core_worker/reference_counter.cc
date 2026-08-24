@@ -895,10 +895,6 @@ void ReferenceCounter::EraseReference(ReferenceTable::iterator it) {
       UpdateOwnedObjectCounters(it->first, it->second, /*decrement=*/true);
     }
   }
-  if (it->second.owned_by_us_ && on_owned_object_ref_deleted_) {
-    on_owned_object_ref_deleted_(it->first);
-  }
-
   for (const auto &callback : it->second.object_ref_deleted_callbacks) {
     callback(it->first);
   }
@@ -1551,13 +1547,6 @@ void ReferenceCounter::SetReleaseLineageCallback(
     const LineageReleasedCallback &callback) {
   RAY_CHECK(on_lineage_released_ == nullptr);
   on_lineage_released_ = callback;
-}
-
-void ReferenceCounter::SetOwnedObjectRefDeletedCallback(
-    const std::function<void(const ObjectID &)> &callback) {
-  absl::MutexLock lock(&mutex_);
-  RAY_CHECK(on_owned_object_ref_deleted_ == nullptr);
-  on_owned_object_ref_deleted_ = callback;
 }
 
 bool ReferenceCounter::AddObjectLocation(const ObjectID &object_id,

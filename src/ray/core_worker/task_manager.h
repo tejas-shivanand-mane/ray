@@ -580,13 +580,6 @@ class TaskManager : public TaskManagerInterface {
   /// Returns false if the task no longer exists.
   bool PinTaskForRecoverySuccession(const TaskID &task_id);
 
-  /// Patch 4Q: called when an owned static return Reference is truly erased.
-  /// Returns true exactly when this was the final tracked live return.
-  bool ReleaseRecoverySuccessionReturn(const ObjectID &object_id);
-
-  /// Whether this TaskEntry is retained solely/partly for live recovery returns.
-  bool RecoverySuccessionTaskHasLiveReturns(const TaskID &task_id) const;
-
   /// Releases the Patch-4N recovery pin. If normal Ray lineage is already gone
   /// and the task is finished, the dormant TaskEntry is erased immediately.
   void ReleaseTaskForRecoverySuccession(const TaskID &task_id);
@@ -764,10 +757,6 @@ class TaskManager : public TaskManagerInterface {
     // Patch 4N-PIN. This protects only the TaskEntry/spec_ from erasure.
     // Ordinary Ray dependency lineage is still released normally.
     bool recovery_succession_pinned_ = false;
-
-    // Patch 4Q. Counts live static return ObjectRefs, including direct/in-memory
-    // returns that are not present in reconstructable_return_ids_.
-    size_t recovery_succession_live_return_count_ = 0;
 
     // Number of times this task successfully completed execution so far.
     int num_successful_executions_ = 0;

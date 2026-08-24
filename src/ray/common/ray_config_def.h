@@ -231,49 +231,10 @@ RAY_CONFIG(bool, enable_recovery_succession_certificate_admission, false)
 RAY_CONFIG(bool, enable_recovery_succession_task_manager_pin, false)
 
 
-/// Patch 4O-META-REUSE experimental optimization. When true, task construction
-/// reuses valid recovery metadata already carried by nested ObjectReferences
-/// instead of rebuilding the same metadata from manager state.
-RAY_CONFIG(bool, enable_recovery_succession_metadata_reuse, false)
-
-
-/// Patch 4P experimental diagnostic. When true, CoreWorker::GetObjectRefs()
-/// does not eagerly materialize recovery metadata. Task submission still
-/// activates recovery and constructs the Patch-4I TaskSpec sidecar later.
-RAY_CONFIG(bool, enable_recovery_succession_defer_objectref_metadata, false)
-
-
-/// Patch 4Q-TM-LIFETIME. Keep the existing TaskManager TaskEntry/spec
-/// while any static return ObjectRef is live. Lifetime ends through one
-/// ReferenceCounter-wide true-deletion hook instead of per-return callbacks.
-/// Default false so Patch 4L remains the control behavior.
-RAY_CONFIG(bool, enable_recovery_succession_task_manager_lifetime, false)
-
-/// BENCHMARK ONLY. Intentionally removes all owner-side dormant lifetime
-/// retention. This breaks late-borrow correctness and must never be enabled
-/// outside the dormant_only diagnostic experiment.
-RAY_CONFIG(bool,
-           enable_recovery_succession_skip_owner_lifetime_for_benchmark,
-           false)
-
 /// Enables lightweight profiling of recovery-succession holder formation.
 /// Intended only for experiments/debugging. When false, no timing or
 /// protobuf-size measurements are performed.
 RAY_CONFIG(bool, enable_recovery_succession_profiling, false)
-
-/// Patch 4G BENCHMARK ONLY. Selects a diagnostic B1 ablation. Production and
-/// correctness runs must use the default "full" mode.
-/// Supported values:
-///   full                    - ordinary Patch-4F behavior
-///   activation_only         - lazy activation/state init only; no TaskSpec recovery sidecar
-///   dormant_only            - recovery enabled, but no downstream activation/metadata
-///   no_piggyback            - full admission, but H1 uses InstallRecoveryHolder
-///   metadata_only           - compact metadata propagation + receiver processing; no candidate report
-///   metadata_no_receiver    - compact metadata transported, but receiver recovery processing is skipped
-///   metadata_no_transport   - sender builds metadata, then strips it before TaskSpec transport
-///   piggyback_no_candidate  - metadata + H1 TaskSpec sidecar; no candidate report
-///   candidate_rpc_no_admit  - metadata + candidate RPC; owner replies NO_SLOT
-RAY_CONFIG(std::string, recovery_succession_benchmark_ablation_mode, "full")
 
 /// TEST ONLY: deterministically expose the crash window after a compact
 /// witness has acknowledged the proposed holder manifest but before the

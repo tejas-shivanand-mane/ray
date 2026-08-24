@@ -64,7 +64,7 @@ namespace ray::core {
 // Patch 4E: batched recovery control RPCs.
 // Patch 4E-1: first-holder candidate-report fast path.
 // Patch 4F: first-holder TaskSpec piggyback.
-// Patch 4G: hot-path profiling and B1 ablations.
+// Patch 4G: hot-path profiling.
 // Patch 4H: compact task-argument recovery metadata.
 // Patch 4I: TaskSpec-level recovery argument sidecar.
 // Patch 4J: task-centric recovery state.
@@ -194,19 +194,6 @@ uint64_t RecoveryProfileNowNs() {
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
           .count());
-}
-
-const std::string &RecoveryBenchmarkAblationMode() {
-  static const std::string mode =
-      RayConfig::instance().recovery_succession_benchmark_ablation_mode();
-  RAY_CHECK(mode == "full" || mode == "no_piggyback" ||
-            mode == "activation_only" || mode == "dormant_only" ||
-            mode == "metadata_only" || mode == "metadata_no_receiver" ||
-            mode == "metadata_no_transport" ||
-            mode == "piggyback_no_candidate" ||
-            mode == "candidate_rpc_no_admit")
-      << "Unknown recovery_succession_benchmark_ablation_mode=" << mode;
-  return mode;
 }
 
 int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
@@ -568,50 +555,6 @@ CoreWorker::CoreWorker(
     recovery_succession_manager_ =
         std::make_shared<RecoverySuccessionManager>(rpc_address_);
 
-    // Patch 4Q: one process-wide true-deletion hook replaces per-return
-    // AddObjectRefDeletedCallback registrations.
-    reference_counter_->SetOwnedObjectRefDeletedCallback(
-        [this](const ObjectID &deleted_object_id) {
-          if (!recovery_succession_enabled_ ||
-              recovery_succession_manager_ == nullptr ||
-              !RayConfig::instance()
-                   .enable_recovery_succession_task_manager_lifetime()) {
-            return;
-          }
-
-          if (!task_manager_->ReleaseRecoverySuccessionReturn(
-                  deleted_object_id)) {
-            return;
-          }
-
-          const TaskID task_id = deleted_object_id.TaskId();
-          io_service_.post(
-              [this, task_id] {
-                if (!recovery_succession_enabled_ ||
-                    recovery_succession_manager_ == nullptr) {
-                  return;
-                }
-
-                // Unactivated dormant tasks have no manager recovery state, so
-                // BuildTombstoneForTask simply returns nullopt.
-                auto tombstone =
-                    recovery_succession_manager_->BuildTombstoneForTask(task_id);
-                if (!tombstone.has_value()) {
-                  return;
-                }
-
-                if (!recovery_tombstones_in_flight_.insert(task_id).second) {
-                  return;
-                }
-
-                RAY_LOG(INFO).WithField(task_id)
-                    << "TaskManager-native owner lifetime ended; publishing "
-                       "recovery tombstone";
-                PublishRecoveryTombstone(std::move(tombstone.value()));
-              },
-              "CoreWorker.PublishRecoveryTombstone");
-        });
-
     task_manager_->SetLineageReleasedCallback([this](const TaskID &task_id) {
       // RemoveLineageReference holds the TaskManager lock.
       // Post the recovery work to the CoreWorker event loop.
@@ -625,13 +568,7 @@ CoreWorker::CoreWorker(
             // Patch 4L: TaskManager lineage can be released after producer
             // completion even while a returned ObjectRef is still in scope.
             // Actual owner-return lifetime is authoritative for recovery cleanup.
-            if (RayConfig::instance()
-                    .enable_recovery_succession_task_manager_lifetime()) {
-              if (task_manager_->RecoverySuccessionTaskHasLiveReturns(task_id)) {
-                return;
-              }
-            } else if (
-                recovery_succession_manager_->OwnerTaskHasLiveReturns(task_id)) {
+            if (recovery_succession_manager_->OwnerTaskHasLiveReturns(task_id)) {
               return;
             }
 
@@ -1755,13 +1692,9 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
       recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
   for (const rpc::TaskArg &arg : task_spec->args()) {
     if (arg.has_object_ref() && !arg.object_ref().object_id().empty()) {
-      const rpc::ObjectReference &object_ref = arg.object_ref();
-      if (!RayConfig::instance().enable_recovery_succession_metadata_reuse() ||
-          !object_ref.has_recovery_metadata()) {
-        const ObjectID object_id =
-            ObjectID::FromBinary(object_ref.object_id());
-        TryPopulateRecoveryMetadataForObject(object_id, nullptr);
-      }
+      const ObjectID object_id =
+          ObjectID::FromBinary(arg.object_ref().object_id());
+      TryPopulateRecoveryMetadataForObject(object_id, nullptr);
     }
 
     for (const rpc::ObjectReference &nested_ref :
@@ -1770,12 +1703,9 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
         continue;
       }
 
-      if (!RayConfig::instance().enable_recovery_succession_metadata_reuse() ||
-          !nested_ref.has_recovery_metadata()) {
-        const ObjectID nested_id =
-            ObjectID::FromBinary(nested_ref.object_id());
-        TryPopulateRecoveryMetadataForObject(nested_id, nullptr);
-      }
+      const ObjectID nested_id =
+          ObjectID::FromBinary(nested_ref.object_id());
+      TryPopulateRecoveryMetadataForObject(nested_id, nullptr);
     }
   }
 
@@ -1801,10 +1731,7 @@ std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
       *ref.mutable_owner_address() = std::move(owner_address);
     }
 
-    if (recovery_succession_enabled_ &&
-        recovery_succession_manager_ != nullptr &&
-        !RayConfig::instance()
-             .enable_recovery_succession_defer_objectref_metadata()) {
+    if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
       rpc::RecoveryObjectMetadata metadata;
 
       if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
@@ -3130,88 +3057,19 @@ void CoreWorker::BuildCommonTaskSpec(
   if (recovery_succession_enabled_ &&
       recovery_succession_manager_ != nullptr &&
       !args.empty()) {
-    if (RecoveryBenchmarkAblationMode() != "dormant_only") {
-      EnsureRecoverySuccessionForTaskArguments(builder.MutableMessage());
-    }
+    EnsureRecoverySuccessionForTaskArguments(builder.MutableMessage());
 
-    if (RecoveryBenchmarkAblationMode() == "metadata_no_transport" ||
-        RecoveryBenchmarkAblationMode() == "activation_only" ||
-        RecoveryBenchmarkAblationMode() == "dormant_only") {
-      rpc::TaskSpec *outgoing_task_spec = builder.MutableMessage();
+    if (recovery_succession_profiling_enabled_) {
+      const uint64_t start_ns = RecoveryProfileNowNs();
 
-      // Strip every recovery transport representation. For activation_only,
-      // EnsureRecoverySuccessionForTaskArguments() has already initialized
-      // owner-side recovery state; nothing recovery-related should cross the wire.
-      outgoing_task_spec->clear_recovery_argument_metadata();
+      recovery_succession_manager_->PopulateTaskArgumentMetadata(
+          builder.MutableMessage());
 
-      for (rpc::TaskArg &arg : *outgoing_task_spec->mutable_args()) {
-        if (arg.has_object_ref()) {
-          arg.mutable_object_ref()->clear_recovery_metadata();
-        }
-        for (rpc::ObjectReference &nested_ref :
-             *arg.mutable_nested_inlined_refs()) {
-          nested_ref.clear_recovery_metadata();
-        }
-      }
-    }
-
-    absl::flat_hash_map<TaskID, rpc::TaskSpec> owner_recovery_task_specs;
-    const std::string &recovery_mode = RecoveryBenchmarkAblationMode();
-    // Patch 4K: normal/full mode uses ordinary async holder installation.
-    // Only the explicit piggyback diagnostic needs a TaskManager TaskSpec
-    // during downstream TaskSpec construction.
-    if (!recovery_witness_holder_baseline_enabled_ &&
-        recovery_mode == "piggyback_no_candidate") {
-      absl::flat_hash_set<TaskID> seen_producers;
-
-      auto maybe_prefetch = [this, &owner_recovery_task_specs, &seen_producers](
-                                const rpc::ObjectReference &ref) {
-        if (ref.object_id().size() != ObjectID::Size()) {
-          return;
-        }
-        const TaskID producer_task_id =
-            ObjectID::FromBinary(ref.object_id()).TaskId();
-        if (!seen_producers.insert(producer_task_id).second) {
-          return;
-        }
-
-        auto producer_spec = task_manager_->GetTaskSpec(producer_task_id);
-        if (!producer_spec.has_value()) {
-          return;
-        }
-        const rpc::TaskSpec &proto = producer_spec->GetMessage();
-        if (!RecoverySuccessionManager::IsEligibleTask(proto)) {
-          return;
-        }
-        owner_recovery_task_specs[producer_task_id].CopyFrom(proto);
-      };
-
-      for (const rpc::TaskArg &task_arg : builder.MutableMessage()->args()) {
-        if (task_arg.has_object_ref()) {
-          maybe_prefetch(task_arg.object_ref());
-        }
-        for (const rpc::ObjectReference &nested_ref :
-             task_arg.nested_inlined_refs()) {
-          maybe_prefetch(nested_ref);
-        }
-      }
-    }
-
-    if (RecoveryBenchmarkAblationMode() != "activation_only" &&
-        RecoveryBenchmarkAblationMode() != "dormant_only") {
-      if (recovery_succession_profiling_enabled_) {
-        const uint64_t start_ns = RecoveryProfileNowNs();
-
-        recovery_succession_manager_->PopulateTaskArgumentMetadata(
-            builder.MutableMessage(), &owner_recovery_task_specs);
-
-        recovery_succession_manager_
-            ->RecordTaskArgumentMetadataLatency(
-                RecoveryProfileNowNs() - start_ns);
-      } else {
-        recovery_succession_manager_->PopulateTaskArgumentMetadata(
-            builder.MutableMessage(), &owner_recovery_task_specs);
-      }
+      recovery_succession_manager_->RecordTaskArgumentMetadataLatency(
+          RecoveryProfileNowNs() - start_ns);
+    } else {
+      recovery_succession_manager_->PopulateTaskArgumentMetadata(
+          builder.MutableMessage());
     }
   }
 
@@ -3314,22 +3172,18 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   // witness, candidate, holder, or control RPC is created here.
   if (recovery_succession_enabled_ &&
       recovery_succession_manager_ != nullptr &&
-      !RayConfig::instance()
-           .enable_recovery_succession_skip_owner_lifetime_for_benchmark() &&
       !task_spec.GetMessage().has_recovery_manifest() &&
       RecoverySuccessionManager::IsEligibleTask(task_spec.GetMessage())) {
-    if (!RayConfig::instance()
-             .enable_recovery_succession_task_manager_lifetime()) {
-      if (RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
-        RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
-            << "Eligible recovery task disappeared before TaskManager pin: "
-            << task_spec.TaskId();
-      }
+    if (RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
+      RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
+          << "Eligible recovery task disappeared before TaskManager pin: "
+          << task_spec.TaskId();
+    }
 
-      recovery_succession_manager_->RetainOwnerTaskSpecForLazyRecovery(
-          task_spec, returned_refs);
+    recovery_succession_manager_->RetainOwnerTaskSpecForLazyRecovery(
+        task_spec, returned_refs);
 
-      auto on_owner_return_deleted = [this](const ObjectID &deleted_object_id) {
+    auto on_owner_return_deleted = [this](const ObjectID &deleted_object_id) {
       if (!recovery_succession_enabled_ ||
           recovery_succession_manager_ == nullptr) {
         return;
@@ -3392,7 +3246,6 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
         on_owner_return_deleted(object_id);
       }
     }
-    }  // legacy 4L/4N lifetime path
   }
 
   if (recovery_succession_enabled_ &&
@@ -5058,8 +4911,6 @@ void CoreWorker::HandlePushTask(rpc::PushTaskRequest request,
 
   if (recovery_succession_enabled_ &&
       recovery_succession_manager_ != nullptr &&
-      RecoveryBenchmarkAblationMode() != "metadata_no_receiver" &&
-      RecoveryBenchmarkAblationMode() != "metadata_no_transport" &&
       RecoverySuccessionManager::CarriesRecoveryMetadata(
           request.task_spec())) {
     auto candidate_reports =
@@ -5705,18 +5556,8 @@ void CoreWorker::QueueRecoveryCandidateReport(
   // coalesces independent candidate RPCs, which also lets the existing batch
   // server path coalesce the corresponding holder installs.
   //
-  // Keep Patch-4E-1's old single-H1 behavior only in the explicit
-  // no_piggyback benchmark control so we can isolate the batching effect.
-  const bool first_holder_candidate =
-      !request.has_cached_manifest() ||
-      request.cached_manifest().succession_size() <= 1;
-  const bool preserve_legacy_h1_fast_path =
-      first_holder_candidate &&
-      RecoveryBenchmarkAblationMode() == "no_piggyback";
-
   if (RayConfig::instance().recovery_succession_test_fail_after_witness_ack() ||
-      coordinator_address.worker_id().empty() ||
-      preserve_legacy_h1_fast_path) {
+      coordinator_address.worker_id().empty()) {
     auto manager = recovery_succession_manager_;
     auto client = core_worker_client_pool_->GetOrConnect(coordinator_address);
     const uint64_t patch4g_rpc_start_ns =
@@ -5958,21 +5799,6 @@ CoreWorker::PrepareRecoveryCandidateAdmission(
   }
 
   auto manager = recovery_succession_manager_;
-
-  // Patch 4G BENCHMARK ONLY: preserve candidate-report construction and the
-  // physical RPC, but stop before holder reservation, install, or witness work.
-  // This mode intentionally does not provide recovery durability.
-  if (RecoveryBenchmarkAblationMode() == "candidate_rpc_no_admit") {
-    if (recovery_succession_profiling_enabled_) {
-      manager->RecordCandidateReport(false);
-    }
-    reply->set_result(rpc::ReportRecoveryCandidateReply::NO_SLOT);
-    if (request.has_cached_manifest()) {
-      reply->mutable_latest_manifest()->CopyFrom(request.cached_manifest());
-    }
-    send_reply_callback(Status::OK(), nullptr, nullptr);
-    return std::nullopt;
-  }
 
   const uint64_t admission_start_ns =
       recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
