@@ -1642,17 +1642,16 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
     const std::string *publish_serialized_task_spec = nullptr;
 
     if (serialize_task_spec_once) {
-      if (separate_manifest_storage) {
-        serialized_baseline_task_spec = task_proto.SerializeAsString();
-      } else {
-        baseline_task_spec.CopyFrom(task_proto);
-        baseline_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
-        serialized_baseline_task_spec = baseline_task_spec.SerializeAsString();
-      }
+      // Transport remains identical to the original baseline contract: every
+      // holder receives a complete replayable TaskSpec with the authoritative
+      // RecoveryManifest embedded. Serialize that representation only once.
+      baseline_task_spec.CopyFrom(task_proto);
+      baseline_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
+      serialized_baseline_task_spec = baseline_task_spec.SerializeAsString();
       publish_serialized_task_spec = &serialized_baseline_task_spec;
     } else if (separate_manifest_storage || elide_intermediate_copy) {
-      // Publication will either keep the manifest separate or attach it
-      // directly to each outgoing request.
+      // Avoid the intermediate owner copy. Publication attaches the authoritative
+      // manifest directly to each outgoing request copy.
       publish_task_spec = &task_proto;
     } else {
       // Original fixed-R baseline control.
@@ -8544,16 +8543,17 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     } else if (task_spec != nullptr) {
       request.mutable_task_spec()->CopyFrom(*task_spec);
 
-      if (recovery_witness_holder_baseline_enabled_) {
-        if (RayConfig::instance()
-                .enable_recovery_baseline_separate_manifest_storage()) {
-          request.mutable_task_spec()->clear_recovery_manifest();
-        } else if (RayConfig::instance()
-                       .enable_recovery_baseline_elide_task_spec_copy()) {
-          request.mutable_task_spec()
-              ->mutable_recovery_manifest()
-              ->CopyFrom(manifest);
-        }
+      if (recovery_witness_holder_baseline_enabled_ &&
+          (RayConfig::instance()
+               .enable_recovery_baseline_separate_manifest_storage() ||
+           RayConfig::instance()
+               .enable_recovery_baseline_elide_task_spec_copy())) {
+        // Even with separate retained storage, installation uses the original
+        // full-lineage baseline wire contract. The manifest is removed only
+        // after the witness has validated and accepted this request.
+        request.mutable_task_spec()
+            ->mutable_recovery_manifest()
+            ->CopyFrom(manifest);
       }
     }
 

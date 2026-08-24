@@ -572,22 +572,14 @@ void NodeManager::HandleUpdateRecoveryWitness(
       };
 
   if (incoming_task_spec != nullptr) {
-    const bool separate_manifest_storage =
-        RayConfig::instance().enable_recovery_baseline_separate_manifest_storage();
-
-    bool valid_lineage =
+    // Keep one strict installation contract for both the original and optimized
+    // fixed-R baseline: every holder must receive a complete replayable TaskSpec
+    // whose embedded manifest exactly matches the separately supplied manifest.
+    const bool valid_lineage =
         baseline_enabled &&
-        incoming_task_spec->task_id() == incoming.task_id();
-
-    if (valid_lineage && separate_manifest_storage) {
-      valid_lineage =
-          !incoming_task_spec->has_recovery_manifest() ||
-          manifests_equal(incoming_task_spec->recovery_manifest(), incoming);
-    } else if (valid_lineage) {
-      valid_lineage =
-          incoming_task_spec->has_recovery_manifest() &&
-          manifests_equal(incoming_task_spec->recovery_manifest(), incoming);
-    }
+        incoming_task_spec->task_id() == incoming.task_id() &&
+        incoming_task_spec->has_recovery_manifest() &&
+        manifests_equal(incoming_task_spec->recovery_manifest(), incoming);
 
     if (!valid_lineage) {
       reply->set_stored(false);
