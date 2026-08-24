@@ -44,6 +44,20 @@ from _benchmark_common import (
 METHODS = [disabled(), succession(1), witness_baseline(1)]
 
 
+def selected_methods(args: argparse.Namespace) -> list[Method]:
+    selected: list[Method] = []
+    for key in args.methods:
+        if key == "disabled":
+            selected.append(disabled())
+        elif key == "succession":
+            selected.append(succession(1))
+        elif key == "witness_baseline":
+            selected.append(witness_baseline(1))
+        else:
+            raise ValueError(f"unknown method: {key}")
+    return selected
+
+
 def start_cluster(method: Method, object_timeout_ms: int) -> tuple[Cluster, Any]:
     cluster = Cluster()
     cluster.add_node(
@@ -228,7 +242,7 @@ def run_one(args: argparse.Namespace, method: Method, trial: int) -> list[dict[s
 
 def run(args: argparse.Namespace) -> Path:
     rows: list[dict[str, Any]] = []
-    order = METHODS[:]
+    order = selected_methods(args)
     rng = random.Random(args.seed)
     for trial in range(1, args.trials + 1):
         trial_order = order[:]
@@ -255,7 +269,10 @@ def plot(args: argparse.Namespace) -> None:
         ("latency_p95_ms", "P95 successful-request latency (ms)", "avail_lat.png"),
     ]:
         plt.figure(figsize=(8.5, 4.8))
+        present_method_keys = {r["method"] for r in rows}
         for method in METHODS:
+            if method.key not in present_method_keys:
+                continue
             xs = sorted({float(r["elapsed_seconds"]) for r in rows if r["method"] == method.key})
             ys = []
             for x in xs:
@@ -283,6 +300,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("command", choices=["run", "plot", "run-and-plot"], nargs="?", default="run-and-plot")
     p.add_argument("--output-dir", default="gossip_benchmarks/results/01_simple_recovery")
     p.add_argument("--trials", type=int, default=3)
+    p.add_argument(
+        "--methods",
+        nargs="+",
+        choices=["disabled", "succession", "witness_baseline"],
+        default=["disabled", "succession", "witness_baseline"],
+        help="Methods to run; default preserves the original benchmark matrix.",
+    )
     p.add_argument("--duration-seconds", type=float, default=45.0)
     p.add_argument("--failure-at-seconds", type=float, default=15.0)
     p.add_argument("--bucket-seconds", type=float, default=1.0)

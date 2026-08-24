@@ -145,11 +145,24 @@ def run_one(args, method: Method, failure_mode: str, trial: int) -> dict[str, An
         except OSError: pass
 
 
+def selected_methods(args):
+    methods = []
+    for key in args.methods:
+        if key == "succession":
+            methods.append(succession(args.holders))
+        elif key == "witness_baseline":
+            methods.append(witness_baseline(args.holders))
+        else:
+            raise ValueError(f"unknown method: {key}")
+    return methods
+
+
 def run(args):
     rows = []
+    methods = selected_methods(args)
     for trial in range(1, args.trials + 1):
         for mode in FAILURE_MODES:
-            for method in [succession(args.holders), witness_baseline(args.holders)]:
+            for method in methods:
                 print(f"trial={trial} mode={mode} method={method.label}")
                 rows.append(run_one(args, method, mode, trial))
     write_csv(Path(args.output_dir) / "failure_type.csv", rows)
@@ -181,6 +194,13 @@ def parser():
     p.add_argument("--output-dir", default="gossip_benchmarks/results/05_failure_type_recovery")
     p.add_argument("--trials", type=int, default=3)
     p.add_argument("--holders", type=int, default=2, choices=[1,2,3,4])
+    p.add_argument(
+        "--methods",
+        nargs="+",
+        choices=["succession", "witness_baseline"],
+        default=["succession", "witness_baseline"],
+        help="Methods to run; default preserves the original benchmark matrix.",
+    )
     p.add_argument("--task-duration-seconds", type=float, default=20)
     p.add_argument("--payload-bytes", type=int, default=2 * 1024 * 1024)
     p.add_argument("--witness-count", type=int, default=2)
