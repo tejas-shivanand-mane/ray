@@ -1648,7 +1648,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   void PublishRecoveryManifestToWitnesses(
     const rpc::RecoveryManifest &manifest,
     RecoveryWitnessPublishCallback callback,
-    const rpc::TaskSpec *task_spec = nullptr) const;
+    const rpc::TaskSpec *task_spec = nullptr,
+    const std::string *serialized_task_spec = nullptr) const;
 
 
   // Patch 4M-CERT delta publication.  Same witness durability rule as normal

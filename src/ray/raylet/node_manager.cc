@@ -30,6 +30,8 @@
 #include <utility>
 #include <vector>
 
+#include <google/protobuf/util/message_differencer.h>
+
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_replace.h"
 #include "ray/asio/asio_util.h"
@@ -473,6 +475,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
   // activation and keeps tombstones as absorbing state.
   if (request.has_holder_certificate()) {
     if (!certificate_mode || request.has_task_spec() ||
+        !request.serialized_task_spec().empty() ||
         !ValidRecoveryHolderCertificate(request.holder_certificate()) ||
         (request.has_manifest() &&
          (!ValidRecoveryManifest(request.manifest()) ||
@@ -530,12 +533,63 @@ void NodeManager::HandleUpdateRecoveryWitness(
   const rpc::RecoveryManifest &incoming = request.manifest();
   const TaskID task_id = TaskID::FromBinary(incoming.task_id());
 
+  const bool has_serialized_task_spec =
+      !request.serialized_task_spec().empty();
+
+  if (request.has_task_spec() && has_serialized_task_spec) {
+    reply->set_stored(false);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  rpc::TaskSpec decoded_task_spec;
+  rpc::TaskSpec *incoming_task_spec = nullptr;
+
   if (request.has_task_spec()) {
+    incoming_task_spec = request.mutable_task_spec();
+  } else if (has_serialized_task_spec) {
     if (!baseline_enabled ||
-        request.task_spec().task_id() != incoming.task_id() ||
-        !request.task_spec().has_recovery_manifest() ||
-        request.task_spec().recovery_manifest().SerializeAsString() !=
-            incoming.SerializeAsString()) {
+        !RayConfig::instance().enable_recovery_baseline_serialize_task_spec_once() ||
+        !decoded_task_spec.ParseFromString(request.serialized_task_spec())) {
+      reply->set_stored(false);
+      send_reply_callback(Status::OK(), nullptr, nullptr);
+      return;
+    }
+    incoming_task_spec = &decoded_task_spec;
+  }
+
+  const bool fast_manifest_validation =
+      baseline_enabled &&
+      RayConfig::instance().enable_recovery_baseline_fast_manifest_validation();
+
+  const auto manifests_equal =
+      [fast_manifest_validation](const rpc::RecoveryManifest &left,
+                                 const rpc::RecoveryManifest &right) {
+        if (fast_manifest_validation) {
+          return google::protobuf::util::MessageDifferencer::Equals(left, right);
+        }
+        return left.SerializeAsString() == right.SerializeAsString();
+      };
+
+  if (incoming_task_spec != nullptr) {
+    const bool separate_manifest_storage =
+        RayConfig::instance().enable_recovery_baseline_separate_manifest_storage();
+
+    bool valid_lineage =
+        baseline_enabled &&
+        incoming_task_spec->task_id() == incoming.task_id();
+
+    if (valid_lineage && separate_manifest_storage) {
+      valid_lineage =
+          !incoming_task_spec->has_recovery_manifest() ||
+          manifests_equal(incoming_task_spec->recovery_manifest(), incoming);
+    } else if (valid_lineage) {
+      valid_lineage =
+          incoming_task_spec->has_recovery_manifest() &&
+          manifests_equal(incoming_task_spec->recovery_manifest(), incoming);
+    }
+
+    if (!valid_lineage) {
       reply->set_stored(false);
       send_reply_callback(Status::OK(), nullptr, nullptr);
       return;
@@ -562,7 +616,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
         existing.CopyFrom(incoming);
         reply->set_stored(true);
       } else if (comparison == 0 &&
-                 incoming.SerializeAsString() == existing.SerializeAsString()) {
+                 manifests_equal(incoming, existing)) {
         reply->set_stored(true);
       } else {
         reply->set_stored(false);
@@ -575,11 +629,29 @@ void NodeManager::HandleUpdateRecoveryWitness(
       if (stored.tombstoned()) {
         recovery_witness_task_specs_.erase(task_id);
         recovery_witness_claims_.erase(task_id);
-      } else if (baseline_enabled && request.has_task_spec()) {
-        recovery_witness_task_specs_[task_id].CopyFrom(request.task_spec());
+      } else if (baseline_enabled && incoming_task_spec != nullptr) {
+        rpc::TaskSpec &stored_task_spec =
+            recovery_witness_task_specs_[task_id];
+
+        if (has_serialized_task_spec) {
+          // decoded_task_spec is already owned by this handler.
+          stored_task_spec.Swap(&decoded_task_spec);
+        } else if (
+            RayConfig::instance().enable_recovery_baseline_move_witness_task_spec()) {
+          stored_task_spec.Swap(request.mutable_task_spec());
+        } else {
+          stored_task_spec.CopyFrom(*incoming_task_spec);
+        }
+
+        if (RayConfig::instance()
+                .enable_recovery_baseline_separate_manifest_storage()) {
+          stored_task_spec.clear_recovery_manifest();
+        }
       } else {
         auto task_spec_it = recovery_witness_task_specs_.find(task_id);
-        if (task_spec_it != recovery_witness_task_specs_.end()) {
+        if (task_spec_it != recovery_witness_task_specs_.end() &&
+            !RayConfig::instance()
+                 .enable_recovery_baseline_separate_manifest_storage()) {
           task_spec_it->second.mutable_recovery_manifest()->CopyFrom(stored);
         }
       }
@@ -756,6 +828,12 @@ void NodeManager::HandleGetRecoveryWitness(
 
               reply->mutable_task_spec()->CopyFrom(
                   task_spec_it->second);
+              if (RayConfig::instance()
+                      .enable_recovery_baseline_separate_manifest_storage()) {
+                reply->mutable_task_spec()
+                    ->mutable_recovery_manifest()
+                    ->CopyFrom(stored_manifest);
+              }
             } else {
               // A different worker already owns replay responsibility.
               reply->set_claim_result(
@@ -795,11 +873,15 @@ void NodeManager::HandleGetRecoveryWitness(
                       .recovery_attempt() +
                   1);
 
-              // Keep the retained full TaskSpec synchronized with the
-              // authoritative manifest stored at this witness.
-              task_spec_it->second
-                  .mutable_recovery_manifest()
-                  ->CopyFrom(stored_manifest);
+              // With separate-manifest storage the retained full lineage
+              // remains immutable; the authoritative manifest is attached only
+              // to the recovery reply.
+              if (!RayConfig::instance()
+                       .enable_recovery_baseline_separate_manifest_storage()) {
+                task_spec_it->second
+                    .mutable_recovery_manifest()
+                    ->CopyFrom(stored_manifest);
+              }
 
               RecoveryWitnessClaimState
                   claim_state;
@@ -830,6 +912,12 @@ void NodeManager::HandleGetRecoveryWitness(
               reply->mutable_task_spec()
                   ->CopyFrom(
                       task_spec_it->second);
+              if (RayConfig::instance()
+                      .enable_recovery_baseline_separate_manifest_storage()) {
+                reply->mutable_task_spec()
+                    ->mutable_recovery_manifest()
+                    ->CopyFrom(stored_manifest);
+              }
             }
           }
         }

@@ -188,6 +188,27 @@ uint64_t StableWitnessScore(const TaskID &task_id, const NodeID &node_id) {
   return hash;
 }
 
+uint64_t StableWitnessScoreOptimized(const std::string &task_id_binary,
+                                     const NodeID &node_id) {
+  // Bit-for-bit identical FNV-1a input to StableWitnessScore, but the TaskID
+  // binary is computed once per selection and no concatenated string is built.
+  constexpr uint64_t kOffsetBasis = 1469598103934665603ULL;
+  constexpr uint64_t kPrime = 1099511628211ULL;
+
+  uint64_t hash = kOffsetBasis;
+  for (const unsigned char byte : task_id_binary) {
+    hash ^= static_cast<uint64_t>(byte);
+    hash *= kPrime;
+  }
+
+  const std::string node_id_binary = node_id.Binary();
+  for (const unsigned char byte : node_id_binary) {
+    hash ^= static_cast<uint64_t>(byte);
+    hash *= kPrime;
+  }
+  return hash;
+}
+
 
 uint64_t RecoveryProfileNowNs() {
   return static_cast<uint64_t>(
@@ -1608,11 +1629,37 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 
     RAY_CHECK_EQ(manifest.witness_count(), target_holder_count);
 
-    // The original task was submitted without recovery metadata. Attach the
-    // lazily-created manifest only to the private copy sent to baseline holders.
+    const bool separate_manifest_storage =
+        RayConfig::instance().enable_recovery_baseline_separate_manifest_storage();
+    const bool serialize_task_spec_once =
+        RayConfig::instance().enable_recovery_baseline_serialize_task_spec_once();
+    const bool elide_intermediate_copy =
+        RayConfig::instance().enable_recovery_baseline_elide_task_spec_copy();
+
     rpc::TaskSpec baseline_task_spec;
-    baseline_task_spec.CopyFrom(task_proto);
-    baseline_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
+    std::string serialized_baseline_task_spec;
+    const rpc::TaskSpec *publish_task_spec = nullptr;
+    const std::string *publish_serialized_task_spec = nullptr;
+
+    if (serialize_task_spec_once) {
+      if (separate_manifest_storage) {
+        serialized_baseline_task_spec = task_proto.SerializeAsString();
+      } else {
+        baseline_task_spec.CopyFrom(task_proto);
+        baseline_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
+        serialized_baseline_task_spec = baseline_task_spec.SerializeAsString();
+      }
+      publish_serialized_task_spec = &serialized_baseline_task_spec;
+    } else if (separate_manifest_storage || elide_intermediate_copy) {
+      // Publication will either keep the manifest separate or attach it
+      // directly to each outgoing request.
+      publish_task_spec = &task_proto;
+    } else {
+      // Original fixed-R baseline control.
+      baseline_task_spec.CopyFrom(task_proto);
+      baseline_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
+      publish_task_spec = &baseline_task_spec;
+    }
 
     const uint64_t publish_start_ns =
         recovery_succession_profiling_enabled_
@@ -1669,7 +1716,8 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
               << "Installed full TaskSpec on all "
                  "witness-holder baseline nodes";
         },
-        &baseline_task_spec);
+        publish_task_spec,
+        publish_serialized_task_spec);
   }
 
   // If another thread won the initialization race, its metadata is visible
@@ -8374,31 +8422,52 @@ std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
   std::vector<WitnessCandidate> candidates;
   candidates.reserve(alive_witnesses.size());
 
-  // Preserve the existing deterministic per-task witness selection.
+  // Preserve the exact deterministic per-task witness scores.
+  const bool optimized_baseline_selection =
+      recovery_witness_holder_baseline_enabled_ &&
+      RayConfig::instance().enable_recovery_baseline_topk_witness_selection();
+  const std::string task_id_binary =
+      optimized_baseline_selection ? task_id.Binary() : std::string();
+
   for (auto &[node_id, address] : alive_witnesses) {
     candidates.push_back(
         WitnessCandidate{
-            StableWitnessScore(task_id, node_id),
+            optimized_baseline_selection
+                ? StableWitnessScoreOptimized(task_id_binary, node_id)
+                : StableWitnessScore(task_id, node_id),
             std::move(address)});
   }
-
-  std::sort(
-      candidates.begin(),
-      candidates.end(),
-      [](const WitnessCandidate &left,
-         const WitnessCandidate &right) {
-        if (left.score != right.score) {
-          return left.score > right.score;
-        }
-
-        return left.address.node_id() <
-               right.address.node_id();
-      });
 
   const size_t selected_count =
       std::min<size_t>(
           requested_count,
           candidates.size());
+
+  const auto better_witness =
+      [](const WitnessCandidate &left,
+         const WitnessCandidate &right) {
+        if (left.score != right.score) {
+          return left.score > right.score;
+        }
+        return left.address.node_id() < right.address.node_id();
+      };
+
+  if (recovery_witness_holder_baseline_enabled_ &&
+      RayConfig::instance().enable_recovery_baseline_topk_witness_selection() &&
+      selected_count < candidates.size()) {
+    // O(N) partition plus O(R log R) ordering instead of O(N log N).
+    std::nth_element(
+        candidates.begin(),
+        candidates.begin() + selected_count,
+        candidates.end(),
+        better_witness);
+    std::sort(
+        candidates.begin(),
+        candidates.begin() + selected_count,
+        better_witness);
+  } else {
+    std::sort(candidates.begin(), candidates.end(), better_witness);
+  }
 
   std::vector<rpc::Address> witnesses;
   witnesses.reserve(selected_count);
@@ -8437,10 +8506,12 @@ void CoreWorker::PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) cons
 void CoreWorker::PublishRecoveryManifestToWitnesses(
     const rpc::RecoveryManifest &manifest,
     RecoveryWitnessPublishCallback callback,
-    const rpc::TaskSpec *task_spec) const {
+    const rpc::TaskSpec *task_spec,
+    const std::string *serialized_task_spec) const {
 
+  RAY_CHECK(task_spec == nullptr || serialized_task_spec == nullptr);
   const bool require_all_witnesses =
-    task_spec != nullptr;
+      task_spec != nullptr || serialized_task_spec != nullptr;
 
   if (!recovery_succession_enabled_ || manifest.task_id().empty() ||
       manifest.witness_raylets_size() == 0) {
@@ -8468,8 +8539,22 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     rpc::UpdateRecoveryWitnessRequest request;
     request.mutable_manifest()->CopyFrom(manifest);
 
-    if (task_spec != nullptr) {
+    if (serialized_task_spec != nullptr) {
+      request.set_serialized_task_spec(*serialized_task_spec);
+    } else if (task_spec != nullptr) {
       request.mutable_task_spec()->CopyFrom(*task_spec);
+
+      if (recovery_witness_holder_baseline_enabled_) {
+        if (RayConfig::instance()
+                .enable_recovery_baseline_separate_manifest_storage()) {
+          request.mutable_task_spec()->clear_recovery_manifest();
+        } else if (RayConfig::instance()
+                       .enable_recovery_baseline_elide_task_spec_copy()) {
+          request.mutable_task_spec()
+              ->mutable_recovery_manifest()
+              ->CopyFrom(manifest);
+        }
+      }
     }
 
     auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
@@ -8479,10 +8564,11 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     if (recovery_succession_profiling_enabled_ &&
         !manifest.tombstoned()) {
       const uint64_t task_spec_bytes =
-          task_spec != nullptr
-              ? static_cast<uint64_t>(
-                    task_spec->ByteSizeLong())
-              : 0;
+          !request.serialized_task_spec().empty()
+              ? static_cast<uint64_t>(request.serialized_task_spec().size())
+              : (request.has_task_spec()
+                     ? static_cast<uint64_t>(request.task_spec().ByteSizeLong())
+                     : 0);
 
       recovery_succession_manager_
           ->RecordWitnessUpdateRpcSent(

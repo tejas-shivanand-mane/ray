@@ -476,6 +476,11 @@ message UpdateRecoveryWitnessRequest {
   // independently confirmed holder certificates into its materialized
   // RecoveryManifest instead of replacing the whole manifest per holder.
   optional RecoveryHolderCertificate holder_certificate = 3;
+
+  // Optimized fixed-R transport. This contains the exact same complete
+  // replayable TaskSpec lineage as task_spec, serialized once by the owner.
+  // task_spec and serialized_task_spec are mutually exclusive.
+  bytes serialized_task_spec = 4;
 }
 
 message UpdateRecoveryWitnessReply {

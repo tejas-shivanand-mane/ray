@@ -206,6 +206,48 @@ RAY_CONFIG(bool, enable_recovery_succession, false)
 /// This flag has an effect only when enable_recovery_succession=true.
 RAY_CONFIG(bool, enable_recovery_witness_holder_baseline, false)
 
+/// Strong fixed-R baseline optimizations. All are default-off so the original
+/// baseline remains a reproducible control.
+///
+/// Use Patch-4H compact dependency metadata on ordinary downstream TaskSpecs.
+/// Internal recovery state and witness state remain full RecoveryManifest.
+RAY_CONFIG(bool, enable_recovery_baseline_compact_argument_metadata, false)
+
+/// Allow full-lineage baseline witness updates to use the existing per-raylet
+/// UpdateRecoveryWitnessBatch transport.
+RAY_CONFIG(bool, enable_recovery_baseline_witness_batching, false)
+
+/// Avoid the owner's extra intermediate baseline_task_spec deep copy.
+RAY_CONFIG(bool, enable_recovery_baseline_elide_task_spec_copy, false)
+
+/// Serialize complete baseline lineage once at activation and transport those
+/// bytes to all R holders instead of traversing the protobuf independently R times.
+RAY_CONFIG(bool, enable_recovery_baseline_serialize_task_spec_once, false)
+
+/// Store the authoritative RecoveryManifest separately from the witness's full
+/// lineage TaskSpec; reattach it only when granting replay.
+RAY_CONFIG(bool, enable_recovery_baseline_separate_manifest_storage, false)
+
+/// For ordinary downstream baseline tasks, register only borrowed-object recovery
+/// state and skip Succession-only piggyback/candidate-report processing.
+RAY_CONFIG(bool, enable_recovery_baseline_fast_receiver, false)
+
+/// Compare baseline manifests as protobuf messages instead of serializing both
+/// messages to temporary strings for equality checks.
+RAY_CONFIG(bool, enable_recovery_baseline_fast_manifest_validation, false)
+
+/// Move the already-parsed baseline TaskSpec request into witness storage rather
+/// than deep-copying it again.
+RAY_CONFIG(bool, enable_recovery_baseline_move_witness_task_spec, false)
+
+/// Move queued baseline witness updates into the physical batch request instead
+/// of deep-copying each logical update.
+RAY_CONFIG(bool, enable_recovery_baseline_batch_request_swap, false)
+
+/// Preserve identical deterministic top-R witness selection while avoiding
+/// repeated TaskID serialization/string concatenation and a full candidate sort.
+RAY_CONFIG(bool, enable_recovery_baseline_topk_witness_selection, false)
+
 RAY_CONFIG(uint32_t, recovery_succession_target_holder_count, 2)
 
 /// Number of node-distinct raylets that retain the latest compact recovery

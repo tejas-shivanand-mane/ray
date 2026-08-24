@@ -581,10 +581,14 @@ void RayletClient::FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request)
 void RayletClient::UpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest &&request,
     const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) {
-  // Keep the witness-as-holder baseline on the original one-request RPC path.
-  // Those requests can contain a full TaskSpec and are not the compact normal
-  // Recovery Succession traffic targeted by Patch 4B-3.
-  if (request.has_task_spec()) {
+  const bool baseline_lineage_request =
+      request.has_task_spec() || !request.serialized_task_spec().empty();
+
+  // Original baseline control: one physical RPC per logical witness update.
+  // The optimized baseline feeds full-lineage updates through the existing
+  // per-raylet batcher without changing logical callbacks or all-R durability.
+  if (baseline_lineage_request &&
+      !RayConfig::instance().enable_recovery_baseline_witness_batching()) {
     INVOKE_RPC_CALL(NodeManagerService,
                     UpdateRecoveryWitness,
                     request,
@@ -621,8 +625,14 @@ void RayletClient::DispatchRecoveryWitnessBatch(
   RAY_CHECK(batch != nullptr && !batch->empty());
 
   rpc::UpdateRecoveryWitnessBatchRequest request;
-  for (const auto &item : *batch) {
-    request.add_updates()->CopyFrom(item.request);
+  for (auto &item : *batch) {
+    rpc::UpdateRecoveryWitnessRequest *update = request.add_updates();
+    if (RayConfig::instance().enable_recovery_baseline_batch_request_swap() &&
+        RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+      update->Swap(&item.request);
+    } else {
+      update->CopyFrom(item.request);
+    }
   }
 
   auto batch_callback =
