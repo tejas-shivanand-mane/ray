@@ -221,7 +221,10 @@ def run_one(args: argparse.Namespace, method: Method, trial: int) -> list[dict[s
                 ok = value == args.payload_bytes
             except Exception as exc:
                 if elapsed >= args.failure_at_seconds and printed_errors < 3:
-                    print(f"[{method.label}] post-failure read: {type(exc).__name__}: {exc}")
+                    print(
+                        f"[{method.label}] temporary post-failure read timeout/error: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     printed_errors += 1
             t1 = time.perf_counter()
             events.append((t1 - start, ok, t1 - t0))

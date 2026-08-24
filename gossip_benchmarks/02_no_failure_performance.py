@@ -67,7 +67,8 @@ class Pending:
 
 
 def methods() -> list[Method]:
-    return [disabled()] + [succession(r) for r in range(1, 5)] + [witness_baseline(r) for r in range(1, 5)]
+    # return [disabled()] + [succession(r) for r in range(1, 5)] + [witness_baseline(r) for r in range(1, 5)]
+    return [disabled()] + [witness_baseline(r) for r in range(1, 5)]
 
 
 def parse_payload(text: str) -> Payload:
