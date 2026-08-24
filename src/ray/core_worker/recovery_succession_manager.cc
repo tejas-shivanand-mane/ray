@@ -535,6 +535,7 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
 
   const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
   const bool task_manager_pin =
+      RayConfig::instance().enable_recovery_witness_holder_baseline() ||
       RayConfig::instance().enable_recovery_succession_task_manager_pin();
 
   OwnerRetainedTaskState retained;
@@ -771,55 +772,6 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
   const bool should_store_task = IsEligibleTask(task_spec) &&
                                  task_spec.has_recovery_manifest() &&
                                  !task_spec.task_id().empty();
-
-  if (RayConfig::instance().enable_recovery_witness_holder_baseline() &&
-      RayConfig::instance().enable_recovery_baseline_fast_receiver() &&
-      !should_store_task) {
-    std::vector<CandidateReport> reports;
-    absl::MutexLock lock(&mutex_);
-
-    // Fixed-R executors never become lineage holders. Only borrowed-object
-    // recovery state and the cached fixed witness manifest are needed.
-    for (const auto &[object_id, metadata] : received_metadata) {
-      if (metadata.task_id().size() != TaskID::Size() ||
-          !metadata.has_manifest()) {
-        continue;
-      }
-
-      const TaskID metadata_task_id = TaskID::FromBinary(metadata.task_id());
-      const auto tombstone_it = task_states_.find(metadata_task_id);
-      if (tombstone_it != task_states_.end() &&
-          tombstone_it->second.manifest.tombstoned() &&
-          CompareManifestVersions(tombstone_it->second.manifest,
-                                  metadata.manifest()) >= 0) {
-        continue;
-      }
-
-      BorrowedObjectRecoveryState borrowed_state;
-      borrowed_state.task_id = metadata_task_id;
-      borrowed_state.return_index = metadata.return_index();
-      borrowed_objects_[object_id] = std::move(borrowed_state);
-
-      TaskRecoveryState &dependency_state = task_states_[metadata_task_id];
-      if (dependency_state.manifest.task_id().empty() ||
-          CompareManifestVersions(metadata.manifest(),
-                                  dependency_state.manifest) > 0) {
-        dependency_state.manifest.CopyFrom(metadata.manifest());
-      }
-    }
-
-    if (profiling_enabled_) {
-      ++profile_.register_executor_task_calls;
-      profile_.register_executor_task_time_ns += static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              std::chrono::steady_clock::now() - patch4g_start)
-              .count());
-      profile_.register_executor_metadata_refs_seen +=
-          static_cast<uint64_t>(received_metadata.size());
-    }
-
-    return reports;
-  }
 
   std::vector<CandidateReport> reports;
   absl::flat_hash_set<TaskID> piggyback_task_ids;
@@ -1667,13 +1619,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     rpc::RecoveryObjectMetadata *out = entry->mutable_recovery_metadata();
     bool compact_transport = false;
 
-    const bool baseline_enabled =
-        RayConfig::instance().enable_recovery_witness_holder_baseline();
-    const bool compact_allowed =
-        !baseline_enabled ||
-        RayConfig::instance().enable_recovery_baseline_compact_argument_metadata();
-
-    if (compact_allowed && entry->has_owner_address()) {
+    if (entry->has_owner_address()) {
       compact_transport = WriteCompactTaskArgumentRecoveryMetadata(
           *source, source->manifest(), entry->owner_address(), out);
       if (!compact_transport) {
@@ -1699,9 +1645,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
           static_cast<uint64_t>(out->ByteSizeLong());
       if (compact_transport) {
         ++profile_.task_argument_metadata_compact_refs;
-      } else if (
-          !RayConfig::instance().enable_recovery_witness_holder_baseline() ||
-          RayConfig::instance().enable_recovery_baseline_compact_argument_metadata()) {
+      } else {
         ++profile_.task_argument_metadata_compact_fallbacks;
       }
     }

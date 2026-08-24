@@ -581,23 +581,6 @@ void RayletClient::FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request)
 void RayletClient::UpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest &&request,
     const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) {
-  const bool baseline_lineage_request =
-      request.has_task_spec() || !request.serialized_task_spec().empty();
-
-  // Original baseline control: one physical RPC per logical witness update.
-  // The optimized baseline feeds full-lineage updates through the existing
-  // per-raylet batcher without changing logical callbacks or all-R durability.
-  if (baseline_lineage_request &&
-      !RayConfig::instance().enable_recovery_baseline_witness_batching()) {
-    INVOKE_RPC_CALL(NodeManagerService,
-                    UpdateRecoveryWitness,
-                    request,
-                    callback,
-                    grpc_client_,
-                    /*method_timeout_ms=*/-1);
-    return;
-  }
-
   PendingRecoveryWitnessUpdate item{std::move(request), callback};
   auto state = recovery_witness_batch_state_;
   std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch;
@@ -627,8 +610,7 @@ void RayletClient::DispatchRecoveryWitnessBatch(
   rpc::UpdateRecoveryWitnessBatchRequest request;
   for (auto &item : *batch) {
     rpc::UpdateRecoveryWitnessRequest *update = request.add_updates();
-    if (RayConfig::instance().enable_recovery_baseline_batch_request_swap() &&
-        RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    if (RayConfig::instance().enable_recovery_witness_holder_baseline()) {
       update->Swap(&item.request);
     } else {
       update->CopyFrom(item.request);

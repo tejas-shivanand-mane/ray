@@ -1629,35 +1629,24 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 
     RAY_CHECK_EQ(manifest.witness_count(), target_holder_count);
 
-    const bool separate_manifest_storage =
-        RayConfig::instance().enable_recovery_baseline_separate_manifest_storage();
     const bool serialize_task_spec_once =
         RayConfig::instance().enable_recovery_baseline_serialize_task_spec_once();
-    const bool elide_intermediate_copy =
-        RayConfig::instance().enable_recovery_baseline_elide_task_spec_copy();
 
-    rpc::TaskSpec baseline_task_spec;
+    rpc::TaskSpec serialized_task_spec_proto;
     std::string serialized_baseline_task_spec;
     const rpc::TaskSpec *publish_task_spec = nullptr;
     const std::string *publish_serialized_task_spec = nullptr;
 
     if (serialize_task_spec_once) {
-      // Transport remains identical to the original baseline contract: every
-      // holder receives a complete replayable TaskSpec with the authoritative
-      // RecoveryManifest embedded. Serialize that representation only once.
-      baseline_task_spec.CopyFrom(task_proto);
-      baseline_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
-      serialized_baseline_task_spec = baseline_task_spec.SerializeAsString();
+      // Experimental crossover path. The wire contract remains a complete
+      // replayable TaskSpec with the authoritative RecoveryManifest embedded.
+      serialized_task_spec_proto.CopyFrom(task_proto);
+      serialized_task_spec_proto.mutable_recovery_manifest()->CopyFrom(manifest);
+      serialized_baseline_task_spec = serialized_task_spec_proto.SerializeAsString();
       publish_serialized_task_spec = &serialized_baseline_task_spec;
-    } else if (separate_manifest_storage || elide_intermediate_copy) {
-      // Avoid the intermediate owner copy. Publication attaches the authoritative
-      // manifest directly to each outgoing request copy.
-      publish_task_spec = &task_proto;
     } else {
-      // Original fixed-R baseline control.
-      baseline_task_spec.CopyFrom(task_proto);
-      baseline_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
-      publish_task_spec = &baseline_task_spec;
+      // Frozen baseline: publication copies directly into each outgoing request.
+      publish_task_spec = &task_proto;
     }
 
     const uint64_t publish_start_ns =
@@ -3221,7 +3210,8 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
       recovery_succession_manager_ != nullptr &&
       !task_spec.GetMessage().has_recovery_manifest() &&
       RecoverySuccessionManager::IsEligibleTask(task_spec.GetMessage())) {
-    if (RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
+    if (recovery_witness_holder_baseline_enabled_ ||
+        RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
       RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
           << "Eligible recovery task disappeared before TaskManager pin: "
           << task_spec.TaskId();
@@ -3244,7 +3234,8 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
               deleted_object_id, &final_return_deleted);
 
       if (final_return_deleted &&
-          RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
+          (recovery_witness_holder_baseline_enabled_ ||
+           RayConfig::instance().enable_recovery_succession_task_manager_pin())) {
         task_manager_->ReleaseTaskForRecoverySuccession(deleted_task_id);
       }
 
@@ -8423,8 +8414,7 @@ std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
 
   // Preserve the exact deterministic per-task witness scores.
   const bool optimized_baseline_selection =
-      recovery_witness_holder_baseline_enabled_ &&
-      RayConfig::instance().enable_recovery_baseline_topk_witness_selection();
+      recovery_witness_holder_baseline_enabled_;
   const std::string task_id_binary =
       optimized_baseline_selection ? task_id.Binary() : std::string();
 
@@ -8452,7 +8442,6 @@ std::vector<rpc::Address> CoreWorker::SelectRecoveryWitnesses(
       };
 
   if (recovery_witness_holder_baseline_enabled_ &&
-      RayConfig::instance().enable_recovery_baseline_topk_witness_selection() &&
       selected_count < candidates.size()) {
     // O(N) partition plus O(R log R) ordering instead of O(N log N).
     std::nth_element(
@@ -8543,11 +8532,7 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     } else if (task_spec != nullptr) {
       request.mutable_task_spec()->CopyFrom(*task_spec);
 
-      if (recovery_witness_holder_baseline_enabled_ &&
-          (RayConfig::instance()
-               .enable_recovery_baseline_separate_manifest_storage() ||
-           RayConfig::instance()
-               .enable_recovery_baseline_elide_task_spec_copy())) {
+      if (recovery_witness_holder_baseline_enabled_) {
         // Even with separate retained storage, installation uses the original
         // full-lineage baseline wire contract. The manifest is removed only
         // after the witness has validated and accepted this request.

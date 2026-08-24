@@ -549,7 +549,6 @@ void NodeManager::HandleUpdateRecoveryWitness(
     incoming_task_spec = request.mutable_task_spec();
   } else if (has_serialized_task_spec) {
     if (!baseline_enabled ||
-        !RayConfig::instance().enable_recovery_baseline_serialize_task_spec_once() ||
         !decoded_task_spec.ParseFromString(request.serialized_task_spec())) {
       reply->set_stored(false);
       send_reply_callback(Status::OK(), nullptr, nullptr);
@@ -558,9 +557,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
     incoming_task_spec = &decoded_task_spec;
   }
 
-  const bool fast_manifest_validation =
-      baseline_enabled &&
-      RayConfig::instance().enable_recovery_baseline_fast_manifest_validation();
+  const bool fast_manifest_validation = baseline_enabled;
 
   const auto manifests_equal =
       [fast_manifest_validation](const rpc::RecoveryManifest &left,
@@ -626,24 +623,18 @@ void NodeManager::HandleUpdateRecoveryWitness(
             recovery_witness_task_specs_[task_id];
 
         if (has_serialized_task_spec) {
-          // decoded_task_spec is already owned by this handler.
           stored_task_spec.Swap(&decoded_task_spec);
-        } else if (
-            RayConfig::instance().enable_recovery_baseline_move_witness_task_spec()) {
-          stored_task_spec.Swap(request.mutable_task_spec());
         } else {
-          stored_task_spec.CopyFrom(*incoming_task_spec);
+          stored_task_spec.Swap(request.mutable_task_spec());
         }
 
-        if (RayConfig::instance()
-                .enable_recovery_baseline_separate_manifest_storage()) {
-          stored_task_spec.clear_recovery_manifest();
-        }
+        // The full replayable lineage remains here; the authoritative mutable
+        // RecoveryManifest is retained exactly once in recovery_witness_manifests_.
+        stored_task_spec.clear_recovery_manifest();
       } else {
         auto task_spec_it = recovery_witness_task_specs_.find(task_id);
         if (task_spec_it != recovery_witness_task_specs_.end() &&
-            !RayConfig::instance()
-                 .enable_recovery_baseline_separate_manifest_storage()) {
+            !baseline_enabled) {
           task_spec_it->second.mutable_recovery_manifest()->CopyFrom(stored);
         }
       }
@@ -820,12 +811,9 @@ void NodeManager::HandleGetRecoveryWitness(
 
               reply->mutable_task_spec()->CopyFrom(
                   task_spec_it->second);
-              if (RayConfig::instance()
-                      .enable_recovery_baseline_separate_manifest_storage()) {
-                reply->mutable_task_spec()
-                    ->mutable_recovery_manifest()
-                    ->CopyFrom(stored_manifest);
-              }
+              reply->mutable_task_spec()
+              ->mutable_recovery_manifest()
+              ->CopyFrom(stored_manifest);
             } else {
               // A different worker already owns replay responsibility.
               reply->set_claim_result(
@@ -865,16 +853,6 @@ void NodeManager::HandleGetRecoveryWitness(
                       .recovery_attempt() +
                   1);
 
-              // With separate-manifest storage the retained full lineage
-              // remains immutable; the authoritative manifest is attached only
-              // to the recovery reply.
-              if (!RayConfig::instance()
-                       .enable_recovery_baseline_separate_manifest_storage()) {
-                task_spec_it->second
-                    .mutable_recovery_manifest()
-                    ->CopyFrom(stored_manifest);
-              }
-
               RecoveryWitnessClaimState
                   claim_state;
 
@@ -904,12 +882,9 @@ void NodeManager::HandleGetRecoveryWitness(
               reply->mutable_task_spec()
                   ->CopyFrom(
                       task_spec_it->second);
-              if (RayConfig::instance()
-                      .enable_recovery_baseline_separate_manifest_storage()) {
-                reply->mutable_task_spec()
-                    ->mutable_recovery_manifest()
-                    ->CopyFrom(stored_manifest);
-              }
+              reply->mutable_task_spec()
+              ->mutable_recovery_manifest()
+              ->CopyFrom(stored_manifest);
             }
           }
         }

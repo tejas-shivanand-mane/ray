@@ -75,55 +75,17 @@ def system_config(
         and not method.baseline_enabled
     )
 
-    baseline_all = (
+    baseline_serialize_taskspec_once = (
         method.baseline_enabled
-        and os.environ.get("RAY_RECOVERY_BASELINE_ALL_OPTIMIZATIONS", "0") == "1"
+        and os.environ.get("RAY_RECOVERY_BASELINE_SERIALIZE_TASKSPEC_ONCE", "0") == "1"
     )
 
-    def baseline_opt(env_name: str) -> bool:
-        if not method.baseline_enabled:
-            return False
-        raw = os.environ.get(env_name)
-        return baseline_all if raw is None else raw == "1"
-
-    # Patch 4N is already correctness-preserving. Include it in the maximally
-    # optimized baseline unless explicitly disabled.
-    task_manager_pin_raw = os.environ.get("RAY_RECOVERY_TASKMANAGER_PIN")
-    task_manager_pin = method.recovery_enabled and (
-        (task_manager_pin_raw == "1")
-        if task_manager_pin_raw is not None
-        else baseline_all
-    )
-
-    baseline_compact_metadata = baseline_opt(
-        "RAY_RECOVERY_BASELINE_COMPACT_METADATA"
-    )
-    baseline_witness_batching = baseline_opt(
-        "RAY_RECOVERY_BASELINE_WITNESS_BATCHING"
-    )
-    baseline_elide_taskspec_copy = baseline_opt(
-        "RAY_RECOVERY_BASELINE_ELIDE_TASKSPEC_COPY"
-    )
-    baseline_serialize_taskspec_once = baseline_opt(
-        "RAY_RECOVERY_BASELINE_SERIALIZE_TASKSPEC_ONCE"
-    )
-    baseline_separate_manifest = baseline_opt(
-        "RAY_RECOVERY_BASELINE_SEPARATE_MANIFEST"
-    )
-    baseline_fast_receiver = baseline_opt(
-        "RAY_RECOVERY_BASELINE_FAST_RECEIVER"
-    )
-    baseline_fast_manifest_validation = baseline_opt(
-        "RAY_RECOVERY_BASELINE_FAST_MANIFEST_VALIDATION"
-    )
-    baseline_move_witness_taskspec = baseline_opt(
-        "RAY_RECOVERY_BASELINE_MOVE_WITNESS_TASKSPEC"
-    )
-    baseline_batch_swap = baseline_opt(
-        "RAY_RECOVERY_BASELINE_BATCH_SWAP"
-    )
-    baseline_topk_witness_selection = baseline_opt(
-        "RAY_RECOVERY_BASELINE_TOPK_WITNESS_SELECTION"
+    # The fixed-R baseline pins TaskManager unconditionally in C++ after cleanup.
+    # Keep this switch only for non-baseline Succession experiments.
+    task_manager_pin = (
+        os.environ.get("RAY_RECOVERY_TASKMANAGER_PIN", "0") == "1"
+        and method.recovery_enabled
+        and not method.baseline_enabled
     )
 
     config: dict[str, Any] = {
@@ -131,16 +93,7 @@ def system_config(
         "enable_recovery_witness_holder_baseline": method.baseline_enabled,
         "enable_recovery_succession_certificate_admission": certificate_admission,
         "enable_recovery_succession_task_manager_pin": task_manager_pin,
-        "enable_recovery_baseline_compact_argument_metadata": baseline_compact_metadata,
-        "enable_recovery_baseline_witness_batching": baseline_witness_batching,
-        "enable_recovery_baseline_elide_task_spec_copy": baseline_elide_taskspec_copy,
         "enable_recovery_baseline_serialize_task_spec_once": baseline_serialize_taskspec_once,
-        "enable_recovery_baseline_separate_manifest_storage": baseline_separate_manifest,
-        "enable_recovery_baseline_fast_receiver": baseline_fast_receiver,
-        "enable_recovery_baseline_fast_manifest_validation": baseline_fast_manifest_validation,
-        "enable_recovery_baseline_move_witness_task_spec": baseline_move_witness_taskspec,
-        "enable_recovery_baseline_batch_request_swap": baseline_batch_swap,
-        "enable_recovery_baseline_topk_witness_selection": baseline_topk_witness_selection,
         "recovery_succession_witness_count": max(1, int(witness_count)),
         "enable_recovery_succession_profiling": bool(profiling_enabled),
     }
