@@ -100,8 +100,16 @@ def run_one(args, method: Method, failure_mode: str, trial: int) -> dict[str, An
         if method.key == "succession":
             for rank in range(1, method.holders + 1):
                 ray.get(holders[rank - 1].hold.remote([fresh]))
-                wait_for_protection(method=method, session_paths=logs, timeout_s=args.formation_timeout_seconds, rank=rank)
                 fresh = ray.get(holders[rank - 1].export.remote())[0]
+
+            # Holder admission is pipelined/batched. Wait only after all R distinct
+            # borrowers have received the reference.
+            wait_for_protection(
+                method=method,
+                session_paths=logs,
+                timeout_s=args.formation_timeout_seconds,
+                rank=method.holders,
+            )
         else:
             wait_for_protection(method=method, session_paths=logs, timeout_s=args.formation_timeout_seconds)
         ray.get(borrower.hold.remote([fresh]))
