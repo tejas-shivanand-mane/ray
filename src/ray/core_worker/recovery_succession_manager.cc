@@ -374,6 +374,7 @@ const std::string &RecoveryBenchmarkAblationMode() {
   static const std::string mode =
       RayConfig::instance().recovery_succession_benchmark_ablation_mode();
   RAY_CHECK(mode == "full" || mode == "no_piggyback" ||
+            mode == "activation_only" || mode == "dormant_only" ||
             mode == "metadata_only" || mode == "metadata_no_receiver" ||
             mode == "metadata_no_transport" ||
             mode == "piggyback_no_candidate" ||

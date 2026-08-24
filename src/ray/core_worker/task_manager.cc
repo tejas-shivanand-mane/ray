@@ -450,6 +450,20 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskInternal(
     auto inserted = submissible_tasks_.try_emplace(
         spec.TaskId(), spec, max_retries, num_returns, task_counter_, max_oom_retries);
     RAY_CHECK(inserted.second);
+
+    // Patch 4Q: piggyback lifetime retention on the TaskEntry insertion we are
+    // already doing. No additional TaskManager lock or second TaskSpec copy.
+    if (!recovery_replay &&
+        RayConfig::instance().enable_recovery_succession_task_manager_lifetime() &&
+        spec.GetMessage().type() == rpc::TaskType::NORMAL_TASK &&
+        !spec.GetMessage().returns_dynamic() &&
+        !spec.GetMessage().streaming_generator() &&
+        max_retries != 0 &&
+        num_returns > 0) {
+      inserted.first->second.recovery_succession_pinned_ = true;
+      inserted.first->second.recovery_succession_live_return_count_ = num_returns;
+    }
+
     num_pending_tasks_++;
   }
 
@@ -2003,6 +2017,61 @@ bool TaskManager::PinTaskForRecoverySuccession(const TaskID &task_id) {
   return true;
 }
 
+
+bool TaskManager::ReleaseRecoverySuccessionReturn(const ObjectID &object_id) {
+  if (object_id.IsNil()) {
+    return false;
+  }
+
+  const TaskID task_id = object_id.TaskId();
+  absl::MutexLock lock(&mu_);
+  auto it = submissible_tasks_.find(task_id);
+  if (it == submissible_tasks_.end()) {
+    return false;
+  }
+
+  auto &entry = it->second;
+  if (!entry.recovery_succession_pinned_ ||
+      entry.recovery_succession_live_return_count_ == 0) {
+    return false;
+  }
+
+  bool is_static_return = false;
+  for (size_t i = 0; i < entry.spec_.NumReturns(); ++i) {
+    if (entry.spec_.ReturnId(i) == object_id) {
+      is_static_return = true;
+      break;
+    }
+  }
+  if (!is_static_return) {
+    return false;
+  }
+
+  --entry.recovery_succession_live_return_count_;
+  if (entry.recovery_succession_live_return_count_ != 0) {
+    return false;
+  }
+
+  entry.recovery_succession_pinned_ = false;
+
+  // If ordinary Ray lineage disappeared first, the recovery lifetime pin was
+  // the sole reason this finished TaskEntry remained.
+  if (!entry.IsPending() && entry.reconstructable_return_ids_.empty()) {
+    submissible_tasks_.erase(it);
+  }
+  return true;
+}
+
+bool TaskManager::RecoverySuccessionTaskHasLiveReturns(
+    const TaskID &task_id) const {
+  absl::MutexLock lock(&mu_);
+  const auto it = submissible_tasks_.find(task_id);
+  return it != submissible_tasks_.end() &&
+         it->second.recovery_succession_pinned_ &&
+         it->second.recovery_succession_live_return_count_ > 0;
+}
+
+
 void TaskManager::ReleaseTaskForRecoverySuccession(const TaskID &task_id) {
   absl::MutexLock lock(&mu_);
   auto it = submissible_tasks_.find(task_id);
@@ -2011,6 +2080,7 @@ void TaskManager::ReleaseTaskForRecoverySuccession(const TaskID &task_id) {
   }
 
   it->second.recovery_succession_pinned_ = false;
+  it->second.recovery_succession_live_return_count_ = 0;
 
   // Two valid orderings exist:
   // 1. Normal Ray lineage disappeared first. RemoveLineageReference retained

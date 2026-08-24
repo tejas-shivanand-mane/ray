@@ -200,6 +200,7 @@ const std::string &RecoveryBenchmarkAblationMode() {
   static const std::string mode =
       RayConfig::instance().recovery_succession_benchmark_ablation_mode();
   RAY_CHECK(mode == "full" || mode == "no_piggyback" ||
+            mode == "activation_only" || mode == "dormant_only" ||
             mode == "metadata_only" || mode == "metadata_no_receiver" ||
             mode == "metadata_no_transport" ||
             mode == "piggyback_no_candidate" ||
@@ -567,6 +568,50 @@ CoreWorker::CoreWorker(
     recovery_succession_manager_ =
         std::make_shared<RecoverySuccessionManager>(rpc_address_);
 
+    // Patch 4Q: one process-wide true-deletion hook replaces per-return
+    // AddObjectRefDeletedCallback registrations.
+    reference_counter_->SetOwnedObjectRefDeletedCallback(
+        [this](const ObjectID &deleted_object_id) {
+          if (!recovery_succession_enabled_ ||
+              recovery_succession_manager_ == nullptr ||
+              !RayConfig::instance()
+                   .enable_recovery_succession_task_manager_lifetime()) {
+            return;
+          }
+
+          if (!task_manager_->ReleaseRecoverySuccessionReturn(
+                  deleted_object_id)) {
+            return;
+          }
+
+          const TaskID task_id = deleted_object_id.TaskId();
+          io_service_.post(
+              [this, task_id] {
+                if (!recovery_succession_enabled_ ||
+                    recovery_succession_manager_ == nullptr) {
+                  return;
+                }
+
+                // Unactivated dormant tasks have no manager recovery state, so
+                // BuildTombstoneForTask simply returns nullopt.
+                auto tombstone =
+                    recovery_succession_manager_->BuildTombstoneForTask(task_id);
+                if (!tombstone.has_value()) {
+                  return;
+                }
+
+                if (!recovery_tombstones_in_flight_.insert(task_id).second) {
+                  return;
+                }
+
+                RAY_LOG(INFO).WithField(task_id)
+                    << "TaskManager-native owner lifetime ended; publishing "
+                       "recovery tombstone";
+                PublishRecoveryTombstone(std::move(tombstone.value()));
+              },
+              "CoreWorker.PublishRecoveryTombstone");
+        });
+
     task_manager_->SetLineageReleasedCallback([this](const TaskID &task_id) {
       // RemoveLineageReference holds the TaskManager lock.
       // Post the recovery work to the CoreWorker event loop.
@@ -580,7 +625,13 @@ CoreWorker::CoreWorker(
             // Patch 4L: TaskManager lineage can be released after producer
             // completion even while a returned ObjectRef is still in scope.
             // Actual owner-return lifetime is authoritative for recovery cleanup.
-            if (recovery_succession_manager_->OwnerTaskHasLiveReturns(task_id)) {
+            if (RayConfig::instance()
+                    .enable_recovery_succession_task_manager_lifetime()) {
+              if (task_manager_->RecoverySuccessionTaskHasLiveReturns(task_id)) {
+                return;
+              }
+            } else if (
+                recovery_succession_manager_->OwnerTaskHasLiveReturns(task_id)) {
               return;
             }
 
@@ -1750,7 +1801,10 @@ std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
       *ref.mutable_owner_address() = std::move(owner_address);
     }
 
-    if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
+    if (recovery_succession_enabled_ &&
+        recovery_succession_manager_ != nullptr &&
+        !RayConfig::instance()
+             .enable_recovery_succession_defer_objectref_metadata()) {
       rpc::RecoveryObjectMetadata metadata;
 
       if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
@@ -3076,15 +3130,20 @@ void CoreWorker::BuildCommonTaskSpec(
   if (recovery_succession_enabled_ &&
       recovery_succession_manager_ != nullptr &&
       !args.empty()) {
-    EnsureRecoverySuccessionForTaskArguments(builder.MutableMessage());
+    if (RecoveryBenchmarkAblationMode() != "dormant_only") {
+      EnsureRecoverySuccessionForTaskArguments(builder.MutableMessage());
+    }
 
-    if (RecoveryBenchmarkAblationMode() == "metadata_no_transport") {
+    if (RecoveryBenchmarkAblationMode() == "metadata_no_transport" ||
+        RecoveryBenchmarkAblationMode() == "activation_only" ||
+        RecoveryBenchmarkAblationMode() == "dormant_only") {
       rpc::TaskSpec *outgoing_task_spec = builder.MutableMessage();
 
-      // Patch 4I primary sidecars.
+      // Strip every recovery transport representation. For activation_only,
+      // EnsureRecoverySuccessionForTaskArguments() has already initialized
+      // owner-side recovery state; nothing recovery-related should cross the wire.
       outgoing_task_spec->clear_recovery_argument_metadata();
 
-      // Backward-compatible embedded metadata paths, if any were populated.
       for (rpc::TaskArg &arg : *outgoing_task_spec->mutable_args()) {
         if (arg.has_object_ref()) {
           arg.mutable_object_ref()->clear_recovery_metadata();
@@ -3138,18 +3197,21 @@ void CoreWorker::BuildCommonTaskSpec(
       }
     }
 
-    if (recovery_succession_profiling_enabled_) {
-      const uint64_t start_ns = RecoveryProfileNowNs();
+    if (RecoveryBenchmarkAblationMode() != "activation_only" &&
+        RecoveryBenchmarkAblationMode() != "dormant_only") {
+      if (recovery_succession_profiling_enabled_) {
+        const uint64_t start_ns = RecoveryProfileNowNs();
 
-      recovery_succession_manager_->PopulateTaskArgumentMetadata(
-          builder.MutableMessage(), &owner_recovery_task_specs);
+        recovery_succession_manager_->PopulateTaskArgumentMetadata(
+            builder.MutableMessage(), &owner_recovery_task_specs);
 
-      recovery_succession_manager_
-          ->RecordTaskArgumentMetadataLatency(
-              RecoveryProfileNowNs() - start_ns);
-    } else {
-      recovery_succession_manager_->PopulateTaskArgumentMetadata(
-          builder.MutableMessage(), &owner_recovery_task_specs);
+        recovery_succession_manager_
+            ->RecordTaskArgumentMetadataLatency(
+                RecoveryProfileNowNs() - start_ns);
+      } else {
+        recovery_succession_manager_->PopulateTaskArgumentMetadata(
+            builder.MutableMessage(), &owner_recovery_task_specs);
+      }
     }
   }
 
@@ -3252,18 +3314,22 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   // witness, candidate, holder, or control RPC is created here.
   if (recovery_succession_enabled_ &&
       recovery_succession_manager_ != nullptr &&
+      !RayConfig::instance()
+           .enable_recovery_succession_skip_owner_lifetime_for_benchmark() &&
       !task_spec.GetMessage().has_recovery_manifest() &&
       RecoverySuccessionManager::IsEligibleTask(task_spec.GetMessage())) {
-    if (RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
-      RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
-          << "Eligible recovery task disappeared before TaskManager pin: "
-          << task_spec.TaskId();
-    }
+    if (!RayConfig::instance()
+             .enable_recovery_succession_task_manager_lifetime()) {
+      if (RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
+        RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
+            << "Eligible recovery task disappeared before TaskManager pin: "
+            << task_spec.TaskId();
+      }
 
-    recovery_succession_manager_->RetainOwnerTaskSpecForLazyRecovery(
-        task_spec, returned_refs);
+      recovery_succession_manager_->RetainOwnerTaskSpecForLazyRecovery(
+          task_spec, returned_refs);
 
-    auto on_owner_return_deleted = [this](const ObjectID &deleted_object_id) {
+      auto on_owner_return_deleted = [this](const ObjectID &deleted_object_id) {
       if (!recovery_succession_enabled_ ||
           recovery_succession_manager_ == nullptr) {
         return;
@@ -3326,6 +3392,7 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
         on_owner_return_deleted(object_id);
       }
     }
+    }  // legacy 4L/4N lifetime path
   }
 
   if (recovery_succession_enabled_ &&

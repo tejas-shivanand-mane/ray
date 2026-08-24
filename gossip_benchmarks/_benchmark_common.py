@@ -83,12 +83,27 @@ def system_config(
         os.environ.get("RAY_RECOVERY_METADATA_REUSE", "0") == "1"
         and method.recovery_enabled
     )
+    defer_objectref_metadata = (
+        os.environ.get("RAY_RECOVERY_DEFER_OBJECTREF_METADATA", "0") == "1"
+        and method.recovery_enabled
+    )
+    task_manager_lifetime = (
+        os.environ.get("RAY_RECOVERY_TASKMANAGER_LIFETIME", "0") == "1"
+        and method.recovery_enabled
+    )
+    skip_owner_lifetime = (
+        os.environ.get("RAY_RECOVERY_SKIP_OWNER_LIFETIME", "0") == "1"
+        and method.recovery_enabled
+    )
     config: dict[str, Any] = {
         "enable_recovery_succession": method.recovery_enabled,
         "enable_recovery_witness_holder_baseline": method.baseline_enabled,
         "enable_recovery_succession_certificate_admission": certificate_admission,
         "enable_recovery_succession_task_manager_pin": task_manager_pin,
+        "enable_recovery_succession_task_manager_lifetime": task_manager_lifetime,
+        "enable_recovery_succession_skip_owner_lifetime_for_benchmark": skip_owner_lifetime,
         "enable_recovery_succession_metadata_reuse": metadata_reuse,
+        "enable_recovery_succession_defer_objectref_metadata": defer_objectref_metadata,
         "recovery_succession_witness_count": max(1, int(witness_count)),
         "enable_recovery_succession_profiling": bool(profiling_enabled),
         "recovery_succession_benchmark_ablation_mode": str(ablation_mode),

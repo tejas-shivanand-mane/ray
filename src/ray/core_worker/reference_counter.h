@@ -168,6 +168,10 @@ class ReferenceCounter : public ReferenceCounterInterface,
       const ObjectID &object_id, std::function<void(const ObjectID &)> callback) override
       ABSL_LOCKS_EXCLUDED(mutex_);
 
+  void SetOwnedObjectRefDeletedCallback(
+      const std::function<void(const ObjectID &)> &callback) override
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
   void SubscribeRefRemoved(const ObjectID &object_id,
                            const ObjectID &contained_in_id,
                            const rpc::Address &owner_address) override
@@ -759,6 +763,11 @@ class ReferenceCounter : public ReferenceCounterInterface,
   /// The object's Reference will be erased after this callback.
   // Returns the amount of lineage in bytes released.
   LineageReleasedCallback on_lineage_released_;
+
+  /// Patch 4Q: fires only from EraseReference for a truly deleted owned ref.
+  std::function<void(const ObjectID &)> on_owned_object_ref_deleted_
+      ABSL_GUARDED_BY(mutex_) = nullptr;
+
   /// Optional shutdown hook to call when all references have gone
   /// out of scope.
   std::function<void()> shutdown_hook_ ABSL_GUARDED_BY(mutex_) = nullptr;
