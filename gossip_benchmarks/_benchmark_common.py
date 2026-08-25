@@ -39,9 +39,13 @@ def succession(holders: int) -> Method:
 
 
 def witness_baseline(holders: int) -> Method:
+    certification_proxy = (
+        holders == 1
+        and os.environ.get("RAY_RECOVERY_BASELINE_CERTIFICATION_ONLY", "0") == "1"
+    )
     return Method(
         "witness_baseline",
-        f"WitnessBaseline-R{holders}",
+        "CertificationProxy-R1" if certification_proxy else f"WitnessBaseline-R{holders}",
         True,
         True,
         holders,
@@ -80,6 +84,15 @@ def system_config(
         and os.environ.get("RAY_RECOVERY_BASELINE_SERIALIZE_TASKSPEC_ONCE", "0") == "1"
     )
 
+    # PERF-ONLY: model an R=1 holder whose replay state already exists at the
+    # executor, so protection needs only manifest/certification traffic. Keep
+    # this strictly R=1; R2..R4 remain the real full-lineage baseline.
+    baseline_certification_only = (
+        method.baseline_enabled
+        and method.holders == 1
+        and os.environ.get("RAY_RECOVERY_BASELINE_CERTIFICATION_ONLY", "0") == "1"
+    )
+
     # The fixed-R baseline pins TaskManager unconditionally in C++ after cleanup.
     # Keep this switch only for non-baseline Succession experiments.
     task_manager_pin = (
@@ -94,6 +107,7 @@ def system_config(
         "enable_recovery_succession_certificate_admission": certificate_admission,
         "enable_recovery_succession_task_manager_pin": task_manager_pin,
         "enable_recovery_baseline_serialize_task_spec_once": baseline_serialize_taskspec_once,
+        "recovery_baseline_perf_certification_only": baseline_certification_only,
         "recovery_succession_witness_count": max(1, int(witness_count)),
         "enable_recovery_succession_profiling": bool(profiling_enabled),
     }

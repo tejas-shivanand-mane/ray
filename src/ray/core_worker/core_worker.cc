@@ -1631,13 +1631,20 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 
     const bool serialize_task_spec_once =
         RayConfig::instance().enable_recovery_baseline_serialize_task_spec_once();
+    const bool certification_only =
+        RayConfig::instance().recovery_baseline_perf_certification_only();
 
     rpc::TaskSpec serialized_task_spec_proto;
     std::string serialized_baseline_task_spec;
     const rpc::TaskSpec *publish_task_spec = nullptr;
     const std::string *publish_serialized_task_spec = nullptr;
 
-    if (serialize_task_spec_once) {
+    if (certification_only) {
+      // PERF-ONLY proxy: keep the real baseline control path but omit the
+      // redundant full TaskSpec installation. This models the case where an
+      // executor already retained replay state and only needs certification.
+      // Leaving both pointers null sends only the authoritative manifest.
+    } else if (serialize_task_spec_once) {
       // Experimental crossover path. The wire contract remains a complete
       // replayable TaskSpec with the authoritative RecoveryManifest embedded.
       serialized_task_spec_proto.CopyFrom(task_proto);
@@ -1658,7 +1665,8 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
         manifest,
         [manager = recovery_succession_manager_,
          task_id,
-         publish_start_ns](
+         publish_start_ns,
+         certification_only](
             bool stored,
             std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
           if (publish_start_ns != 0) {
@@ -1699,10 +1707,17 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
                         : "");
           }
 
-          RAY_LOG(INFO)
-              .WithField(task_id)
-              << "Installed full TaskSpec on all "
-                 "witness-holder baseline nodes";
+          if (certification_only) {
+            RAY_LOG(INFO)
+                .WithField(task_id)
+                << "Installed certification-only PERF proxy on all "
+                   "witness-holder baseline nodes (no TaskSpec retained)";
+          } else {
+            RAY_LOG(INFO)
+                .WithField(task_id)
+                << "Installed full TaskSpec on all "
+                   "witness-holder baseline nodes";
+          }
         },
         publish_task_spec,
         publish_serialized_task_spec);

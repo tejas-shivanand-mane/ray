@@ -210,6 +210,16 @@ RAY_CONFIG(bool, enable_recovery_witness_holder_baseline, false)
 /// bytes to all R holders instead of traversing the protobuf independently R times.
 RAY_CONFIG(bool, enable_recovery_baseline_serialize_task_spec_once, false)
 
+/// PERF-ONLY experiment for the R=1 witness-holder baseline. When true, the
+/// baseline performs normal witness selection, manifest publication, batching,
+/// ACK waiting, and bookkeeping, but deliberately omits the full TaskSpec from
+/// the witness update. This approximates a design in which the executor already
+/// retained replay state and only needs to certify that retention.
+///
+/// The resulting witness state is NOT replayable. Never enable this for failure
+/// or correctness testing. Default false preserves the real baseline exactly.
+RAY_CONFIG(bool, recovery_baseline_perf_certification_only, false)
+
 RAY_CONFIG(uint32_t, recovery_succession_target_holder_count, 2)
 
 /// Number of node-distinct raylets that retain the latest compact recovery

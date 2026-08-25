@@ -68,6 +68,11 @@ class Pending:
 
 
 def methods() -> list[Method]:
+    # Keep the feasibility experiment tiny: with the proxy env enabled, run
+    # only normal Ray and the R=1 certification proxy. All ordinary benchmark
+    # behavior is unchanged when the env var is absent.
+    if os.environ.get("RAY_RECOVERY_BASELINE_CERTIFICATION_ONLY", "0") == "1":
+        return [disabled(), witness_baseline(1)]
     # return [disabled()] + [succession(r) for r in range(1, 5)] + [witness_baseline(r) for r in range(1, 5)]
     return [disabled()] + [witness_baseline(r) for r in range(1, 5)]
 
