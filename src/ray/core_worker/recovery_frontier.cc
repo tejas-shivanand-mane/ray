@@ -14,6 +14,7 @@
 
 #include "ray/core_worker/recovery_frontier.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "ray/util/logging.h"
@@ -84,6 +85,79 @@ std::optional<RecoveryFrontierMembership> RecoveryFrontierGroup::AddTask(
       Full()};
 }
 
+std::optional<RecoveryFrontierAppendBatch> RecoveryFrontierGroup::StageAppend(
+    uint32_t max_batch_members) {
+  if (append_in_flight_ || !HasUncommittedMembers()) {
+    return std::nullopt;
+  }
+
+  const uint32_t pending = MemberCount() - committed_member_count_;
+  const uint32_t batch_size =
+      max_batch_members == 0 ? pending : std::min(max_batch_members, pending);
+  RAY_CHECK_GT(batch_size, 0U);
+
+  RecoveryFrontierAppendBatch batch;
+  batch.group_id = group_id_;
+  batch.base_generation = generation_;
+  batch.generation = generation_ + 1;
+  batch.begin_member_index = committed_member_count_;
+  batch.end_member_index = committed_member_count_ + batch_size;
+  batch.members.reserve(batch_size);
+
+  for (uint32_t i = batch.begin_member_index; i < batch.end_member_index; ++i) {
+    batch.members.push_back(members_[i]);
+  }
+
+  append_in_flight_ = true;
+  in_flight_generation_ = batch.generation;
+  in_flight_begin_ = batch.begin_member_index;
+  in_flight_end_ = batch.end_member_index;
+  return batch;
+}
+
+bool RecoveryFrontierGroup::MatchesInFlight(
+    const RecoveryFrontierAppendBatch &batch) const {
+  return append_in_flight_ && batch.group_id == group_id_ &&
+         batch.base_generation == generation_ &&
+         batch.generation == in_flight_generation_ &&
+         batch.begin_member_index == in_flight_begin_ &&
+         batch.end_member_index == in_flight_end_ &&
+         batch.end_member_index <= MemberCount() &&
+         batch.members.size() ==
+             static_cast<size_t>(batch.end_member_index - batch.begin_member_index);
+}
+
+bool RecoveryFrontierGroup::CommitAppend(const RecoveryFrontierAppendBatch &batch) {
+  if (!MatchesInFlight(batch) || batch.begin_member_index != committed_member_count_) {
+    return false;
+  }
+
+  generation_ = batch.generation;
+  committed_member_count_ = batch.end_member_index;
+  append_in_flight_ = false;
+  in_flight_generation_ = 0;
+  in_flight_begin_ = 0;
+  in_flight_end_ = 0;
+  return true;
+}
+
+bool RecoveryFrontierGroup::AbortAppend(const RecoveryFrontierAppendBatch &batch) {
+  if (!MatchesInFlight(batch)) {
+    return false;
+  }
+
+  append_in_flight_ = false;
+  in_flight_generation_ = 0;
+  in_flight_begin_ = 0;
+  in_flight_end_ = 0;
+  return true;
+}
+
+bool RecoveryFrontierGroup::IsTaskCommitted(const TaskID &task_id) const {
+  const auto it = task_to_member_index_.find(task_id);
+  return it != task_to_member_index_.end() && it->second < committed_member_count_;
+}
+
 std::optional<RecoveryFrontierMembership> RecoveryFrontierGroup::FindTask(
     const TaskID &task_id) const {
   const auto it = task_to_member_index_.find(task_id);
@@ -108,6 +182,10 @@ bool RecoveryFrontierGroup::ExtractTaskForReturn(uint32_t group_return_index,
   }
 
   for (const RecoveryFrontierMember &member : members_) {
+    if (member.member_index >= committed_member_count_) {
+      break;
+    }
+
     const uint32_t begin = member.first_group_return_index;
     const uint32_t end = begin + member.num_returns;
     if (group_return_index < begin || group_return_index >= end) {
