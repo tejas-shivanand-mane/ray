@@ -1,0 +1,228 @@
+diff --git a/src/ray/common/ray_config_def.h b/src/ray/common/ray_config_def.h
+index 4d8e9cf6d..111111111 100644
+--- a/src/ray/common/ray_config_def.h
++++ b/src/ray/common/ray_config_def.h
+@@ -258,6 +258,20 @@ RAY_CONFIG(bool, enable_recovery_baseline_serialize_task_spec_once, false)
+ /// failure/correctness testing.
+ RAY_CONFIG(uint32_t, recovery_baseline_perf_protect_every_n, 1)
+ 
++/// Enables correctness-capable Recovery Frontier grouping above the selected
++/// recovery backend. When enabled, eligible owner tasks are assigned to
++/// append-only frontier groups. The first task in each group is the protected
++/// leader; later members share that protection topology once their replay
++/// recipes are durably appended.
++///
++/// This is independent of recovery_baseline_perf_protect_every_n, which remains
++/// a performance-only proxy and must stay at 1 for correctness experiments.
++RAY_CONFIG(bool, enable_recovery_frontier, false)
++
++/// Maximum number of task replay recipes in one Recovery Frontier group.
++/// K=1 degenerates to ordinary per-task protection.
++RAY_CONFIG(uint32_t, recovery_frontier_group_size, 16)
++
+ RAY_CONFIG(uint32_t, recovery_succession_target_holder_count, 2)
+ 
+ /// Number of node-distinct raylets that retain the latest compact recovery
+diff --git a/src/ray/core_worker/BUILD.bazel b/src/ray/core_worker/BUILD.bazel
+index a21360f722..2222222222 100644
+--- a/src/ray/core_worker/BUILD.bazel
++++ b/src/ray/core_worker/BUILD.bazel
+@@ -79,6 +79,7 @@ ray_cc_library(
+     ],
+     visibility = [":__subpackages__"],
+     deps = [
++        ":recovery_frontier",
+         "//src/ray/common:id",
+         "//src/ray/common:task_common",
+         "//src/ray/protobuf:common_cc_proto",
+diff --git a/src/ray/core_worker/recovery_succession_manager.h b/src/ray/core_worker/recovery_succession_manager.h
+index 89cfe82ba4..3333333333 100644
+--- a/src/ray/core_worker/recovery_succession_manager.h
++++ b/src/ray/core_worker/recovery_succession_manager.h
+@@ -16,6 +16,7 @@
+ #include <cstdint>
+ #include <functional>
+ #include <map>
++#include <memory>
+ #include <optional>
+ #include <string>
+ #include <utility>
+@@ -26,6 +27,7 @@
+ #include "absl/synchronization/mutex.h"
+ #include "ray/common/id.h"
+ #include "ray/common/task/task_spec.h"
++#include "ray/core_worker/recovery_frontier.h"
+ #include "src/ray/protobuf/common.pb.h"
+ #include "src/ray/protobuf/core_worker.pb.h"
+ 
+@@ -250,6 +252,36 @@ class RecoverySuccessionManager {
+   /// Returns true when recovery succession supports the task.
+   static bool IsEligibleTask(const rpc::TaskSpec &task_spec);
+ 
++  /// Returns whether owner-side correctness-capable Recovery Frontier
++  /// grouping is enabled for this manager.
++  bool RecoveryFrontierEnabled() const;
++
++  /// Assign an eligible owner task to its append-only frontier group. The
++  /// first member becomes the immediately protectable group leader.
++  std::optional<RecoveryFrontierMembership> RegisterOwnerTaskWithRecoveryFrontier(
++      const TaskSpecification &task_spec);
++
++  /// Return stable group coordinates for a previously registered owner task.
++  std::optional<RecoveryFrontierMembership> GetRecoveryFrontierMembership(
++      const TaskID &task_id) const;
++
++  /// Stage/commit/abort the next contiguous group append. These methods expose
++  /// the frontier acknowledged-prefix state machine to either protection
++  /// backend without coupling the planner to Baseline or Succession RPCs.
++  std::optional<RecoveryFrontierAppendBatch> StageRecoveryFrontierAppend(
++      const TaskID &group_id, uint32_t max_batch_members = 0);
++  bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
++  bool AbortRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
++
++  /// Resolve a committed group-global return index back to the original task
++  /// replay recipe. Uncommitted members deliberately return false.
++  bool ExtractRecoveryFrontierTaskForReturn(const TaskID &group_id,
++                                            uint32_t group_return_index,
++                                            rpc::TaskSpec *task_spec,
++                                            uint32_t *task_return_index) const;
++
+   /// Returns true only when a task actually carries Recovery Succession
+   /// state: either its own recovery manifest or recovery metadata on one of
+   /// its ObjectRef arguments.
+@@ -470,6 +502,11 @@ class RecoverySuccessionManager {
+ 
+   mutable absl::Mutex mutex_;
+ 
++  /// Backend-neutral owner-side grouping state. Null when Recovery Frontiers
++  /// are disabled. All access is serialized by the manager mutex so the
++  /// planner itself remains deliberately lock-free.
++  std::unique_ptr<RecoveryFrontierPlanner> recovery_frontier_planner_
++      ABSL_GUARDED_BY(mutex_);
++
+   mutable RecoverySuccessionProfile profile_ ABSL_GUARDED_BY(mutex_);
+ 
+   /// Recovery state indexed by the original task ID.
+diff --git a/src/ray/core_worker/recovery_succession_manager.cc b/src/ray/core_worker/recovery_succession_manager.cc
+index 46d1ef0e75..4444444444 100644
+--- a/src/ray/core_worker/recovery_succession_manager.cc
++++ b/src/ray/core_worker/recovery_succession_manager.cc
+@@ -367,12 +367,76 @@ bool ExpandTaskSidecarRecoveryMetadata(
+ RecoverySuccessionManager::RecoverySuccessionManager(rpc::Address self_address)
+     : self_address_(std::move(self_address)),
+       profiling_enabled_(
+-          RayConfig::instance().enable_recovery_succession_profiling()) {}
++          RayConfig::instance().enable_recovery_succession_profiling()) {
++  if (RayConfig::instance().enable_recovery_frontier()) {
++    const uint32_t group_size =
++        RayConfig::instance().recovery_frontier_group_size();
++    RAY_CHECK_GT(group_size, 0U)
++        << "recovery_frontier_group_size must be positive";
++    recovery_frontier_planner_ =
++        std::make_unique<RecoveryFrontierPlanner>(group_size);
++  }
++}
+ 
+ bool RecoverySuccessionManager::IsEligibleTask(const rpc::TaskSpec &task_spec) {
+   return task_spec.type() == rpc::TaskType::NORMAL_TASK && !task_spec.returns_dynamic() &&
+          !task_spec.streaming_generator() && task_spec.max_retries() != 0;
+ }
+ 
++bool RecoverySuccessionManager::RecoveryFrontierEnabled() const {
++  absl::MutexLock lock(&mutex_);
++  return recovery_frontier_planner_ != nullptr;
++}
++
++std::optional<RecoveryFrontierMembership>
++RecoverySuccessionManager::RegisterOwnerTaskWithRecoveryFrontier(
++    const TaskSpecification &task_spec) {
++  const rpc::TaskSpec &task_proto = task_spec.GetMessage();
++  if (!IsEligibleTask(task_proto) || task_proto.task_id().empty() ||
++      task_spec.NumReturns() == 0) {
++    return std::nullopt;
++  }
++
++  absl::MutexLock lock(&mutex_);
++  if (recovery_frontier_planner_ == nullptr) {
++    return std::nullopt;
++  }
++  return recovery_frontier_planner_->RegisterTask(task_proto);
++}
++
++std::optional<RecoveryFrontierMembership>
++RecoverySuccessionManager::GetRecoveryFrontierMembership(
++    const TaskID &task_id) const {
++  absl::MutexLock lock(&mutex_);
++  if (recovery_frontier_planner_ == nullptr) {
++    return std::nullopt;
++  }
++  return recovery_frontier_planner_->FindTask(task_id);
++}
++
++std::optional<RecoveryFrontierAppendBatch>
++RecoverySuccessionManager::StageRecoveryFrontierAppend(
++    const TaskID &group_id, uint32_t max_batch_members) {
++  absl::MutexLock lock(&mutex_);
++  if (recovery_frontier_planner_ == nullptr) {
++    return std::nullopt;
++  }
++  RecoveryFrontierGroup *group =
++      recovery_frontier_planner_->GetMutableGroup(group_id);
++  return group == nullptr ? std::nullopt : group->StageAppend(max_batch_members);
++}
++
++bool RecoverySuccessionManager::CommitRecoveryFrontierAppend(
++    const RecoveryFrontierAppendBatch &batch) {
++  absl::MutexLock lock(&mutex_);
++  if (recovery_frontier_planner_ == nullptr) {
++    return false;
++  }
++  RecoveryFrontierGroup *group =
++      recovery_frontier_planner_->GetMutableGroup(batch.group_id);
++  return group != nullptr && group->CommitAppend(batch);
++}
++
++bool RecoverySuccessionManager::AbortRecoveryFrontierAppend(
++    const RecoveryFrontierAppendBatch &batch) {
++  absl::MutexLock lock(&mutex_);
++  if (recovery_frontier_planner_ == nullptr) {
++    return false;
++  }
++  RecoveryFrontierGroup *group =
++      recovery_frontier_planner_->GetMutableGroup(batch.group_id);
++  return group != nullptr && group->AbortAppend(batch);
++}
++
++bool RecoverySuccessionManager::ExtractRecoveryFrontierTaskForReturn(
++    const TaskID &group_id,
++    uint32_t group_return_index,
++    rpc::TaskSpec *task_spec,
++    uint32_t *task_return_index) const {
++  absl::MutexLock lock(&mutex_);
++  if (recovery_frontier_planner_ == nullptr) {
++    return false;
++  }
++  const RecoveryFrontierGroup *group =
++      recovery_frontier_planner_->GetGroup(group_id);
++  return group != nullptr &&
++         group->ExtractTaskForReturn(
++             group_return_index, task_spec, task_return_index);
++}
++
+ bool RecoverySuccessionManager::CarriesRecoveryMetadata(
+     const rpc::TaskSpec &task_spec) {
+   if (task_spec.has_recovery_manifest() ||
+@@ -529,6 +593,13 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
+ 
+   const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
+ 
++  // Register every eligible live owner task with the shared frontier planner
++  // before any backend-specific activation/filtering. This is owner-local only:
++  // no holder, witness, manifest, or candidate RPC is emitted here.
++  if (recovery_frontier_planner_ != nullptr && !returned_refs.empty()) {
++    RAY_UNUSED(RegisterOwnerTaskWithRecoveryFrontier(task_spec));
++  }
++
+   const bool baseline_enabled =
+       RayConfig::instance().enable_recovery_witness_holder_baseline();
+ 
