@@ -35,6 +35,14 @@ TEST(RecoveryFrontierTest, SingleTaskIsImmediateLeaderForAnyK) {
   EXPECT_EQ(membership.num_returns, 1U);
   EXPECT_EQ(membership.group_id, TaskID::FromBinary(task.task_id()));
   EXPECT_FALSE(membership.closes_group);
+
+  // The leader is immediately stageable even though the group is not full.
+  RecoveryFrontierGroup *group = planner.GetMutableGroup(membership.group_id);
+  ASSERT_NE(group, nullptr);
+  auto batch = group->StageAppend();
+  ASSERT_TRUE(batch.has_value());
+  EXPECT_EQ(batch->begin_member_index, 0U);
+  EXPECT_EQ(batch->end_member_index, 1U);
 }
 
 TEST(RecoveryFrontierTest, IndependentTasksShareOneGroup) {
@@ -60,7 +68,42 @@ TEST(RecoveryFrontierTest, IndependentTasksShareOneGroup) {
   EXPECT_TRUE(group->Full());
 }
 
-TEST(RecoveryFrontierTest, GroupReturnIndexSelectsOriginalTaskAndReturn) {
+TEST(RecoveryFrontierTest, AckedPrefixControlsRecoverability) {
+  RecoveryFrontierPlanner planner(/*group_size=*/4);
+  const rpc::TaskSpec first = MakeTask('a', /*num_returns=*/2);
+  const rpc::TaskSpec second = MakeTask('b', /*num_returns=*/3);
+
+  const auto first_membership = planner.RegisterTask(first);
+  const auto second_membership = planner.RegisterTask(second);
+  RecoveryFrontierGroup *group = planner.GetMutableGroup(first_membership.group_id);
+  ASSERT_NE(group, nullptr);
+
+  // Before a backend ACK, no member may be advertised as recoverable.
+  EXPECT_FALSE(group->IsTaskCommitted(TaskID::FromBinary(first.task_id())));
+  EXPECT_FALSE(group->IsTaskCommitted(TaskID::FromBinary(second.task_id())));
+
+  // Protect only the leader first. This is the single-task fast safety path.
+  auto leader_batch = group->StageAppend(/*max_batch_members=*/1);
+  ASSERT_TRUE(leader_batch.has_value());
+  EXPECT_EQ(leader_batch->begin_member_index, 0U);
+  EXPECT_EQ(leader_batch->end_member_index, 1U);
+  ASSERT_TRUE(group->CommitAppend(*leader_batch));
+  EXPECT_EQ(group->CommittedMemberCount(), 1U);
+  EXPECT_EQ(group->Generation(), 1U);
+  EXPECT_TRUE(group->IsTaskCommitted(TaskID::FromBinary(first.task_id())));
+  EXPECT_FALSE(group->IsTaskCommitted(TaskID::FromBinary(second.task_id())));
+
+  // Append the second member under the same protection topology.
+  auto member_batch = group->StageAppend();
+  ASSERT_TRUE(member_batch.has_value());
+  EXPECT_EQ(member_batch->base_generation, 1U);
+  EXPECT_EQ(member_batch->generation, 2U);
+  ASSERT_TRUE(group->CommitAppend(*member_batch));
+  EXPECT_EQ(group->CommittedMemberCount(), 2U);
+  EXPECT_TRUE(group->IsTaskCommitted(TaskID::FromBinary(second.task_id())));
+}
+
+TEST(RecoveryFrontierTest, GroupReturnIndexSelectsCommittedOriginalTaskAndReturn) {
   RecoveryFrontierPlanner planner(/*group_size=*/4);
   const rpc::TaskSpec first = MakeTask('a', /*num_returns=*/2);
   const rpc::TaskSpec second = MakeTask('b', /*num_returns=*/3);
@@ -71,17 +114,48 @@ TEST(RecoveryFrontierTest, GroupReturnIndexSelectsOriginalTaskAndReturn) {
   EXPECT_EQ(first_membership.first_group_return_index, 0U);
   EXPECT_EQ(second_membership.first_group_return_index, 2U);
 
-  const RecoveryFrontierGroup *group = planner.GetGroup(first_membership.group_id);
+  RecoveryFrontierGroup *group = planner.GetMutableGroup(first_membership.group_id);
   ASSERT_NE(group, nullptr);
 
+  // Extraction must fail before the corresponding append is durable.
   rpc::TaskSpec replay;
   uint32_t local_return = 99;
+  EXPECT_FALSE(group->ExtractTaskForReturn(/*group_return_index=*/3,
+                                           &replay,
+                                           &local_return));
+
+  auto batch = group->StageAppend();
+  ASSERT_TRUE(batch.has_value());
+  ASSERT_TRUE(group->CommitAppend(*batch));
 
   ASSERT_TRUE(group->ExtractTaskForReturn(/*group_return_index=*/3,
                                           &replay,
                                           &local_return));
   EXPECT_EQ(replay.task_id(), second.task_id());
   EXPECT_EQ(local_return, 1U);
+}
+
+TEST(RecoveryFrontierTest, StaleOrAbortedAppendCannotAdvancePrefix) {
+  RecoveryFrontierPlanner planner(/*group_size=*/4);
+  const auto membership = planner.RegisterTask(MakeTask('a'));
+  RecoveryFrontierGroup *group = planner.GetMutableGroup(membership.group_id);
+  ASSERT_NE(group, nullptr);
+
+  auto first_attempt = group->StageAppend();
+  ASSERT_TRUE(first_attempt.has_value());
+  ASSERT_TRUE(group->AbortAppend(*first_attempt));
+  EXPECT_EQ(group->CommittedMemberCount(), 0U);
+  EXPECT_EQ(group->Generation(), 0U);
+
+  auto retry = group->StageAppend();
+  ASSERT_TRUE(retry.has_value());
+  ASSERT_TRUE(group->CommitAppend(*retry));
+  EXPECT_EQ(group->CommittedMemberCount(), 1U);
+  EXPECT_EQ(group->Generation(), 1U);
+
+  // A duplicate/stale ACK cannot advance state a second time.
+  EXPECT_FALSE(group->CommitAppend(*retry));
+  EXPECT_EQ(group->CommittedMemberCount(), 1U);
 }
 
 TEST(RecoveryFrontierTest, FullGroupRollsOverToNewLeader) {
