@@ -16,6 +16,8 @@
 
 #include <utility>
 
+#include "ray/util/logging.h"
+
 namespace ray::core {
 
 RecoveryFrontierGroup::RecoveryFrontierGroup(TaskID group_id, uint32_t max_members)
