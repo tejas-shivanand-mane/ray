@@ -1,0 +1,31 @@
+name: Apply recovery frontier integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/frontier-integration.patch'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply integration patch and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check .github/frontier-integration.patch
+          git apply .github/frontier-integration.patch
+          rm .github/frontier-integration.patch
+          rm .github/workflows/apply-frontier-integration.yml
+          git config user.name "openai-frontier-bot"
+          git config user.email "openai-frontier-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "Wire recovery frontier planner into recovery manager"
+          git push origin HEAD:main
