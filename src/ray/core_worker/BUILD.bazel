@@ -68,6 +68,19 @@ ray_cc_library(
 )
 
 ray_cc_library(
+    name = "recovery_frontier",
+    srcs = ["recovery_frontier.cc"],
+    hdrs = ["recovery_frontier.h"],
+    visibility = [":__subpackages__"],
+    deps = [
+        "//src/ray/common:id",
+        "//src/ray/protobuf:common_cc_proto",
+        "//src/ray/util:logging",
+        "@com_google_absl//absl/container:flat_hash_map",
+    ],
+)
+
+ray_cc_library(
     name = "recovery_succession_manager",
     srcs = [
         "recovery_succession_manager.cc",
@@ -225,7 +238,8 @@ ray_cc_library(
         "//src/ray/gcs_rpc_client:gcs_client",
         "//src/ray/protobuf:export_task_event_cc_proto",
         "//src/ray/protobuf:gcs_cc_proto",
-        "//src/ray/rpc:event_aggregator_client",
+        "//src/ray/rpc:utils",
+        "//src/ray/stats:stats_metric",
         "//src/ray/util:clock",
         "//src/ray/util:counter_map",
         "//src/ray/util:event",
@@ -293,6 +307,7 @@ ray_cc_library(
         "//src/ray/util:exponential_backoff",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
     ],
