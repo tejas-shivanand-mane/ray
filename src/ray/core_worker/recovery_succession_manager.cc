@@ -534,8 +534,36 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
   }
 
   const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
+
+  const bool baseline_enabled =
+      RayConfig::instance().enable_recovery_witness_holder_baseline();
+
+  // PERF-ONLY frontier-density owner-state selector.
+  //
+  // Match CoreWorker's TaskID selector so non-frontier tasks do not silently
+  // retain baseline TaskManager/recovery state. This makes the experiment test
+  // the cost of protecting only ~1/K tasks, not merely suppressing their
+  // witness RPCs.
+  if (baseline_enabled) {
+    const uint32_t protect_every_n =
+        RayConfig::instance().recovery_baseline_perf_protect_every_n();
+    if (protect_every_n > 1) {
+      constexpr uint64_t kOffsetBasis = 1469598103934665603ULL;
+      constexpr uint64_t kPrime = 1099511628211ULL;
+      uint64_t task_hash = kOffsetBasis;
+      const std::string task_id_binary = task_id.Binary();
+      for (const unsigned char byte : task_id_binary) {
+        task_hash ^= static_cast<uint64_t>(byte);
+        task_hash *= kPrime;
+      }
+      if ((task_hash % protect_every_n) != 0) {
+        return;
+      }
+    }
+  }
+
   const bool task_manager_pin =
-      RayConfig::instance().enable_recovery_witness_holder_baseline() ||
+      baseline_enabled ||
       RayConfig::instance().enable_recovery_succession_task_manager_pin();
 
   OwnerRetainedTaskState retained;

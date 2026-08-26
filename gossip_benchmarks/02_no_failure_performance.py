@@ -39,6 +39,7 @@ from _benchmark_common import (
     Method,
     add_method_columns,
     disabled,
+    frontier_proxy,
     mean_ci95,
     percentile,
     read_csv,
@@ -68,11 +69,14 @@ class Pending:
 
 
 def methods() -> list[Method]:
-    # Keep the feasibility experiment tiny: with the proxy env enabled, run
-    # only normal Ray and the R=1 certification proxy. All ordinary benchmark
-    # behavior is unchanged when the env var is absent.
-    if os.environ.get("RAY_RECOVERY_BASELINE_CERTIFICATION_ONLY", "0") == "1":
-        return [disabled(), witness_baseline(1)]
+    # PERF-ONLY feasibility experiment for Recovery Frontiers.
+    # K=1 is the real optimized WitnessBaseline-R1. K>1 protects only
+    # approximately 1/K eligible tasks. This is NOT recovery-correct.
+    if os.environ.get("RAY_RECOVERY_FRONTIER_PROXY", "0") == "1":
+        return [disabled()] + [
+            frontier_proxy(k) for k in (1, 4, 8, 16, 32)
+        ]
+
     # return [disabled()] + [succession(r) for r in range(1, 5)] + [witness_baseline(r) for r in range(1, 5)]
     return [disabled()] + [witness_baseline(r) for r in range(1, 5)]
 

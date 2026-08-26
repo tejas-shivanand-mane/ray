@@ -1538,6 +1538,33 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
   // lazily on the first real export/borrow of an eligible task return.
 
   const TaskID task_id = object_id.TaskId();
+
+  // PERF-ONLY frontier-density selector.
+  //
+  // For K>1, only approximately 1/K baseline tasks pay the protection cost.
+  // Selection is deterministic by TaskID so repeated exports of the same
+  // object make the same decision without shared counters or synchronization.
+  //
+  // Returning false here exports the ordinary ObjectRef without recovery
+  // metadata. This is intentionally NOT recovery-correct for K>1.
+  if (recovery_witness_holder_baseline_enabled_) {
+    const uint32_t protect_every_n =
+        RayConfig::instance().recovery_baseline_perf_protect_every_n();
+    if (protect_every_n > 1) {
+      constexpr uint64_t kOffsetBasis = 1469598103934665603ULL;
+      constexpr uint64_t kPrime = 1099511628211ULL;
+      uint64_t task_hash = kOffsetBasis;
+      const std::string task_id_binary = task_id.Binary();
+      for (const unsigned char byte : task_id_binary) {
+        task_hash ^= static_cast<uint64_t>(byte);
+        task_hash *= kPrime;
+      }
+      if ((task_hash % protect_every_n) != 0) {
+        return false;
+      }
+    }
+  }
+
   auto task_spec_opt = task_manager_->GetTaskSpec(task_id);
 
   if (!task_spec_opt.has_value()) {
@@ -1631,20 +1658,13 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 
     const bool serialize_task_spec_once =
         RayConfig::instance().enable_recovery_baseline_serialize_task_spec_once();
-    const bool certification_only =
-        RayConfig::instance().recovery_baseline_perf_certification_only();
 
     rpc::TaskSpec serialized_task_spec_proto;
     std::string serialized_baseline_task_spec;
     const rpc::TaskSpec *publish_task_spec = nullptr;
     const std::string *publish_serialized_task_spec = nullptr;
 
-    if (certification_only) {
-      // PERF-ONLY proxy: keep the real baseline control path but omit the
-      // redundant full TaskSpec installation. This models the case where an
-      // executor already retained replay state and only needs certification.
-      // Leaving both pointers null sends only the authoritative manifest.
-    } else if (serialize_task_spec_once) {
+    if (serialize_task_spec_once) {
       // Experimental crossover path. The wire contract remains a complete
       // replayable TaskSpec with the authoritative RecoveryManifest embedded.
       serialized_task_spec_proto.CopyFrom(task_proto);
@@ -1665,8 +1685,7 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
         manifest,
         [manager = recovery_succession_manager_,
          task_id,
-         publish_start_ns,
-         certification_only](
+         publish_start_ns](
             bool stored,
             std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
           if (publish_start_ns != 0) {
@@ -1707,17 +1726,10 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
                         : "");
           }
 
-          if (certification_only) {
-            RAY_LOG(INFO)
-                .WithField(task_id)
-                << "Installed certification-only PERF proxy on all "
-                   "witness-holder baseline nodes (no TaskSpec retained)";
-          } else {
-            RAY_LOG(INFO)
-                .WithField(task_id)
-                << "Installed full TaskSpec on all "
-                   "witness-holder baseline nodes";
-          }
+          RAY_LOG(INFO)
+              .WithField(task_id)
+              << "Installed full TaskSpec on all "
+                 "witness-holder baseline nodes";
         },
         publish_task_spec,
         publish_serialized_task_spec);
