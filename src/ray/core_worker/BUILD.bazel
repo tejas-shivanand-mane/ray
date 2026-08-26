@@ -90,6 +90,7 @@ ray_cc_library(
     ],
     visibility = [":__subpackages__"],
     deps = [
+        ":recovery_frontier",
         "//src/ray/common:id",
         "//src/ray/common:task_common",
         "//src/ray/protobuf:common_cc_proto",

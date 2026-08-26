@@ -375,11 +375,101 @@ bool ExpandTaskSidecarRecoveryMetadata(
 RecoverySuccessionManager::RecoverySuccessionManager(rpc::Address self_address)
     : self_address_(std::move(self_address)),
       profiling_enabled_(
-          RayConfig::instance().enable_recovery_succession_profiling()) {}
+          RayConfig::instance().enable_recovery_succession_profiling()) {
+  if (RayConfig::instance().enable_recovery_frontier()) {
+    const uint32_t group_size =
+        RayConfig::instance().recovery_frontier_group_size();
+    RAY_CHECK_GT(group_size, 0U)
+        << "recovery_frontier_group_size must be positive";
+    recovery_frontier_planner_ =
+        std::make_unique<RecoveryFrontierPlanner>(group_size);
+  }
+}
 
 bool RecoverySuccessionManager::IsEligibleTask(const rpc::TaskSpec &task_spec) {
   return task_spec.type() == rpc::TaskType::NORMAL_TASK && !task_spec.returns_dynamic() &&
          !task_spec.streaming_generator() && task_spec.max_retries() != 0;
+}
+
+bool RecoverySuccessionManager::RecoveryFrontierEnabled() const {
+  absl::MutexLock lock(&mutex_);
+  return recovery_frontier_planner_ != nullptr;
+}
+
+std::optional<RecoveryFrontierMembership>
+RecoverySuccessionManager::RegisterOwnerTaskWithRecoveryFrontier(
+    const TaskSpecification &task_spec) {
+  const rpc::TaskSpec &task_proto = task_spec.GetMessage();
+  if (!IsEligibleTask(task_proto) || task_proto.task_id().empty() ||
+      task_spec.NumReturns() == 0) {
+    return std::nullopt;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  if (recovery_frontier_planner_ == nullptr) {
+    return std::nullopt;
+  }
+  return recovery_frontier_planner_->RegisterTask(task_proto);
+}
+
+std::optional<RecoveryFrontierMembership>
+RecoverySuccessionManager::GetRecoveryFrontierMembership(
+    const TaskID &task_id) const {
+  absl::MutexLock lock(&mutex_);
+  if (recovery_frontier_planner_ == nullptr) {
+    return std::nullopt;
+  }
+  return recovery_frontier_planner_->FindTask(task_id);
+}
+
+std::optional<RecoveryFrontierAppendBatch>
+RecoverySuccessionManager::StageRecoveryFrontierAppend(
+    const TaskID &group_id, uint32_t max_batch_members) {
+  absl::MutexLock lock(&mutex_);
+  if (recovery_frontier_planner_ == nullptr) {
+    return std::nullopt;
+  }
+  RecoveryFrontierGroup *group =
+      recovery_frontier_planner_->GetMutableGroup(group_id);
+  return group == nullptr ? std::nullopt : group->StageAppend(max_batch_members);
+}
+
+bool RecoverySuccessionManager::CommitRecoveryFrontierAppend(
+    const RecoveryFrontierAppendBatch &batch) {
+  absl::MutexLock lock(&mutex_);
+  if (recovery_frontier_planner_ == nullptr) {
+    return false;
+  }
+  RecoveryFrontierGroup *group =
+      recovery_frontier_planner_->GetMutableGroup(batch.group_id);
+  return group != nullptr && group->CommitAppend(batch);
+}
+
+bool RecoverySuccessionManager::AbortRecoveryFrontierAppend(
+    const RecoveryFrontierAppendBatch &batch) {
+  absl::MutexLock lock(&mutex_);
+  if (recovery_frontier_planner_ == nullptr) {
+    return false;
+  }
+  RecoveryFrontierGroup *group =
+      recovery_frontier_planner_->GetMutableGroup(batch.group_id);
+  return group != nullptr && group->AbortAppend(batch);
+}
+
+bool RecoverySuccessionManager::ExtractRecoveryFrontierTaskForReturn(
+    const TaskID &group_id,
+    uint32_t group_return_index,
+    rpc::TaskSpec *task_spec,
+    uint32_t *task_return_index) const {
+  absl::MutexLock lock(&mutex_);
+  if (recovery_frontier_planner_ == nullptr) {
+    return false;
+  }
+  const RecoveryFrontierGroup *group =
+      recovery_frontier_planner_->GetGroup(group_id);
+  return group != nullptr &&
+         group->ExtractTaskForReturn(
+             group_return_index, task_spec, task_return_index);
 }
 
 bool RecoverySuccessionManager::CarriesRecoveryMetadata(
@@ -534,6 +624,13 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
   }
 
   const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
+
+  // Register every eligible live owner task with the shared frontier planner
+  // before any backend-specific activation/filtering. This is owner-local only:
+  // no holder, witness, manifest, or candidate RPC is emitted here.
+  if (RecoveryFrontierEnabled() && !returned_refs.empty()) {
+    static_cast<void>(RegisterOwnerTaskWithRecoveryFrontier(task_spec));
+  }
 
   const bool baseline_enabled =
       RayConfig::instance().enable_recovery_witness_holder_baseline();

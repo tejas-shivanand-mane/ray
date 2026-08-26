@@ -220,6 +220,20 @@ RAY_CONFIG(bool, enable_recovery_baseline_serialize_task_spec_once, false)
 /// failure/correctness testing.
 RAY_CONFIG(uint32_t, recovery_baseline_perf_protect_every_n, 1)
 
+/// Enables correctness-capable Recovery Frontier grouping above the selected
+/// recovery backend. When enabled, eligible owner tasks are assigned to
+/// append-only frontier groups. The first task in each group is the protected
+/// leader; later members share that protection topology once their replay
+/// recipes are durably appended.
+///
+/// This is independent of recovery_baseline_perf_protect_every_n, which remains
+/// a performance-only proxy and must stay at 1 for correctness experiments.
+RAY_CONFIG(bool, enable_recovery_frontier, false)
+
+/// Maximum number of task replay recipes in one Recovery Frontier group.
+/// K=1 degenerates to ordinary per-task protection.
+RAY_CONFIG(uint32_t, recovery_frontier_group_size, 16)
+
 RAY_CONFIG(uint32_t, recovery_succession_target_holder_count, 2)
 
 /// Number of node-distinct raylets that retain the latest compact recovery

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -27,6 +28,7 @@
 #include "absl/synchronization/mutex.h"
 #include "ray/common/id.h"
 #include "ray/common/task/task_spec.h"
+#include "ray/core_worker/recovery_frontier.h"
 #include "src/ray/protobuf/common.pb.h"
 #include "src/ray/protobuf/core_worker.pb.h"
 
@@ -245,6 +247,34 @@ class RecoverySuccessionManager {
 
   /// Returns true when recovery succession supports the task.
   static bool IsEligibleTask(const rpc::TaskSpec &task_spec);
+
+  /// Returns whether owner-side correctness-capable Recovery Frontier
+  /// grouping is enabled for this manager.
+  bool RecoveryFrontierEnabled() const;
+
+  /// Assign an eligible owner task to its append-only frontier group. The
+  /// first member becomes the immediately protectable group leader.
+  std::optional<RecoveryFrontierMembership> RegisterOwnerTaskWithRecoveryFrontier(
+      const TaskSpecification &task_spec);
+
+  /// Return stable group coordinates for a previously registered owner task.
+  std::optional<RecoveryFrontierMembership> GetRecoveryFrontierMembership(
+      const TaskID &task_id) const;
+
+  /// Stage/commit/abort the next contiguous group append. These methods expose
+  /// the frontier acknowledged-prefix state machine to either protection
+  /// backend without coupling the planner to Baseline or Succession RPCs.
+  std::optional<RecoveryFrontierAppendBatch> StageRecoveryFrontierAppend(
+      const TaskID &group_id, uint32_t max_batch_members = 0);
+  bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
+  bool AbortRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
+
+  /// Resolve a committed group-global return index back to the original task
+  /// replay recipe. Uncommitted members deliberately return false.
+  bool ExtractRecoveryFrontierTaskForReturn(const TaskID &group_id,
+                                            uint32_t group_return_index,
+                                            rpc::TaskSpec *task_spec,
+                                            uint32_t *task_return_index) const;
 
   /// Returns true only when a task actually carries Recovery Succession
   /// state: either its own recovery manifest or recovery metadata on one of
@@ -471,6 +501,12 @@ class RecoverySuccessionManager {
   const bool profiling_enabled_;
 
   mutable absl::Mutex mutex_;
+
+  /// Backend-neutral owner-side grouping state. Null when Recovery Frontiers
+  /// are disabled. All access is serialized by the manager mutex so the
+  /// planner itself remains deliberately lock-free.
+  std::unique_ptr<RecoveryFrontierPlanner> recovery_frontier_planner_
+      ABSL_GUARDED_BY(mutex_);
 
   mutable RecoverySuccessionProfile profile_ ABSL_GUARDED_BY(mutex_);
 
