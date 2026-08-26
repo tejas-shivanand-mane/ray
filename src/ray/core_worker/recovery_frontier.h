@@ -1,0 +1,116 @@
+// Copyright 2026 The Ray Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//  http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "ray/common/id.h"
+#include "src/ray/protobuf/common.pb.h"
+
+namespace ray::core {
+
+/// Describes one task inside a recovery-frontier capsule.
+///
+/// A frontier capsule is deliberately not a DAG checkpoint. The first task is
+/// the protected frontier leader and later independent or dependent tasks may
+/// append their replay recipes to the same capsule. This lets one protection
+/// topology amortize control-plane work across a window of fine-grained tasks.
+struct RecoveryFrontierMember {
+  TaskID task_id = TaskID::Nil();
+  rpc::TaskSpec task_spec;
+  uint32_t member_index = 0;
+  uint32_t first_group_return_index = 0;
+  uint32_t num_returns = 0;
+};
+
+struct RecoveryFrontierMembership {
+  TaskID group_id = TaskID::Nil();
+  uint32_t member_index = 0;
+  uint32_t first_group_return_index = 0;
+  uint32_t num_returns = 0;
+  bool is_leader = false;
+  bool closes_group = false;
+};
+
+/// Owner-local append-only recovery-frontier capsule.
+///
+/// The group ID is the first member's TaskID, so the leader can be protected
+/// immediately even if no second task ever arrives. K therefore controls only
+/// how many later replay recipes may share that protection unit; it never
+/// delays protection of a single-task workload.
+class RecoveryFrontierGroup {
+ public:
+  RecoveryFrontierGroup(TaskID group_id, uint32_t max_members);
+
+  const TaskID &GroupId() const { return group_id_; }
+  uint32_t MaxMembers() const { return max_members_; }
+  uint32_t MemberCount() const { return static_cast<uint32_t>(members_.size()); }
+  uint32_t TotalReturns() const { return next_group_return_index_; }
+  bool Full() const { return MemberCount() >= max_members_; }
+
+  /// Append a replayable TaskSpec. Returns its stable membership coordinates.
+  /// Duplicate TaskIDs are idempotent and return the original membership.
+  std::optional<RecoveryFrontierMembership> AddTask(const rpc::TaskSpec &task_spec);
+
+  /// Look up a member by its producer TaskID.
+  std::optional<RecoveryFrontierMembership> FindTask(const TaskID &task_id) const;
+
+  /// Resolve a group-global return index to the original TaskSpec and local
+  /// return index. This is the operation used by recovery after a holder has
+  /// recovered the shared frontier capsule.
+  bool ExtractTaskForReturn(uint32_t group_return_index,
+                            rpc::TaskSpec *task_spec,
+                            uint32_t *task_return_index) const;
+
+  const std::vector<RecoveryFrontierMember> &Members() const { return members_; }
+
+ private:
+  TaskID group_id_;
+  uint32_t max_members_;
+  uint32_t next_group_return_index_ = 0;
+  std::vector<RecoveryFrontierMember> members_;
+  absl::flat_hash_map<TaskID, uint32_t> task_to_member_index_;
+};
+
+/// Assigns tasks submitted by one owner to append-only frontier groups.
+///
+/// Grouping is submission-order based rather than DAG-depth based. This is
+/// intentional: it works for both independent map-style tasks and connected
+/// task DAGs. The first task opens a group and becomes its immediately
+/// protectable leader. Up to K-1 later tasks reuse the same protection unit.
+class RecoveryFrontierPlanner {
+ public:
+  explicit RecoveryFrontierPlanner(uint32_t group_size);
+
+  uint32_t GroupSize() const { return group_size_; }
+
+  RecoveryFrontierMembership RegisterTask(const rpc::TaskSpec &task_spec);
+
+  std::optional<RecoveryFrontierMembership> FindTask(const TaskID &task_id) const;
+
+  const RecoveryFrontierGroup *GetGroup(const TaskID &group_id) const;
+  RecoveryFrontierGroup *GetMutableGroup(const TaskID &group_id);
+
+ private:
+  uint32_t group_size_;
+  TaskID open_group_id_ = TaskID::Nil();
+  absl::flat_hash_map<TaskID, RecoveryFrontierGroup> groups_;
+  absl::flat_hash_map<TaskID, RecoveryFrontierMembership> membership_by_task_;
+};
+
+}  // namespace ray::core
