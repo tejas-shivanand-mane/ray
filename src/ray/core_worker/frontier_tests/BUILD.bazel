@@ -1,0 +1,9 @@
+cc_test(
+    name = "recovery_frontier_test",
+    srcs = ["recovery_frontier_test.cc"],
+    deps = [
+        "//src/ray/core_worker:recovery_frontier",
+        "//src/ray/protobuf:common_cc_proto",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
