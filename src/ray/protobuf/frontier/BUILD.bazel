@@ -1,0 +1,15 @@
+load("@rules_cc//cc:defs.bzl", "cc_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+package(default_visibility = ["//visibility:public"])
+
+proto_library(
+    name = "recovery_frontier_proto",
+    srcs = ["recovery_frontier.proto"],
+    deps = ["//src/ray/protobuf:common_proto"],
+)
+
+cc_proto_library(
+    name = "recovery_frontier_cc_proto",
+    deps = [":recovery_frontier_proto"],
+)

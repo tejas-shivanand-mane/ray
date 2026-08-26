@@ -1,0 +1,23 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "recovery_frontier_store",
+    srcs = ["recovery_frontier_store.cc"],
+    hdrs = ["recovery_frontier_store.h"],
+    deps = [
+        "//src/ray/common:id",
+        "//src/ray/protobuf/frontier:recovery_frontier_cc_proto",
+        "@com_google_absl//absl/container:flat_hash_map",
+    ],
+)
+
+cc_test(
+    name = "recovery_frontier_store_test",
+    srcs = ["recovery_frontier_store_test.cc"],
+    deps = [
+        ":recovery_frontier_store",
+        "//src/ray/common:id",
+        "//src/ray/protobuf/frontier:recovery_frontier_cc_proto",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
