@@ -47,12 +47,33 @@ struct RecoveryFrontierMembership {
   bool closes_group = false;
 };
 
+/// One staged append to a protected frontier group.
+///
+/// The backend (fixed-R or Succession) publishes every member in `members` to
+/// the group's already-selected holders. The append becomes visible to
+/// borrowers only after the backend ACKs the whole batch and CommitAppend()
+/// advances the committed prefix.
+struct RecoveryFrontierAppendBatch {
+  TaskID group_id = TaskID::Nil();
+  uint64_t base_generation = 0;
+  uint64_t generation = 0;
+  uint32_t begin_member_index = 0;
+  uint32_t end_member_index = 0;  // exclusive
+  std::vector<RecoveryFrontierMember> members;
+};
+
 /// Owner-local append-only recovery-frontier capsule.
 ///
 /// The group ID is the first member's TaskID, so the leader can be protected
 /// immediately even if no second task ever arrives. K therefore controls only
 /// how many later replay recipes may share that protection unit; it never
 /// delays protection of a single-task workload.
+///
+/// Durability is prefix-based. At most one append is in flight per group. An
+/// object may advertise frontier recovery only if its member index is below
+/// CommittedMemberCount(). This gives a simple crash invariant: after owner
+/// failure, every advertised member exists at all holders required by the
+/// selected protection backend.
 class RecoveryFrontierGroup {
  public:
   RecoveryFrontierGroup(TaskID group_id, uint32_t max_members);
@@ -61,18 +82,35 @@ class RecoveryFrontierGroup {
   uint32_t MaxMembers() const { return max_members_; }
   uint32_t MemberCount() const { return static_cast<uint32_t>(members_.size()); }
   uint32_t TotalReturns() const { return next_group_return_index_; }
+  uint32_t CommittedMemberCount() const { return committed_member_count_; }
+  uint64_t Generation() const { return generation_; }
   bool Full() const { return MemberCount() >= max_members_; }
+  bool AppendInFlight() const { return append_in_flight_; }
+  bool HasUncommittedMembers() const { return committed_member_count_ < MemberCount(); }
 
   /// Append a replayable TaskSpec. Returns its stable membership coordinates.
   /// Duplicate TaskIDs are idempotent and return the original membership.
   std::optional<RecoveryFrontierMembership> AddTask(const rpc::TaskSpec &task_spec);
 
+  /// Stage the next contiguous append. Only one append may be in flight.
+  /// max_batch_members=0 means stage every currently uncommitted member.
+  std::optional<RecoveryFrontierAppendBatch> StageAppend(uint32_t max_batch_members = 0);
+
+  /// Commit exactly the currently staged append after backend durability ACKs.
+  /// Returns false for stale/out-of-order ACKs and leaves state unchanged.
+  bool CommitAppend(const RecoveryFrontierAppendBatch &batch);
+
+  /// Abort exactly the currently staged append. Members remain pending and may
+  /// be staged again with a new generation.
+  bool AbortAppend(const RecoveryFrontierAppendBatch &batch);
+
+  bool IsTaskCommitted(const TaskID &task_id) const;
+
   /// Look up a member by its producer TaskID.
   std::optional<RecoveryFrontierMembership> FindTask(const TaskID &task_id) const;
 
   /// Resolve a group-global return index to the original TaskSpec and local
-  /// return index. This is the operation used by recovery after a holder has
-  /// recovered the shared frontier capsule.
+  /// return index. Only committed members are eligible for recovery.
   bool ExtractTaskForReturn(uint32_t group_return_index,
                             rpc::TaskSpec *task_spec,
                             uint32_t *task_return_index) const;
@@ -80,9 +118,17 @@ class RecoveryFrontierGroup {
   const std::vector<RecoveryFrontierMember> &Members() const { return members_; }
 
  private:
+  bool MatchesInFlight(const RecoveryFrontierAppendBatch &batch) const;
+
   TaskID group_id_;
   uint32_t max_members_;
   uint32_t next_group_return_index_ = 0;
+  uint32_t committed_member_count_ = 0;
+  uint64_t generation_ = 0;
+  bool append_in_flight_ = false;
+  uint64_t in_flight_generation_ = 0;
+  uint32_t in_flight_begin_ = 0;
+  uint32_t in_flight_end_ = 0;
   std::vector<RecoveryFrontierMember> members_;
   absl::flat_hash_map<TaskID, uint32_t> task_to_member_index_;
 };
