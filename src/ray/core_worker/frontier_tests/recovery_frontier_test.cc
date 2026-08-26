@@ -74,7 +74,7 @@ TEST(RecoveryFrontierTest, AckedPrefixControlsRecoverability) {
   const rpc::TaskSpec second = MakeTask('b', /*num_returns=*/3);
 
   const auto first_membership = planner.RegisterTask(first);
-  const auto second_membership = planner.RegisterTask(second);
+  planner.RegisterTask(second);
   RecoveryFrontierGroup *group = planner.GetMutableGroup(first_membership.group_id);
   ASSERT_NE(group, nullptr);
 
