@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/frontier-integration.patch'
+      - '.github/apply_frontier_integration.py'
 
 permissions:
   contents: write
@@ -16,13 +16,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply integration patch and commit
+      - name: Apply integration and commit
         shell: bash
         run: |
           set -euo pipefail
-          git apply --check .github/frontier-integration.patch
-          git apply .github/frontier-integration.patch
-          rm .github/frontier-integration.patch
+          python .github/apply_frontier_integration.py
+          rm -f .github/frontier-integration.patch
+          rm .github/apply_frontier_integration.py
           rm .github/workflows/apply-frontier-integration.yml
           git config user.name "openai-frontier-bot"
           git config user.email "openai-frontier-bot@users.noreply.github.com"
