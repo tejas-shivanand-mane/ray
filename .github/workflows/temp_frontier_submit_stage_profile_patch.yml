@@ -1,0 +1,29 @@
+name: Temporary Recovery Frontier Submit Stage Profile Patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp_frontier_submit_stage_profile_patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply submit-stage profiling patch
+        run: python3 tmp_frontier_submit_stage_profile_patch.py
+      - name: Commit source changes
+        shell: bash
+        run: |
+          git config user.name "tejas-shivanand-mane"
+          git config user.email "38262749+tejas-shivanand-mane@users.noreply.github.com"
+          git add src/ray/core_worker/core_worker.h src/ray/core_worker/core_worker.cc
+          git diff --cached --check
+          git commit -m "Profile normal task submission stages [skip ci]"
+          git push origin HEAD:main
