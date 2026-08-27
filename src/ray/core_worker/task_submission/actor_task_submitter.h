@@ -118,7 +118,16 @@ class ActorTaskSubmitter : public ActorTaskSubmitterInterface {
                                 bool owned) override;
 
   /// Submit a task to an actor for execution.
-  void SubmitTask(TaskSpecification task_spec);
+  /// When defer_dependency_resolution is true, the actor sequence position is
+  /// reserved immediately but dependency resolution starts only after
+  /// ResumeDeferredTask().
+  void SubmitTask(TaskSpecification task_spec,
+                  bool defer_dependency_resolution = false);
+
+  /// Resume an actor task whose dependency resolution was deferred behind a
+  /// Recovery Frontier durability barrier. Safe to call after cancellation or
+  /// actor death; stale resumes are ignored.
+  void ResumeDeferredTask(const TaskID &task_id);
 
   /// Submit an actor creation task to an actor via GCS.
   void SubmitActorCreationTask(TaskSpecification task_spec);
@@ -368,6 +377,9 @@ class ActorTaskSubmitter : public ActorTaskSubmitterInterface {
     }
   };
 
+  void StartDependencyResolution(TaskSpecification task_spec)
+      ABSL_LOCKS_EXCLUDED(resolver_mu_);
+
   void CancelDependencyResolution(const TaskID &task_id)
       ABSL_LOCKS_EXCLUDED(resolver_mu_);
 
@@ -439,6 +451,10 @@ class ActorTaskSubmitter : public ActorTaskSubmitterInterface {
   // immediately and it acquires mu_ and needs to call GetTaskManagerWithoutMu.
   absl::Mutex resolver_mu_ ABSL_ACQUIRED_BEFORE(mu_);
   absl::flat_hash_set<TaskID> pending_dependency_resolution_
+      ABSL_GUARDED_BY(resolver_mu_);
+  // Subset of pending_dependency_resolution_ whose actor sequence positions are
+  // already reserved but whose dependency resolver has not yet been started.
+  absl::flat_hash_set<TaskID> deferred_dependency_resolution_
       ABSL_GUARDED_BY(resolver_mu_);
 
   /// Resolve object dependencies.

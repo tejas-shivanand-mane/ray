@@ -2018,7 +2018,8 @@ std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
 
 Status CoreWorker::GetOwnershipInfo(const ObjectID &object_id,
                                     rpc::Address *owner_address,
-                                    std::string *serialized_object_status) {
+                                    std::string *serialized_object_status,
+                                    bool task_argument_serialization) {
   auto has_owner = reference_counter_->GetOwner(object_id, owner_address);
   if (!has_owner) {
     std::ostringstream stream;
@@ -2047,7 +2048,25 @@ Status CoreWorker::GetOwnershipInfo(const ObjectID &object_id,
   if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
     rpc::RecoveryObjectMetadata metadata;
 
-    if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
+    // Nested ObjectRefs serialized as task arguments are seen again by
+    // BuildCommonTaskSpec via nested_inlined_refs(). For Fixed-R Frontier K>1,
+    // do not synchronously cross the all-R durability barrier here; the task
+    // builder attaches the owner-local recovery sidecar and gates remote dispatch
+    // on the same Frontier ACK. Explicit/out-of-band serialization, Fixed-R K1,
+    // and Succession retain the original blocking visibility contract.
+    const bool defer_frontier_task_argument_activation =
+        task_argument_serialization &&
+        recovery_witness_holder_baseline_enabled_ &&
+        recovery_succession_manager_->RecoveryFrontierEnabled() &&
+        RayConfig::instance().recovery_frontier_group_size() > 1;
+
+    if (defer_frontier_task_argument_activation) {
+      // Preserve already-committed metadata without activating new protection.
+      // PopulateRecoveryMetadata exposes only committed recovery state.
+      if (recovery_succession_manager_->PopulateRecoveryMetadata(object_id, &metadata)) {
+        object_status.mutable_recovery_metadata()->CopyFrom(metadata);
+      }
+    } else if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
       object_status.mutable_recovery_metadata()->CopyFrom(metadata);
     }
   }
@@ -4055,6 +4074,14 @@ Status CoreWorker::SubmitActorTask(
                              ? function.GetFunctionDescriptor()->DefaultTaskName()
                              : task_options.name;
 
+  const bool defer_recovery_frontier_dispatch =
+      recovery_succession_enabled_ &&
+      recovery_witness_holder_baseline_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
+      recovery_succession_manager_->RecoveryFrontierEnabled() &&
+      RayConfig::instance().recovery_frontier_group_size() > 1;
+  std::vector<DeferredRecoveryFrontierGroup> deferred_recovery_frontier_groups;
+
   // The depth of the actor task is depth of the caller + 1
   // The caller is not necessarily the creator of the actor.
   int64_t depth = worker_context_->GetTaskDepth() + 1;
@@ -4086,7 +4113,10 @@ Status CoreWorker::SubmitActorTask(
                       /*labels=*/task_options.labels,
                       /*label_selector=*/{},
                       /*fallback_strategy=*/{},
-                      task_options.num_objects_per_yield);
+                      task_options.num_objects_per_yield,
+                      defer_recovery_frontier_dispatch
+                          ? &deferred_recovery_frontier_groups
+                          : nullptr);
   // NOTE: placement_group_capture_child_tasks and runtime_env will
   // be ignored in the actor because we should always follow the actor's option.
 
@@ -4102,7 +4132,31 @@ Status CoreWorker::SubmitActorTask(
   RAY_LOG(DEBUG) << "Submitting actor task " << task_spec.DebugString();
   task_returns = task_manager_->AddPendingTask(
       rpc_address_, task_spec, CurrentCallSite(), max_retries);
-  actor_task_submitter_->SubmitTask(task_spec);
+
+  const bool defer_actor_dependency_resolution =
+      defer_recovery_frontier_dispatch &&
+      !deferred_recovery_frontier_groups.empty();
+  // Reserve the actor sequence position immediately. When deferred, the
+  // ActorTaskSubmitter holds dependency resolution until all Frontier groups
+  // protecting this task's arguments have committed.
+  actor_task_submitter_->SubmitTask(task_spec, defer_actor_dependency_resolution);
+
+  if (defer_actor_dependency_resolution) {
+    auto remaining_groups = std::make_shared<std::atomic<size_t>>(
+        deferred_recovery_frontier_groups.size());
+    for (const DeferredRecoveryFrontierGroup &group :
+         deferred_recovery_frontier_groups) {
+      PublishRecoveryFrontierGroupAsync(
+          group.group_id,
+          group.protection_manifest,
+          [this, actor_task_id, remaining_groups]() {
+            if (remaining_groups->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+              actor_task_submitter_->ResumeDeferredTask(actor_task_id);
+            }
+          });
+    }
+  }
+
   return Status::OK();
 }
 

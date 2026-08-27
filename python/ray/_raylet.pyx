@@ -307,6 +307,13 @@ async_task_id = contextvars.ContextVar('async_task_id', default=None)
 async_task_name = contextvars.ContextVar('async_task_name', default=None)
 async_task_function_name = contextvars.ContextVar('async_task_function_name',                                                  default=None)
 
+# True only while a normal or actor task's by-value arguments are being
+# serialized. Nested ObjectRefs encountered in this scope may defer lazy K>1
+# Recovery Frontier activation to BuildCommonTaskSpec. Generic serialization
+# (ray.put, cloudpickle, explicit ObjectRef serialization) remains synchronous.
+task_argument_serialization = contextvars.ContextVar(
+    'ray_task_argument_serialization', default=False)
+
 
 # Update the type names of the extension type so they are
 # ray.{ObjectRef, ObjectRefGenerator} instead of ray._raylet.*
@@ -3869,9 +3876,13 @@ cdef class CoreWorker:
             prepare_fallback_strategy(fallback_strategy, &c_fallback_strategy)
             ray_function = CRayFunction(
                 language.lang, function_descriptor.descriptor)
-            prepare_args_and_increment_put_refs(
-                language, args, &args_vector, function_descriptor,
-                &incremented_put_arg_ids)
+            task_arg_token = task_argument_serialization.set(True)
+            try:
+                prepare_args_and_increment_put_refs(
+                    language, args, &args_vector, function_descriptor,
+                    &incremented_put_arg_ids)
+            finally:
+                task_argument_serialization.reset(task_arg_token)
 
             task_options = CTaskOptions(
                 name, num_returns, c_resources,
@@ -4150,9 +4161,13 @@ cdef class CoreWorker:
             prepare_labels(labels, &c_labels)
             ray_function = CRayFunction(
                 language.lang, function_descriptor.descriptor)
-            prepare_args_and_increment_put_refs(
-                language, args, &args_vector, function_descriptor,
-                &incremented_put_arg_ids)
+            task_arg_token = task_argument_serialization.set(True)
+            try:
+                prepare_args_and_increment_put_refs(
+                    language, args, &args_vector, function_descriptor,
+                    &incremented_put_arg_ids)
+            finally:
+                task_argument_serialization.reset(task_arg_token)
 
             current_c_task_id = current_task.native()
 
@@ -4527,8 +4542,10 @@ cdef class CoreWorker:
             CObjectID c_object_id = object_ref.native()
             CAddress c_owner_address = CAddress()
             c_string serialized_object_status
+            c_bool task_arg_mode = bool(task_argument_serialization.get())
         op_status = CCoreWorkerProcess.GetCoreWorker().GetOwnershipInfo(
-                c_object_id, &c_owner_address, &serialized_object_status)
+                c_object_id, &c_owner_address, &serialized_object_status,
+                task_arg_mode)
         check_status(op_status)
         return (object_ref,
                 c_owner_address.SerializeAsString(),

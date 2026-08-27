@@ -165,17 +165,66 @@ void ActorTaskSubmitter::SubmitActorCreationTask(TaskSpecification task_spec) {
   });
 }
 
-void ActorTaskSubmitter::SubmitTask(TaskSpecification task_spec) {
+void ActorTaskSubmitter::StartDependencyResolution(TaskSpecification task_spec) {
+  const auto task_id = task_spec.TaskId();
+  const auto actor_id = task_spec.ActorId();
+  const auto send_pos = task_spec.ConcurrencyGroupSequenceNumber();
+  const auto concurrency_group = task_spec.ConcurrencyGroupName();
+
+  io_service_.post(
+      [task_spec, task_id, actor_id, send_pos, concurrency_group, this]() mutable {
+        {
+          absl::MutexLock resolver_lock(&resolver_mu_);
+          if (pending_dependency_resolution_.erase(task_id) == 0) {
+            return;
+          }
+          deferred_dependency_resolution_.erase(task_id);
+        }
+        resolver_.ResolveDependencies(
+            task_spec,
+            [this, send_pos, concurrency_group, actor_id, task_id](Status status) {
+              task_manager_.MarkDependenciesResolved(task_id);
+              bool fail_or_retry_task = false;
+              {
+                absl::MutexLock lock(&mu_);
+                auto queue = client_queues_.find(actor_id);
+                RAY_CHECK(queue != client_queues_.end());
+                auto &actor_submit_queue = queue->second.actor_submit_queue_;
+                // Only dispatch tasks if the submitted task is still queued. The task
+                // may have been dequeued if the actor has since failed.
+                if (actor_submit_queue->Contains(concurrency_group, send_pos)) {
+                  if (status.ok()) {
+                    actor_submit_queue->MarkDependencyResolved(concurrency_group,
+                                                               send_pos);
+                    SendPendingTasks(actor_id);
+                  } else {
+                    fail_or_retry_task = true;
+                    actor_submit_queue->MarkDependencyFailed(concurrency_group,
+                                                             send_pos);
+                  }
+                }
+              }
+
+              if (fail_or_retry_task) {
+                task_manager_.FailOrRetryPendingTask(
+                    task_id, rpc::ErrorType::DEPENDENCY_RESOLUTION_FAILED, &status);
+              }
+            });
+      },
+      "ActorTaskSubmitter::StartDependencyResolution");
+}
+
+void ActorTaskSubmitter::SubmitTask(TaskSpecification task_spec,
+                                    bool defer_dependency_resolution) {
   auto task_id = task_spec.TaskId();
   auto actor_id = task_spec.ActorId();
   RAY_LOG(DEBUG).WithField(task_id) << "Submitting task";
   RAY_CHECK(task_spec.IsActorTask());
 
   bool task_queued = false;
-  uint64_t send_pos = 0;
   {
-    // We must release mu_ before resolving the task dependencies since the callback that
-    // reacquires mu_ may get called in the same call stack.
+    // Reserve actor send order before dependency resolution. This remains true
+    // even when Recovery Frontier durability temporarily defers resolution.
     absl::MutexLock lock(&mu_);
     auto queue = client_queues_.find(actor_id);
     RAY_CHECK(queue != client_queues_.end());
@@ -184,12 +233,8 @@ void ActorTaskSubmitter::SubmitTask(TaskSpecification task_spec) {
       RestartActorForLineageReconstruction(actor_id);
     }
     if (queue->second.state_ != rpc::ActorTableData::DEAD) {
-      // We must fix the send order prior to resolving dependencies, which may
-      // complete out of order. This ensures that we will not deadlock due to
-      // backpressure. The receiving actor will execute the tasks according to
-      // this sequence number.
-      send_pos = task_spec.ConcurrencyGroupSequenceNumber();
-      auto concurrency_group = task_spec.ConcurrencyGroupName();
+      const uint64_t send_pos = task_spec.ConcurrencyGroupSequenceNumber();
+      const auto concurrency_group = task_spec.ConcurrencyGroupName();
       queue->second.actor_submit_queue_->Emplace(concurrency_group, send_pos, task_spec);
       queue->second.cur_pending_calls_++;
       task_queued = true;
@@ -200,48 +245,13 @@ void ActorTaskSubmitter::SubmitTask(TaskSpecification task_spec) {
     {
       absl::MutexLock resolver_lock(&resolver_mu_);
       pending_dependency_resolution_.insert(task_id);
+      if (defer_dependency_resolution) {
+        deferred_dependency_resolution_.insert(task_id);
+      }
     }
-    auto concurrency_group = task_spec.ConcurrencyGroupName();
-    io_service_.post(
-        [task_spec, task_id, actor_id, send_pos, concurrency_group, this]() mutable {
-          {
-            absl::MutexLock resolver_lock(&resolver_mu_);
-            if (pending_dependency_resolution_.erase(task_id) == 0) {
-              return;
-            }
-            resolver_.ResolveDependencies(
-                task_spec,
-                [this, send_pos, concurrency_group, actor_id, task_id](Status status) {
-                  task_manager_.MarkDependenciesResolved(task_id);
-                  bool fail_or_retry_task = false;
-                  {
-                    absl::MutexLock lock(&mu_);
-                    auto queue = client_queues_.find(actor_id);
-                    RAY_CHECK(queue != client_queues_.end());
-                    auto &actor_submit_queue = queue->second.actor_submit_queue_;
-                    // Only dispatch tasks if the submitted task is still queued. The task
-                    // may have been dequeued if the actor has since failed.
-                    if (actor_submit_queue->Contains(concurrency_group, send_pos)) {
-                      if (status.ok()) {
-                        actor_submit_queue->MarkDependencyResolved(concurrency_group,
-                                                                   send_pos);
-                        SendPendingTasks(actor_id);
-                      } else {
-                        fail_or_retry_task = true;
-                        actor_submit_queue->MarkDependencyFailed(concurrency_group,
-                                                                 send_pos);
-                      }
-                    }
-                  }
-
-                  if (fail_or_retry_task) {
-                    task_manager_.FailOrRetryPendingTask(
-                        task_id, rpc::ErrorType::DEPENDENCY_RESOLUTION_FAILED, &status);
-                  }
-                });
-          }
-        },
-        "ActorTaskSubmitter::SubmitTask");
+    if (!defer_dependency_resolution) {
+      StartDependencyResolution(std::move(task_spec));
+    }
   } else {
     // Do not hold the lock while calling into task_manager_.
     task_manager_.MarkTaskNoRetry(task_id);
@@ -255,8 +265,7 @@ void ActorTaskSubmitter::SubmitTask(TaskSpecification task_spec) {
       error_type = error_info.error_type();
     }
     auto status = Status::IOError("cancelling task of dead actor");
-    // No need to increment the number of completed tasks since the actor is
-    // dead.
+    // No need to increment the number of completed tasks since the actor is dead.
     bool fail_immediately =
         error_info.has_actor_died_error() &&
         error_info.actor_died_error().has_oom_context() &&
@@ -270,8 +279,27 @@ void ActorTaskSubmitter::SubmitTask(TaskSpecification task_spec) {
   }
 }
 
+void ActorTaskSubmitter::ResumeDeferredTask(const TaskID &task_id) {
+  {
+    absl::MutexLock resolver_lock(&resolver_mu_);
+    if (deferred_dependency_resolution_.erase(task_id) == 0) {
+      // Cancellation, actor death, or a duplicate callback may have removed it.
+      return;
+    }
+  }
+
+  auto task_spec = task_manager_.GetTaskSpec(task_id);
+  if (!task_spec.has_value()) {
+    absl::MutexLock resolver_lock(&resolver_mu_);
+    pending_dependency_resolution_.erase(task_id);
+    return;
+  }
+  StartDependencyResolution(std::move(task_spec.value()));
+}
+
 void ActorTaskSubmitter::CancelDependencyResolution(const TaskID &task_id) {
   absl::MutexLock resolver_lock(&resolver_mu_);
+  deferred_dependency_resolution_.erase(task_id);
   pending_dependency_resolution_.erase(task_id);
   RAY_UNUSED(resolver_.CancelDependencyResolution(task_id));
 }

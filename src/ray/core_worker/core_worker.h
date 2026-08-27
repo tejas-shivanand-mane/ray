@@ -563,7 +563,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// \param[out] serialized_object_status The serialized object status protobuf.
   Status GetOwnershipInfo(const ObjectID &object_id,
                           rpc::Address *owner_address,
-                          std::string *serialized_object_status);
+                          std::string *serialized_object_status,
+                          bool task_argument_serialization = false);
 
   /// Add a reference to an ObjectID that was deserialized by the language
   /// frontend. This will also start the process to resolve the future.
