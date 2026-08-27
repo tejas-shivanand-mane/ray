@@ -8,11 +8,25 @@
 
 #include "ray/core_worker/recovery_frontier_wire/recovery_frontier_wire.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #include "ray/util/logging.h"
 
 namespace ray::core {
+namespace {
+
+// Keep this short because it is paid once per logical frontier append, but make
+// it distinctive enough that ordinary protobuf TaskSpec bytes cannot be
+// mistaken for a frontier payload in practice. The trailing NUL is part of the
+// envelope and makes accidental text-prefix collisions even less likely.
+constexpr char kRecoveryFrontierAppendMagic[] = {'R', 'A', 'Y', 'F', 'R', 'N', '1', '\0'};
+constexpr size_t kRecoveryFrontierAppendMagicSize =
+    sizeof(kRecoveryFrontierAppendMagic);
+
+}  // namespace
 
 rpc::RecoveryFrontierAppend BuildRecoveryFrontierAppend(
     const RecoveryFrontierAppendBatch &batch) {
@@ -53,6 +67,37 @@ rpc::RecoveryFrontierAppend BuildRecoveryFrontierAppend(
   }
 
   return append;
+}
+
+bool IsRecoveryFrontierAppendEnvelope(std::string_view payload) {
+  return payload.size() >= kRecoveryFrontierAppendMagicSize &&
+         payload.compare(0,
+                         kRecoveryFrontierAppendMagicSize,
+                         kRecoveryFrontierAppendMagic,
+                         kRecoveryFrontierAppendMagicSize) == 0;
+}
+
+std::string SerializeRecoveryFrontierAppendEnvelope(
+    const rpc::RecoveryFrontierAppend &append) {
+  std::string payload(kRecoveryFrontierAppendMagic,
+                      kRecoveryFrontierAppendMagicSize);
+  append.AppendToString(&payload);
+  return payload;
+}
+
+bool ParseRecoveryFrontierAppendEnvelope(std::string_view payload,
+                                         rpc::RecoveryFrontierAppend *append) {
+  // A magic-only envelope is not a valid frontier append. Protobuf accepts an
+  // empty byte sequence as a valid default message, so explicitly require a
+  // non-empty message body before parsing.
+  if (append == nullptr || !IsRecoveryFrontierAppendEnvelope(payload) ||
+      payload.size() == kRecoveryFrontierAppendMagicSize) {
+    return false;
+  }
+  append->Clear();
+  return append->ParseFromArray(
+      payload.data() + kRecoveryFrontierAppendMagicSize,
+      static_cast<int>(payload.size() - kRecoveryFrontierAppendMagicSize));
 }
 
 }  // namespace ray::core
