@@ -8,6 +8,9 @@
 
 #pragma once
 
+#include <string>
+#include <string_view>
+
 #include "ray/core_worker/recovery_frontier.h"
 #include "src/ray/protobuf/frontier/recovery_frontier.pb.h"
 
@@ -21,5 +24,14 @@ namespace ray::core {
 /// record without mutating owner state until every required backend holder ACKs.
 rpc::RecoveryFrontierAppend BuildRecoveryFrontierAppend(
     const RecoveryFrontierAppendBatch &batch);
+
+/// Versioned transport envelope used while Recovery Frontiers share the
+/// existing UpdateRecoveryWitness RPC. The prefix makes frontier appends
+/// unambiguous with the fixed-R baseline's serialized TaskSpec payload.
+bool IsRecoveryFrontierAppendEnvelope(std::string_view payload);
+std::string SerializeRecoveryFrontierAppendEnvelope(
+    const rpc::RecoveryFrontierAppend &append);
+bool ParseRecoveryFrontierAppendEnvelope(std::string_view payload,
+                                         rpc::RecoveryFrontierAppend *append);
 
 }  // namespace ray::core
