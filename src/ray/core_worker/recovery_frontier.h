@@ -33,10 +33,10 @@ namespace ray::core {
 /// topology amortize control-plane work across a window of fine-grained tasks.
 struct RecoveryFrontierMember {
   TaskID task_id = TaskID::Nil();
-  // The replay recipe is immutable after registration. Staged append batches
-  // share this canonical copy instead of deep-copying a protobuf for every
-  // publication generation. The shared ownership also keeps the recipe alive
-  // safely while asynchronous holder publication is in flight.
+  // The replay recipe is immutable after registration. Production owner tasks
+  // share the TaskManager-owned protobuf instead of deep-copying it here;
+  // TaskSpecification detaches on mutation. Staged append batches share the
+  // same immutable recipe safely while asynchronous publication is in flight.
   std::shared_ptr<const rpc::TaskSpec> task_spec;
   uint32_t member_index = 0;
   uint32_t first_group_return_index = 0;
@@ -93,9 +93,11 @@ class RecoveryFrontierGroup {
   bool AppendInFlight() const { return append_in_flight_; }
   bool HasUncommittedMembers() const { return committed_member_count_ < MemberCount(); }
 
-  /// Append a replayable TaskSpec. Returns its stable membership coordinates.
-  /// Duplicate TaskIDs are idempotent and return the original membership.
-  std::optional<RecoveryFrontierMembership> AddTask(const rpc::TaskSpec &task_spec);
+  /// Append a replayable TaskSpec with shared immutable ownership. Returns its
+  /// stable membership coordinates. Duplicate TaskIDs are idempotent and
+  /// return the original membership.
+  std::optional<RecoveryFrontierMembership> AddTask(
+      std::shared_ptr<const rpc::TaskSpec> task_spec);
 
   /// Stage the next contiguous append. Only one append may be in flight.
   /// max_batch_members=0 means stage every currently uncommitted member.
@@ -150,7 +152,13 @@ class RecoveryFrontierPlanner {
 
   uint32_t GroupSize() const { return group_size_; }
 
+  /// Compatibility/test path: make an owned immutable recipe from a protobuf
+  /// reference. Production owner registration should use the shared_ptr
+  /// overload below to avoid a second full TaskSpec copy.
   RecoveryFrontierMembership RegisterTask(const rpc::TaskSpec &task_spec);
+
+  RecoveryFrontierMembership RegisterTask(
+      std::shared_ptr<const rpc::TaskSpec> task_spec);
 
   std::optional<RecoveryFrontierMembership> FindTask(const TaskID &task_id) const;
 
