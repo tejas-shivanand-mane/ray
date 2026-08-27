@@ -383,6 +383,13 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
   /// Adds recovery metadata to direct and nested ObjectRef arguments.
   void PopulateTaskArgumentMetadata(rpc::TaskSpec *task_spec);
 
+  /// Builds the same compact argument sidecar for a task that is still local
+  /// and whose remote dispatch is gated on Recovery Frontier durability. The
+  /// sidecar may describe a staged/uncommitted frontier member, but it must
+  /// never leave this CoreWorker until the corresponding all-R ACK completes.
+  void PopulateTaskArgumentMetadataForDeferredFrontierDispatch(
+      rpc::TaskSpec *task_spec);
+
   struct BorrowedObjectRecoveryPlan {
     TaskID task_id;
     uint32_t return_index = 0;
@@ -451,8 +458,12 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
   // state. object_recovery_metadata_ is only a legacy compatibility fallback.
   bool BuildRecoveryMetadataLocked(
       const ObjectID &object_id,
-      rpc::RecoveryObjectMetadata *metadata) const
+      rpc::RecoveryObjectMetadata *metadata,
+      bool require_frontier_commit) const
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  void PopulateTaskArgumentMetadataInternal(
+      rpc::TaskSpec *task_spec, bool require_frontier_commit);
 
   struct TaskRecoveryState {
     rpc::RecoveryManifest manifest;

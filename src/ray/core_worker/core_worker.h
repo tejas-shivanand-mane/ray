@@ -16,6 +16,7 @@
 
 #include <gtest/gtest_prod.h>
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <map>
@@ -1630,17 +1631,31 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// Adds selected witnesses to a newly created owner manifest.
   void PopulateRecoveryWitnesses(rpc::RecoveryManifest *manifest) const;
 
+  struct DeferredRecoveryFrontierGroup {
+    TaskID group_id = TaskID::Nil();
+    rpc::RecoveryManifest protection_manifest;
+  };
+
   /// Populates metadata if already active; otherwise lazily initializes
   /// Recovery Succession or the fixed witness-holder baseline for an eligible
-  /// task return owned by this CoreWorker.
+  /// task return owned by this CoreWorker. When deferred_groups is non-null,
+  /// Fixed-R Frontier K>1 prepares local state without synchronously waiting
+  /// for the all-R publication barrier.
   bool TryPopulateRecoveryMetadataForObject(
       const ObjectID &object_id,
-      rpc::RecoveryObjectMetadata *metadata) const;
+      rpc::RecoveryObjectMetadata *metadata,
+      std::vector<DeferredRecoveryFrontierGroup> *deferred_groups = nullptr) const;
 
   /// Lazily activate eligible owned returns that are actually being exported
   /// as arguments of another task.
   void EnsureRecoverySuccessionForTaskArguments(
-      rpc::TaskSpec *task_spec) const;
+      rpc::TaskSpec *task_spec,
+      std::vector<DeferredRecoveryFrontierGroup> *deferred_groups = nullptr) const;
+
+  /// A chained task can be locally visible before its own upstream groups have
+  /// crossed the all-R barrier. Wait before allowing that task's output to
+  /// become an externally recoverable dependency.
+  void WaitForDeferredRecoveryTaskDependencies(const TaskID &task_id) const;
 
   using RecoveryWitnessPublishCallback =
       std::function<void(bool, std::optional<rpc::RecoveryManifest>)>;
@@ -1651,9 +1666,18 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     const rpc::TaskSpec *task_spec = nullptr,
     const std::string *serialized_task_spec = nullptr) const;
 
-  /// Publish every currently uncommitted replay recipe for one Recovery
-  /// Frontier group to its fixed-R holder topology. The owner-side committed
-  /// prefix advances only from the all-holder completion callback.
+  using RecoveryFrontierPublicationCallback = std::function<void()>;
+
+  /// Asynchronously publish every currently uncommitted replay recipe for one
+  /// Recovery Frontier group. callback runs only after the required prefix is
+  /// durable on all fixed-R holders.
+  void PublishRecoveryFrontierGroupAsync(
+      const TaskID &group_id,
+      const rpc::RecoveryManifest &protection_manifest,
+      RecoveryFrontierPublicationCallback callback) const;
+
+  /// Synchronous wrapper retained for explicit ObjectRef serialization/status
+  /// paths. Normal-task dispatch uses the asynchronous form instead.
   void PublishRecoveryFrontierGroup(
       const TaskID &group_id,
       const rpc::RecoveryManifest &protection_manifest) const;
@@ -1858,7 +1882,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
       const std::unordered_map<std::string, std::string> &labels = {},
       const LabelSelector &label_selector = {},
       const std::vector<FallbackOption> &fallback_strategy = {},
-      int64_t num_objects_per_yield = 1);
+      int64_t num_objects_per_yield = 1,
+      std::vector<DeferredRecoveryFrontierGroup> *deferred_groups = nullptr);
 
   void SetCurrentTaskId(const TaskID &task_id,
                         uint64_t attempt_number,
@@ -2287,6 +2312,18 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   absl::flat_hash_map<TaskID, RecoveryHolderAdmissionTaskState>
       recovery_holder_admission_states_
           ABSL_GUARDED_BY(recovery_holder_admission_mutex_);
+
+  struct DeferredRecoveryTaskState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool ready = false;
+  };
+
+  // Locally returned task refs can precede upstream Frontier durability, but
+  // chained activation must never cross that boundary.
+  mutable std::mutex recovery_frontier_deferred_task_mutex_;
+  mutable absl::flat_hash_map<TaskID, std::shared_ptr<DeferredRecoveryTaskState>>
+      recovery_frontier_deferred_tasks_;
 
   absl::flat_hash_set<TaskID> recovery_tombstones_in_flight_;
 

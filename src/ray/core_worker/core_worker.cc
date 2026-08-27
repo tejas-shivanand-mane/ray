@@ -1519,7 +1519,8 @@ Status CoreWorker::GetOwnerAddress(const ObjectID &object_id,
 
 bool CoreWorker::TryPopulateRecoveryMetadataForObject(
     const ObjectID &object_id,
-    rpc::RecoveryObjectMetadata *metadata) const {
+    rpc::RecoveryObjectMetadata *metadata,
+    std::vector<DeferredRecoveryFrontierGroup> *deferred_groups) const {
   if (!recovery_succession_enabled_ ||
       recovery_succession_manager_ == nullptr) {
     return false;
@@ -1540,6 +1541,9 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
   // lazily on the first real export/borrow of an eligible task return.
 
   const TaskID task_id = object_id.TaskId();
+
+  // Preserve transitive replay correctness for immediate task chains.
+  WaitForDeferredRecoveryTaskDependencies(task_id);
 
   const bool recovery_frontier_enabled =
       recovery_witness_holder_baseline_enabled_ &&
@@ -1723,6 +1727,25 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
       // holder. Re-checking HasRecoveryMetadata() around that barrier adds
       // manager lock/hash lookups without adding a correctness check.
       // Racing exporters safely join the same barrier.
+      if (deferred_groups != nullptr) {
+        RAY_CHECK(metadata == nullptr)
+            << "Deferred Recovery Frontier preparation must remain owner-local";
+
+        const bool already_pending = std::any_of(
+            deferred_groups->begin(),
+            deferred_groups->end(),
+            [&frontier_membership](const DeferredRecoveryFrontierGroup &group) {
+              return group.group_id == frontier_membership->group_id;
+            });
+        if (!already_pending) {
+          DeferredRecoveryFrontierGroup group;
+          group.group_id = frontier_membership->group_id;
+          group.protection_manifest.CopyFrom(frontier_protection_manifest);
+          deferred_groups->push_back(std::move(group));
+        }
+        return true;
+      }
+
       PublishRecoveryFrontierGroup(
           frontier_membership->group_id, frontier_protection_manifest);
 
@@ -1836,7 +1859,8 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 }
 
 void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
-    rpc::TaskSpec *task_spec) const {
+    rpc::TaskSpec *task_spec,
+    std::vector<DeferredRecoveryFrontierGroup> *deferred_groups) const {
   if (task_spec == nullptr || !recovery_succession_enabled_ ||
       recovery_succession_manager_ == nullptr) {
     return;
@@ -1848,7 +1872,8 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
     if (arg.has_object_ref() && !arg.object_ref().object_id().empty()) {
       const ObjectID object_id =
           ObjectID::FromBinary(arg.object_ref().object_id());
-      TryPopulateRecoveryMetadataForObject(object_id, nullptr);
+      TryPopulateRecoveryMetadataForObject(
+          object_id, nullptr, deferred_groups);
     }
 
     for (const rpc::ObjectReference &nested_ref :
@@ -1859,7 +1884,8 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
 
       const ObjectID nested_id =
           ObjectID::FromBinary(nested_ref.object_id());
-      TryPopulateRecoveryMetadataForObject(nested_id, nullptr);
+      TryPopulateRecoveryMetadataForObject(
+          nested_id, nullptr, deferred_groups);
     }
   }
 
@@ -1868,6 +1894,23 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
         RecoveryProfileNowNs() - patch4g_start_ns);
   }
 }
+
+void CoreWorker::WaitForDeferredRecoveryTaskDependencies(
+    const TaskID &task_id) const {
+  std::shared_ptr<DeferredRecoveryTaskState> state;
+  {
+    std::lock_guard<std::mutex> lock(recovery_frontier_deferred_task_mutex_);
+    const auto it = recovery_frontier_deferred_tasks_.find(task_id);
+    if (it == recovery_frontier_deferred_tasks_.end()) {
+      return;
+    }
+    state = it->second;
+  }
+
+  std::unique_lock<std::mutex> lock(state->mutex);
+  state->cv.wait(lock, [&state] { return state->ready; });
+}
+
 
 std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
     const std::vector<ObjectID> &object_ids) const {
@@ -3151,7 +3194,8 @@ void CoreWorker::BuildCommonTaskSpec(
     const std::unordered_map<std::string, std::string> &labels,
     const LabelSelector &label_selector,
     const std::vector<FallbackOption> &fallback_strategy,
-    int64_t num_objects_per_yield) {
+    int64_t num_objects_per_yield,
+    std::vector<DeferredRecoveryFrontierGroup> *deferred_groups) {
   // Build common task spec.
   auto override_runtime_env_info =
       OverrideTaskOrActorRuntimeEnvInfo(serialized_runtime_env_info);
@@ -3211,19 +3255,25 @@ void CoreWorker::BuildCommonTaskSpec(
   if (recovery_succession_enabled_ &&
       recovery_succession_manager_ != nullptr &&
       !args.empty()) {
-    EnsureRecoverySuccessionForTaskArguments(builder.MutableMessage());
+    EnsureRecoverySuccessionForTaskArguments(
+        builder.MutableMessage(), deferred_groups);
+
+    auto populate_argument_metadata = [this, deferred_groups](rpc::TaskSpec *message) {
+      if (deferred_groups != nullptr) {
+        recovery_succession_manager_
+            ->PopulateTaskArgumentMetadataForDeferredFrontierDispatch(message);
+      } else {
+        recovery_succession_manager_->PopulateTaskArgumentMetadata(message);
+      }
+    };
 
     if (recovery_succession_profiling_enabled_) {
       const uint64_t start_ns = RecoveryProfileNowNs();
-
-      recovery_succession_manager_->PopulateTaskArgumentMetadata(
-          builder.MutableMessage());
-
+      populate_argument_metadata(builder.MutableMessage());
       recovery_succession_manager_->RecordTaskArgumentMetadataLatency(
           RecoveryProfileNowNs() - start_ns);
     } else {
-      recovery_succession_manager_->PopulateTaskArgumentMetadata(
-          builder.MutableMessage());
+      populate_argument_metadata(builder.MutableMessage());
     }
   }
 
@@ -3274,6 +3324,15 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                        ? function.GetFunctionDescriptor()->DefaultTaskName()
                        : task_options.name;
   int64_t depth = worker_context_->GetTaskDepth() + 1;
+
+  const bool defer_recovery_frontier_dispatch =
+      recovery_succession_enabled_ &&
+      recovery_witness_holder_baseline_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
+      recovery_succession_manager_->RecoveryFrontierEnabled() &&
+      RayConfig::instance().recovery_frontier_group_size() > 1;
+  std::vector<DeferredRecoveryFrontierGroup> deferred_recovery_frontier_groups;
+
   // TODO(ekl) offload task building onto a thread pool for performance
 
   BuildCommonTaskSpec(builder,
@@ -3304,7 +3363,10 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                       task_options.labels,
                       task_options.label_selector,
                       task_options.fallback_strategy,
-                      task_options.num_objects_per_yield);
+                      task_options.num_objects_per_yield,
+                      defer_recovery_frontier_dispatch
+                          ? &deferred_recovery_frontier_groups
+                          : nullptr);
   ActorID root_detached_actor_id;
   if (!worker_context_->GetRootDetachedActorID().IsNil()) {
     root_detached_actor_id = worker_context_->GetRootDetachedActorID();
@@ -3426,11 +3488,66 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     }
   }
 
-  io_service_.post(
-      [this, task_spec = std::move(task_spec)]() mutable {
-        normal_task_submitter_->SubmitTask(std::move(task_spec));
-      },
-      "CoreWorker.SubmitTask");
+  if (defer_recovery_frontier_dispatch &&
+      !deferred_recovery_frontier_groups.empty()) {
+    const TaskID deferred_task_id = task_spec.TaskId();
+    auto readiness = std::make_shared<DeferredRecoveryTaskState>();
+    {
+      std::lock_guard<std::mutex> lock(recovery_frontier_deferred_task_mutex_);
+      const auto inserted = recovery_frontier_deferred_tasks_.emplace(
+          deferred_task_id, readiness);
+      RAY_CHECK(inserted.second)
+          << "Duplicate deferred Recovery Frontier task state for "
+          << deferred_task_id;
+    }
+
+    auto remaining = std::make_shared<std::atomic<size_t>>(
+        deferred_recovery_frontier_groups.size());
+    auto task_to_dispatch =
+        std::make_shared<TaskSpecification>(std::move(task_spec));
+
+    for (const DeferredRecoveryFrontierGroup &group :
+         deferred_recovery_frontier_groups) {
+      PublishRecoveryFrontierGroupAsync(
+          group.group_id,
+          group.protection_manifest,
+          [this, deferred_task_id, readiness, remaining, task_to_dispatch]() mutable {
+            if (remaining->fetch_sub(1) != 1) {
+              return;
+            }
+
+            {
+              std::lock_guard<std::mutex> ready_lock(readiness->mutex);
+              readiness->ready = true;
+            }
+            readiness->cv.notify_all();
+
+            {
+              std::lock_guard<std::mutex> map_lock(
+                  recovery_frontier_deferred_task_mutex_);
+              const auto it =
+                  recovery_frontier_deferred_tasks_.find(deferred_task_id);
+              if (it != recovery_frontier_deferred_tasks_.end() &&
+                  it->second == readiness) {
+                recovery_frontier_deferred_tasks_.erase(it);
+              }
+            }
+
+            io_service_.post(
+                [this, task_to_dispatch]() mutable {
+                  normal_task_submitter_->SubmitTask(
+                      std::move(*task_to_dispatch));
+                },
+                "CoreWorker.SubmitTaskAfterRecoveryFrontierCommit");
+          });
+    }
+  } else {
+    io_service_.post(
+        [this, task_spec = std::move(task_spec)]() mutable {
+          normal_task_submitter_->SubmitTask(std::move(task_spec));
+        },
+        "CoreWorker.SubmitTask");
+  }
   return returned_refs;
 }
 

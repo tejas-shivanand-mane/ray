@@ -1679,7 +1679,8 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
 
 bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
     const ObjectID &object_id,
-    rpc::RecoveryObjectMetadata *metadata) const {
+    rpc::RecoveryObjectMetadata *metadata,
+    bool require_frontier_commit) const {
   if (object_id.IsNil()) {
     return false;
   }
@@ -1713,7 +1714,8 @@ bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
   // The owner may construct task-local recovery state before the fixed-R
   // append completes, but that state must remain invisible to exporters
   // until the member's replay recipe is committed on every group holder.
-  if (recovery_frontier_planner_ != nullptr &&
+  if (require_frontier_commit &&
+      recovery_frontier_planner_ != nullptr &&
       recovery_frontier_planner_->GroupSize() > 1) {
     const auto membership = recovery_frontier_planner_->FindTask(task_id);
     if (membership.has_value()) {
@@ -1751,7 +1753,7 @@ bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
 bool RecoverySuccessionManager::HasRecoveryMetadata(
     const ObjectID &object_id) const {
   absl::MutexLock lock(&mutex_);
-  return BuildRecoveryMetadataLocked(object_id, nullptr);
+  return BuildRecoveryMetadataLocked(object_id, nullptr, /*require_frontier_commit=*/true);
 }
 
 
@@ -1764,7 +1766,8 @@ bool RecoverySuccessionManager::PopulateRecoveryMetadata(
   const auto patch4g_start = std::chrono::steady_clock::now();
   absl::MutexLock lock(&mutex_);
 
-  const bool hit = BuildRecoveryMetadataLocked(object_id, metadata);
+  const bool hit = BuildRecoveryMetadataLocked(
+      object_id, metadata, /*require_frontier_commit=*/true);
 
   if (profiling_enabled_) {
     ++profile_.recovery_metadata_lookup_calls;
@@ -1782,6 +1785,18 @@ bool RecoverySuccessionManager::PopulateRecoveryMetadata(
 
 void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     rpc::TaskSpec *task_spec) {
+  PopulateTaskArgumentMetadataInternal(
+      task_spec, /*require_frontier_commit=*/true);
+}
+
+void RecoverySuccessionManager::PopulateTaskArgumentMetadataForDeferredFrontierDispatch(
+    rpc::TaskSpec *task_spec) {
+  PopulateTaskArgumentMetadataInternal(
+      task_spec, /*require_frontier_commit=*/false);
+}
+
+void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
+    rpc::TaskSpec *task_spec, bool require_frontier_commit) {
   if (task_spec == nullptr) {
     return;
   }
@@ -1820,7 +1835,8 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadata(
     rpc::RecoveryObjectMetadata legacy_expanded;
     const rpc::RecoveryObjectMetadata *source = nullptr;
 
-    if (BuildRecoveryMetadataLocked(object_id, &source_storage)) {
+    if (BuildRecoveryMetadataLocked(
+            object_id, &source_storage, require_frontier_commit)) {
       source = &source_storage;
     } else if (had_legacy_transport) {
       rpc::ObjectReference synthetic_ref;
