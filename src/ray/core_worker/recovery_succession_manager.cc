@@ -1808,7 +1808,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
   task_spec->clear_recovery_argument_metadata();
   absl::flat_hash_set<ObjectID> attached_object_ids;
 
-  auto populate_one = [this, task_spec, &attached_object_ids](
+  auto populate_one = [this, task_spec, &attached_object_ids, require_frontier_commit](
                           const ObjectID &object_id,
                           rpc::ObjectReference *object_ref) {
     if (object_ref == nullptr || object_id.IsNil()) {
