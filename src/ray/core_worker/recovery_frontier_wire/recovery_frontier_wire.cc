@@ -53,9 +53,10 @@ rpc::RecoveryFrontierAppend BuildRecoveryFrontierAppend(
 
     RAY_CHECK_EQ(member.member_index, expected_member_index);
     RAY_CHECK(!member.task_id.IsNil());
-    RAY_CHECK_EQ(member.task_spec.task_id(), member.task_id.Binary());
+    RAY_CHECK(member.task_spec != nullptr);
+    RAY_CHECK_EQ(member.task_spec->task_id(), member.task_id.Binary());
     RAY_CHECK_GT(member.num_returns, 0U);
-    RAY_CHECK_EQ(static_cast<uint32_t>(member.task_spec.num_returns()),
+    RAY_CHECK_EQ(static_cast<uint32_t>(member.task_spec->num_returns()),
                  member.num_returns);
 
     rpc::RecoveryFrontierMemberRecord *record = append.add_members();
@@ -63,7 +64,9 @@ rpc::RecoveryFrontierAppend BuildRecoveryFrontierAppend(
     record->set_member_index(member.member_index);
     record->set_first_group_return_index(member.first_group_return_index);
     record->set_num_returns(member.num_returns);
-    record->mutable_task_spec()->CopyFrom(member.task_spec);
+    // This is now the only staging/publication TaskSpec protobuf copy: the
+    // staged batch itself shares the immutable owner-local replay recipe.
+    record->mutable_task_spec()->CopyFrom(*member.task_spec);
   }
 
   return append;
