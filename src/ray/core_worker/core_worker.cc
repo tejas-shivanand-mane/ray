@@ -1987,9 +1987,17 @@ void CoreWorker::CompleteDeferredRecoveryFrontierGroup(
 
 
 std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
-    const std::vector<ObjectID> &object_ids) const {
+    const std::vector<ObjectID> &object_ids,
+    bool task_argument_serialization) const {
   std::vector<rpc::ObjectReference> refs;
   refs.reserve(object_ids.size());
+
+  const bool defer_frontier_task_argument_activation =
+      task_argument_serialization &&
+      recovery_witness_holder_baseline_enabled_ &&
+      recovery_succession_manager_ != nullptr &&
+      recovery_succession_manager_->RecoveryFrontierEnabled() &&
+      RayConfig::instance().recovery_frontier_group_size() > 1;
 
   for (const auto &object_id : object_ids) {
     rpc::ObjectReference ref;
@@ -2005,7 +2013,18 @@ std::vector<rpc::ObjectReference> CoreWorker::GetObjectRefs(
     if (recovery_succession_enabled_ && recovery_succession_manager_ != nullptr) {
       rpc::RecoveryObjectMetadata metadata;
 
-      if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
+      if (defer_frontier_task_argument_activation) {
+        // Nested ObjectRefs in a by-value task argument are seen again by
+        // BuildCommonTaskSpec via nested_inlined_refs().  For K>1, preserve
+        // already-committed metadata here without starting a synchronous
+        // publication. BuildCommonTaskSpec will activate any uncommitted group
+        // through its deferred-group path and gate remote dispatch on the same
+        // all-R durability ACK.
+        if (recovery_succession_manager_->PopulateRecoveryMetadata(object_id,
+                                                                   &metadata)) {
+          ref.mutable_recovery_metadata()->CopyFrom(metadata);
+        }
+      } else if (TryPopulateRecoveryMetadataForObject(object_id, &metadata)) {
         ref.mutable_recovery_metadata()->CopyFrom(metadata);
       }
     }

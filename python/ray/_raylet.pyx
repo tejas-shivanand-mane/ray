@@ -741,7 +741,9 @@ cdef prepare_args_internal(
                 for object_ref in serialized_arg.contained_object_refs:
                     inlined_ids.push_back((<ObjectRef>object_ref).native())
                 inlined_refs = (CCoreWorkerProcess.GetCoreWorker()
-                                .GetObjectRefs(inlined_ids))
+                                .GetObjectRefs(
+                                    inlined_ids,
+                                    <c_bool>task_argument_serialization.get()))
                 args_vector.push_back(
                     unique_ptr[CTaskArg](new CTaskArgByValue(
                         make_shared[CRayObject](

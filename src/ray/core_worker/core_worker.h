@@ -543,7 +543,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// RegisterOwnershipInfoAndResolveFuture).
   /// \param[out] The RPC address of the worker that owns this object.
   std::vector<rpc::ObjectReference> GetObjectRefs(
-      const std::vector<ObjectID> &object_ids) const;
+      const std::vector<ObjectID> &object_ids,
+      bool task_argument_serialization = false) const;
 
   /// Get the owner information of an object. This should be
   /// called when serializing an object ID, and the returned information should
