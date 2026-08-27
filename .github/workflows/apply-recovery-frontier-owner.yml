@@ -1,0 +1,38 @@
+name: Apply Recovery Frontier owner hook
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-recovery-frontier-owner.yml
+      - tools/recovery_frontier/apply_live_owner_publication.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply surgical source patch
+        run: python3 tools/recovery_frontier/apply_live_owner_publication.py
+      - name: Commit patched sources
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Recovery Frontier owner hook already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/ray/core_worker/BUILD.bazel \
+                  src/ray/core_worker/core_worker.cc \
+                  src/ray/core_worker/core_worker.h \
+                  src/ray/core_worker/recovery_succession_manager.cc \
+                  src/ray/core_worker/recovery_succession_manager.h
+          git commit -m "Wire live fixed-R recovery frontier publication [skip ci]"
+          git push origin HEAD:main
