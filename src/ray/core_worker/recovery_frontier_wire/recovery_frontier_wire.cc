@@ -69,6 +69,12 @@ rpc::RecoveryFrontierAppend BuildRecoveryFrontierAppend(
   return append;
 }
 
+std::string BuildRecoveryFrontierAppendEnvelope(
+    const RecoveryFrontierAppendBatch &batch) {
+  return SerializeRecoveryFrontierAppendEnvelope(
+      BuildRecoveryFrontierAppend(batch));
+}
+
 bool IsRecoveryFrontierAppendEnvelope(std::string_view payload) {
   return payload.size() >= kRecoveryFrontierAppendMagicSize &&
          payload.compare(0,
