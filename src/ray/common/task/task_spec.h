@@ -108,6 +108,21 @@ class TaskSpecification : public MessageWrapper<rpc::TaskSpec> {
     ComputeResources();
   }
 
+  /// Return a shared immutable view of the underlying protobuf. This is used
+  /// by owner-local recovery structures that only need a stable replay recipe
+  /// and should not deep-copy a potentially large TaskSpec on registration.
+  std::shared_ptr<const rpc::TaskSpec> GetSharedMessage() const { return message_; }
+
+  /// TaskSpecification copies share the protobuf for cheap read-only access.
+  /// Detach before mutation so immutable shared snapshots (for example a
+  /// Recovery Frontier replay recipe) cannot be changed by a later retry.
+  rpc::TaskSpec &GetMutableMessage() {
+    if (!message_.unique()) {
+      message_ = std::make_shared<rpc::TaskSpec>(*message_);
+    }
+    return *message_;
+  }
+
   // TODO(swang): Finalize and document these methods.
   TaskID TaskId() const;
 
@@ -236,19 +251,18 @@ class TaskSpecification : public MessageWrapper<rpc::TaskSpec> {
   /// Return the resources that are to be acquired during the execution of this
   /// task.
   ///
-  /// \return The resources that will be acquired during the execution of this
-  /// task.
+  /// \return The resources that are required to execute the task.
   const ResourceSet &GetRequiredResources() const;
 
   /// Return the labels that are required for the node to execute
-  /// this task on.
+  /// this task.
   ///
   /// \return The labels that are required for the execution of this task on a node.
   const LabelSelector &GetLabelSelector() const;
 
   /// Return the list of fallback strategies for scheduling.
   ///
-  /// \return Fallback strategies to fall back on when scheduling a task on a node.
+  /// \return The fallback strategies for the task.
   const std::vector<FallbackOption> &GetFallbackStrategy() const;
 
   const rpc::SchedulingStrategy &GetSchedulingStrategy() const;
