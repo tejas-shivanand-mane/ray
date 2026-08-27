@@ -1,6 +1,8 @@
+load("//bazel:ray.bzl", "ray_cc_library")
+
 package(default_visibility = ["//visibility:public"])
 
-cc_library(
+ray_cc_library(
     name = "recovery_frontier_store",
     srcs = ["recovery_frontier_store.cc"],
     hdrs = ["recovery_frontier_store.h"],
