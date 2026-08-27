@@ -1710,12 +1710,19 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
         RecoveryProfileNowNs() - register_start_ns);
   }
 
-  if (initialized_now && recovery_witness_holder_baseline_enabled_) {
-    if (recovery_frontier_grouping_enabled) {
-      RAY_CHECK(frontier_membership.has_value());
+  if (recovery_witness_holder_baseline_enabled_) {
+  if (recovery_frontier_grouping_enabled) {
+    RAY_CHECK(frontier_membership.has_value());
+
+    // RegisterOwnedTaskLazy creates task-local state first, but the
+    // manager deliberately hides its recovery metadata until the member
+    // is inside the acknowledged frontier prefix. Concurrent exporters
+    // join the same barrier instead of escaping with an ordinary ref.
+    if (!recovery_succession_manager_->HasRecoveryMetadata(object_id)) {
       PublishRecoveryFrontierGroup(
           frontier_membership->group_id, frontier_protection_manifest);
-    } else {
+    }
+  } else if (initialized_now) {
     const uint32_t target_holder_count =
         RayConfig::instance().recovery_succession_target_holder_count();
 

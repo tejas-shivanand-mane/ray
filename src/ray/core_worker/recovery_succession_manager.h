@@ -278,6 +278,12 @@ class RecoverySuccessionManager {
   /// backend without coupling the planner to Baseline or Succession RPCs.
   std::optional<RecoveryFrontierAppendBatch> StageRecoveryFrontierAppend(
       const TaskID &group_id, uint32_t max_batch_members = 0);
+  /// True while at least one member of the group remains outside the
+/// acknowledged durable prefix. Used by synchronous object export to
+/// wait behind an append already being published by another thread.
+bool RecoveryFrontierGroupHasUncommittedMembers(
+    const TaskID &group_id) const;
+
   bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
   bool AbortRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
 

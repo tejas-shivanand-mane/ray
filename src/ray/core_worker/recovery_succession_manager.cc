@@ -473,6 +473,21 @@ RecoverySuccessionManager::StageRecoveryFrontierAppend(
   return group == nullptr ? std::nullopt : group->StageAppend(max_batch_members);
 }
 
+bool RecoverySuccessionManager::RecoveryFrontierGroupHasUncommittedMembers(
+    const TaskID &group_id) const {
+  if (group_id.IsNil()) {
+    return false;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  if (recovery_frontier_planner_ == nullptr) {
+    return false;
+  }
+  const RecoveryFrontierGroup *group =
+      recovery_frontier_planner_->GetGroup(group_id);
+  return group != nullptr && group->HasUncommittedMembers();
+}
+
 bool RecoverySuccessionManager::CommitRecoveryFrontierAppend(
     const RecoveryFrontierAppendBatch &batch) {
   absl::MutexLock lock(&mutex_);
@@ -1661,6 +1676,22 @@ bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
 
   if (known_object && task_it != task_states_.end() &&
       !task_it->second.manifest.task_id().empty()) {
+    // Recovery Frontier metadata is an acknowledged-prefix capability.
+  // The owner may construct task-local recovery state before the fixed-R
+  // append completes, but that state must remain invisible to exporters
+  // until the member's replay recipe is committed on every group holder.
+  if (recovery_frontier_planner_ != nullptr &&
+      recovery_frontier_planner_->GroupSize() > 1) {
+    const auto membership = recovery_frontier_planner_->FindTask(task_id);
+    if (membership.has_value()) {
+      const RecoveryFrontierGroup *group =
+          recovery_frontier_planner_->GetGroup(membership->group_id);
+      if (group == nullptr || !group->IsTaskCommitted(task_id)) {
+        return false;
+      }
+    }
+  }
+
     if (metadata != nullptr) {
       metadata->Clear();
       metadata->set_task_id(task_id.Binary());
