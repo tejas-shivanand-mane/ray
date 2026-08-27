@@ -261,4 +261,29 @@ RecoveryFrontierGroup *RecoveryFrontierPlanner::GetMutableGroup(
   return it == groups_.end() ? nullptr : &it->second;
 }
 
+bool RecoveryFrontierPlanner::SealGroup(const TaskID &group_id) {
+  if (group_id.IsNil() || groups_.find(group_id) == groups_.end()) {
+    return false;
+  }
+  if (open_group_id_ == group_id) {
+    open_group_id_ = TaskID::Nil();
+  }
+  return true;
+}
+
+bool RecoveryFrontierPlanner::EraseGroup(const TaskID &group_id) {
+  const auto group_it = groups_.find(group_id);
+  if (group_it == groups_.end()) {
+    return false;
+  }
+  if (open_group_id_ == group_id) {
+    open_group_id_ = TaskID::Nil();
+  }
+  for (const RecoveryFrontierMember &member : group_it->second.Members()) {
+    membership_by_task_.erase(member.task_id);
+  }
+  groups_.erase(group_it);
+  return true;
+}
+
 }  // namespace ray::core

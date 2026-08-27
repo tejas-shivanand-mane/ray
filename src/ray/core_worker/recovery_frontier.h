@@ -152,6 +152,14 @@ class RecoveryFrontierPlanner {
   const RecoveryFrontierGroup *GetGroup(const TaskID &group_id) const;
   RecoveryFrontierGroup *GetMutableGroup(const TaskID &group_id);
 
+  /// Permanently close a partially filled group so future tasks open a
+  /// fresh group instead of appending to a terminal/tombstoned capsule.
+  bool SealGroup(const TaskID &group_id);
+
+  /// Remove a terminal group and all task-to-group membership aliases.
+  /// The caller must ensure no live owner return can activate it again.
+  bool EraseGroup(const TaskID &group_id);
+
  private:
   uint32_t group_size_;
   TaskID open_group_id_ = TaskID::Nil();

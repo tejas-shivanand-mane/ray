@@ -881,11 +881,44 @@ bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
 
   owner_retained_tasks_.erase(retained_it);
 
+  if (recovery_frontier_planner_ != nullptr &&
+      recovery_frontier_planner_->GroupSize() > 1) {
+    const auto membership = recovery_frontier_planner_->FindTask(task_id);
+    if (membership.has_value()) {
+      const RecoveryFrontierGroup *group =
+          recovery_frontier_planner_->GetGroup(membership->group_id);
+      RAY_CHECK(group != nullptr);
+
+      for (const RecoveryFrontierMember &member : group->Members()) {
+        const auto live_it = owner_retained_tasks_.find(member.task_id);
+        if (live_it != owner_retained_tasks_.end() &&
+            !live_it->second.live_return_ids.empty()) {
+          return false;
+        }
+      }
+
+      // This was the final live member. Close a partially filled group
+      // before any future task can reuse its protection identity.
+      RAY_CHECK(recovery_frontier_planner_->SealGroup(membership->group_id));
+
+      if (recovery_frontier_protection_manifests_.contains(
+              membership->group_id)) {
+        // One shared tombstone will retire every committed member alias
+        // on the fixed-R holders.
+        return true;
+      }
+
+      // The group was never activated/exported, so there is no remote
+      // recovery state to tombstone. Reclaim the owner-local planner state.
+      RAY_CHECK(recovery_frontier_planner_->EraseGroup(membership->group_id));
+      return false;
+    }
+  }
+
   const auto task_it = task_states_.find(task_id);
   return task_it != task_states_.end() &&
          !task_it->second.manifest.tombstoned();
 }
-
 
 std::vector<RecoverySuccessionManager::CandidateReport>
 RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) {
@@ -2314,6 +2347,50 @@ std::optional<rpc::RecoveryManifest> RecoverySuccessionManager::BuildTombstoneFo
     const TaskID &task_id) const {
   absl::MutexLock lock(&mutex_);
 
+  if (recovery_frontier_planner_ != nullptr &&
+      recovery_frontier_planner_->GroupSize() > 1) {
+    const auto membership = recovery_frontier_planner_->FindTask(task_id);
+    if (membership.has_value()) {
+      const RecoveryFrontierGroup *group =
+          recovery_frontier_planner_->GetGroup(membership->group_id);
+      if (group == nullptr) {
+        return std::nullopt;
+      }
+
+      // A group tombstone is legal only when every registered member has
+      // lost its final owner return. This protects live siblings from an
+      // early leader/member deletion.
+      for (const RecoveryFrontierMember &member : group->Members()) {
+        const auto live_it = owner_retained_tasks_.find(member.task_id);
+        if (live_it != owner_retained_tasks_.end() &&
+            !live_it->second.live_return_ids.empty()) {
+          return std::nullopt;
+        }
+      }
+
+      const auto protection_it =
+          recovery_frontier_protection_manifests_.find(membership->group_id);
+      if (protection_it == recovery_frontier_protection_manifests_.end()) {
+        return std::nullopt;
+      }
+
+      const rpc::RecoveryHolder *owner =
+          FindHolderByRank(protection_it->second, 0);
+      if (owner == nullptr || !SameWorker(owner->address(), self_address_)) {
+        return std::nullopt;
+      }
+
+      rpc::RecoveryManifest tombstone;
+      tombstone.CopyFrom(protection_it->second);
+      tombstone.set_task_id(membership->group_id.Binary());
+      tombstone.set_tombstoned(true);
+      tombstone.set_frozen(true);
+      tombstone.mutable_version()->set_generation(
+          protection_it->second.version().generation() + 1);
+      return tombstone;
+    }
+  }
+
   const auto task_it = task_states_.find(task_id);
 
   if (task_it == task_states_.end()) {
@@ -2334,17 +2411,12 @@ std::optional<rpc::RecoveryManifest> RecoverySuccessionManager::BuildTombstoneFo
 
   rpc::RecoveryManifest tombstone;
   tombstone.CopyFrom(task_state.manifest);
-
   tombstone.set_tombstoned(true);
   tombstone.set_frozen(true);
-
-  rpc::RecoveryManifestVersion *version = tombstone.mutable_version();
-
-  version->set_generation(task_state.manifest.version().generation() + 1);
-
+  tombstone.mutable_version()->set_generation(
+      task_state.manifest.version().generation() + 1);
   return tombstone;
 }
-
 bool RecoverySuccessionManager::ApplyRecoveryTombstone(
     const rpc::RecoveryManifest &tombstone) {
   if (tombstone.task_id().size() != TaskID::Size() || !tombstone.has_version() ||
@@ -2355,6 +2427,52 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
   const TaskID task_id = TaskID::FromBinary(tombstone.task_id());
 
   absl::MutexLock lock(&mutex_);
+
+  if (recovery_frontier_planner_ != nullptr &&
+      recovery_frontier_planner_->GroupSize() > 1) {
+    const RecoveryFrontierGroup *group =
+        recovery_frontier_planner_->GetGroup(task_id);
+    const auto protection_it =
+        recovery_frontier_protection_manifests_.find(task_id);
+    if (group != nullptr &&
+        protection_it != recovery_frontier_protection_manifests_.end()) {
+      if (CompareManifestVersions(tombstone, protection_it->second) <= 0) {
+        return false;
+      }
+
+      std::vector<TaskID> member_task_ids;
+      member_task_ids.reserve(group->Members().size());
+      for (const RecoveryFrontierMember &member : group->Members()) {
+        member_task_ids.push_back(member.task_id);
+      }
+
+      for (const TaskID &member_task_id : member_task_ids) {
+        EraseTaskObjectMetadataLocked(member_task_id);
+
+        const auto reservation_it =
+            holder_reservation_by_task_.find(member_task_id);
+        if (reservation_it != holder_reservation_by_task_.end()) {
+          std::vector<std::string> reservation_ids;
+          reservation_ids.reserve(reservation_it->second.size());
+          for (const auto &[rank, reservation_id] : reservation_it->second) {
+            static_cast<void>(rank);
+            reservation_ids.push_back(reservation_id);
+          }
+          for (const std::string &reservation_id : reservation_ids) {
+            EraseHolderReservationLocked(reservation_id);
+          }
+        }
+
+        candidate_reports_sent_.erase(member_task_id);
+        task_states_.erase(member_task_id);
+        owner_retained_tasks_.erase(member_task_id);
+      }
+
+      recovery_frontier_protection_manifests_.erase(protection_it);
+      RAY_CHECK(recovery_frontier_planner_->EraseGroup(task_id));
+      return true;
+    }
+  }
 
   const auto task_it = task_states_.find(task_id);
 

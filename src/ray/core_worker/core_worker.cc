@@ -599,12 +599,14 @@ CoreWorker::CoreWorker(
               return;
             }
 
-            if (!recovery_tombstones_in_flight_.insert(task_id).second) {
+            const TaskID tombstone_task_id =
+                TaskID::FromBinary(tombstone->task_id());
+            if (!recovery_tombstones_in_flight_.insert(tombstone_task_id).second) {
               return;
             }
 
-            RAY_LOG(INFO).WithField(task_id) << "Task lineage released; "
-                                             << "publishing recovery tombstone";
+            RAY_LOG(INFO).WithField(tombstone_task_id)
+                << "Task lineage released; publishing recovery tombstone";
 
             PublishRecoveryTombstone(std::move(tombstone.value()));
           },
@@ -3372,11 +3374,13 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
               return;
             }
 
-            if (!recovery_tombstones_in_flight_.insert(deleted_task_id).second) {
+            const TaskID tombstone_task_id =
+                TaskID::FromBinary(tombstone->task_id());
+            if (!recovery_tombstones_in_flight_.insert(tombstone_task_id).second) {
               return;
             }
 
-            RAY_LOG(INFO).WithField(deleted_task_id)
+            RAY_LOG(INFO).WithField(tombstone_task_id)
                 << "Owner return refs released; publishing recovery tombstone";
 
             PublishRecoveryTombstone(std::move(tombstone.value()));

@@ -206,6 +206,36 @@ TEST(RecoveryFrontierTest, FullGroupRollsOverToNewLeader) {
   EXPECT_EQ(third.member_index, 0U);
 }
 
+TEST(RecoveryFrontierTest, SealedOpenGroupForcesFreshLeader) {
+  RecoveryFrontierPlanner planner(/*group_size=*/4);
+  const auto first = planner.RegisterTask(MakeTask('a'));
+  const auto second = planner.RegisterTask(MakeTask('b'));
+  ASSERT_EQ(first.group_id, second.group_id);
+
+  ASSERT_TRUE(planner.SealGroup(first.group_id));
+  const auto third = planner.RegisterTask(MakeTask('c'));
+  EXPECT_NE(third.group_id, first.group_id);
+  EXPECT_TRUE(third.is_leader);
+  EXPECT_EQ(third.member_index, 0U);
+}
+
+TEST(RecoveryFrontierTest, ErasedTerminalGroupRemovesMembershipAliases) {
+  RecoveryFrontierPlanner planner(/*group_size=*/4);
+  const rpc::TaskSpec first_task = MakeTask('a');
+  const rpc::TaskSpec second_task = MakeTask('b');
+  const auto first = planner.RegisterTask(first_task);
+  planner.RegisterTask(second_task);
+
+  ASSERT_TRUE(planner.SealGroup(first.group_id));
+  ASSERT_TRUE(planner.EraseGroup(first.group_id));
+  EXPECT_EQ(planner.GetGroup(first.group_id), nullptr);
+  EXPECT_FALSE(planner.FindTask(TaskID::FromBinary(first_task.task_id())).has_value());
+  EXPECT_FALSE(planner.FindTask(TaskID::FromBinary(second_task.task_id())).has_value());
+
+  const auto replacement = planner.RegisterTask(MakeTask('c'));
+  EXPECT_TRUE(replacement.is_leader);
+  EXPECT_NE(replacement.group_id, first.group_id);
+}
 TEST(RecoveryFrontierTest, KOneDegeneratesToPerTaskProtection) {
   RecoveryFrontierPlanner planner(/*group_size=*/1);
 
