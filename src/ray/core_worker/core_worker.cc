@@ -1897,18 +1897,64 @@ void CoreWorker::EnsureRecoverySuccessionForTaskArguments(
 
 void CoreWorker::WaitForDeferredRecoveryTaskDependencies(
     const TaskID &task_id) const {
-  std::shared_ptr<DeferredRecoveryTaskState> state;
+  std::unique_lock<std::mutex> lock(recovery_frontier_deferred_task_mutex_);
+  recovery_frontier_deferred_task_cv_.wait(lock, [this, &task_id] {
+    return recovery_frontier_deferred_tasks_.find(task_id) ==
+           recovery_frontier_deferred_tasks_.end();
+  });
+}
+
+void CoreWorker::CompleteDeferredRecoveryFrontierGroup(
+    const TaskID &group_id) const {
+  // One allocation per completed group, rather than one readiness object,
+  // atomic counter, and TaskSpecification shared_ptr per downstream task.
+  auto ready_tasks = std::make_shared<std::vector<TaskSpecification>>();
+
   {
     std::lock_guard<std::mutex> lock(recovery_frontier_deferred_task_mutex_);
-    const auto it = recovery_frontier_deferred_tasks_.find(task_id);
-    if (it == recovery_frontier_deferred_tasks_.end()) {
+    const auto group_it =
+        recovery_frontier_deferred_group_waiters_.find(group_id);
+    if (group_it == recovery_frontier_deferred_group_waiters_.end()) {
       return;
     }
-    state = it->second;
+
+    ready_tasks->reserve(group_it->second.size());
+    for (const TaskID &task_id : group_it->second) {
+      auto task_it = recovery_frontier_deferred_tasks_.find(task_id);
+      RAY_CHECK(task_it != recovery_frontier_deferred_tasks_.end())
+          << "Missing deferred Recovery Frontier task state for " << task_id
+          << " while completing group " << group_id;
+      RAY_CHECK_GT(task_it->second.remaining_groups, 0u);
+
+      --task_it->second.remaining_groups;
+      if (task_it->second.remaining_groups != 0) {
+        continue;
+      }
+
+      RAY_CHECK(task_it->second.task_to_dispatch.has_value());
+      ready_tasks->push_back(
+          std::move(*task_it->second.task_to_dispatch));
+      recovery_frontier_deferred_tasks_.erase(task_it);
+    }
+
+    recovery_frontier_deferred_group_waiters_.erase(group_it);
   }
 
-  std::unique_lock<std::mutex> lock(state->mutex);
-  state->cv.wait(lock, [&state] { return state->ready; });
+  // Erasing a task from the shared table is the readiness transition observed
+  // by chained submissions. Wake them before posting the now-safe dispatches.
+  recovery_frontier_deferred_task_cv_.notify_all();
+
+  if (ready_tasks->empty()) {
+    return;
+  }
+
+  io_service_.post(
+      [this, ready_tasks]() mutable {
+        for (TaskSpecification &task : *ready_tasks) {
+          normal_task_submitter_->SubmitTask(std::move(task));
+        }
+      },
+      "CoreWorker.SubmitTasksAfterRecoveryFrontierCommit");
 }
 
 
@@ -3491,54 +3537,43 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   if (defer_recovery_frontier_dispatch &&
       !deferred_recovery_frontier_groups.empty()) {
     const TaskID deferred_task_id = task_spec.TaskId();
-    auto readiness = std::make_shared<DeferredRecoveryTaskState>();
+    std::vector<DeferredRecoveryFrontierGroup> groups_to_start;
+
     {
       std::lock_guard<std::mutex> lock(recovery_frontier_deferred_task_mutex_);
-      const auto inserted = recovery_frontier_deferred_tasks_.emplace(
-          deferred_task_id, readiness);
-      RAY_CHECK(inserted.second)
+      auto [task_it, task_inserted] =
+          recovery_frontier_deferred_tasks_.try_emplace(deferred_task_id);
+      RAY_CHECK(task_inserted)
           << "Duplicate deferred Recovery Frontier task state for "
           << deferred_task_id;
+
+      task_it->second.remaining_groups =
+          deferred_recovery_frontier_groups.size();
+      task_it->second.task_to_dispatch.emplace(std::move(task_spec));
+
+      groups_to_start.reserve(deferred_recovery_frontier_groups.size());
+      for (const DeferredRecoveryFrontierGroup &group :
+           deferred_recovery_frontier_groups) {
+        auto [group_it, group_inserted] =
+            recovery_frontier_deferred_group_waiters_.try_emplace(
+                group.group_id);
+        group_it->second.push_back(deferred_task_id);
+
+        // Only the first waiter starts the group's asynchronous publication.
+        // Later tasks merely join the waiter vector and add no callbacks,
+        // timers, atomics, or per-task readiness objects.
+        if (group_inserted) {
+          groups_to_start.push_back(group);
+        }
+      }
     }
 
-    auto remaining = std::make_shared<std::atomic<size_t>>(
-        deferred_recovery_frontier_groups.size());
-    auto task_to_dispatch =
-        std::make_shared<TaskSpecification>(std::move(task_spec));
-
-    for (const DeferredRecoveryFrontierGroup &group :
-         deferred_recovery_frontier_groups) {
+    for (const DeferredRecoveryFrontierGroup &group : groups_to_start) {
       PublishRecoveryFrontierGroupAsync(
           group.group_id,
           group.protection_manifest,
-          [this, deferred_task_id, readiness, remaining, task_to_dispatch]() mutable {
-            if (remaining->fetch_sub(1) != 1) {
-              return;
-            }
-
-            {
-              std::lock_guard<std::mutex> ready_lock(readiness->mutex);
-              readiness->ready = true;
-            }
-            readiness->cv.notify_all();
-
-            {
-              std::lock_guard<std::mutex> map_lock(
-                  recovery_frontier_deferred_task_mutex_);
-              const auto it =
-                  recovery_frontier_deferred_tasks_.find(deferred_task_id);
-              if (it != recovery_frontier_deferred_tasks_.end() &&
-                  it->second == readiness) {
-                recovery_frontier_deferred_tasks_.erase(it);
-              }
-            }
-
-            io_service_.post(
-                [this, task_to_dispatch]() mutable {
-                  normal_task_submitter_->SubmitTask(
-                      std::move(*task_to_dispatch));
-                },
-                "CoreWorker.SubmitTaskAfterRecoveryFrontierCommit");
+          [this, group_id = group.group_id]() {
+            CompleteDeferredRecoveryFrontierGroup(group_id);
           });
     }
   } else {

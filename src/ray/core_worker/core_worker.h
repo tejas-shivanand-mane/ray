@@ -1657,6 +1657,10 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// become an externally recoverable dependency.
   void WaitForDeferredRecoveryTaskDependencies(const TaskID &task_id) const;
 
+  /// Complete one group durability gate, decrementing all tasks waiting on it
+  /// and dispatching every task whose final prerequisite just became durable.
+  void CompleteDeferredRecoveryFrontierGroup(const TaskID &group_id) const;
+
   using RecoveryWitnessPublishCallback =
       std::function<void(bool, std::optional<rpc::RecoveryManifest>)>;
 
@@ -2314,16 +2318,20 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
           ABSL_GUARDED_BY(recovery_holder_admission_mutex_);
 
   struct DeferredRecoveryTaskState {
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool ready = false;
+    size_t remaining_groups = 0;
+    std::optional<TaskSpecification> task_to_dispatch;
   };
 
   // Locally returned task refs can precede upstream Frontier durability, but
-  // chained activation must never cross that boundary.
+  // chained activation must never cross that boundary. One CoreWorker-level
+  // lock/CV replaces a mutex/CV allocation per task, and one waiter vector per
+  // frontier group releases all downstream tasks sharing that durability gate.
   mutable std::mutex recovery_frontier_deferred_task_mutex_;
-  mutable absl::flat_hash_map<TaskID, std::shared_ptr<DeferredRecoveryTaskState>>
+  mutable std::condition_variable recovery_frontier_deferred_task_cv_;
+  mutable absl::flat_hash_map<TaskID, DeferredRecoveryTaskState>
       recovery_frontier_deferred_tasks_;
+  mutable absl::flat_hash_map<TaskID, std::vector<TaskID>>
+      recovery_frontier_deferred_group_waiters_;
 
   struct RecoveryFrontierPublicationState {
     bool driving = false;
