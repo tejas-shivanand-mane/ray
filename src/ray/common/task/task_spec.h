@@ -251,18 +251,19 @@ class TaskSpecification : public MessageWrapper<rpc::TaskSpec> {
   /// Return the resources that are to be acquired during the execution of this
   /// task.
   ///
-  /// \return The resources that are required to execute the task.
+  /// \return The resources that will be acquired during the execution of this
+  /// task.
   const ResourceSet &GetRequiredResources() const;
 
   /// Return the labels that are required for the node to execute
-  /// this task.
+  /// this task on.
   ///
   /// \return The labels that are required for the execution of this task on a node.
   const LabelSelector &GetLabelSelector() const;
 
   /// Return the list of fallback strategies for scheduling.
   ///
-  /// \return The fallback strategies for the task.
+  /// \return Fallback strategies to fall back on when scheduling a task on a node.
   const std::vector<FallbackOption> &GetFallbackStrategy() const;
 
   const rpc::SchedulingStrategy &GetSchedulingStrategy() const;
