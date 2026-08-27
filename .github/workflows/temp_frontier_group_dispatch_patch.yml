@@ -1,0 +1,29 @@
+name: Temporary Recovery Frontier Group Dispatch Patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp_frontier_group_dispatch_patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply group-dispatch patch
+        run: python3 tmp_frontier_group_dispatch_patch.py
+      - name: Commit source changes
+        shell: bash
+        run: |
+          git config user.name "tejas-shivanand-mane"
+          git config user.email "38262749+tejas-shivanand-mane@users.noreply.github.com"
+          git add src/ray/core_worker/core_worker.h src/ray/core_worker/core_worker.cc
+          git diff --cached --check
+          git commit -m "Amortize Recovery Frontier deferred dispatch [skip ci]"
+          git push origin HEAD:main
