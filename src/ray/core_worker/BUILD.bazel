@@ -35,6 +35,7 @@ ray_cc_library(
         "//src/ray/common:protobuf_utils",
         "//src/ray/core_worker/actor_management:actor_handle",
         "//src/ray/core_worker/actor_management:actor_manager",
+        "//src/ray/core_worker/recovery_frontier_wire:recovery_frontier_wire",
         "//src/ray/core_worker/task_execution:task_receiver",
         "//src/ray/core_worker/task_submission:normal_task_submitter",
         "//src/ray/core_worker_rpc_client:core_worker_client",
