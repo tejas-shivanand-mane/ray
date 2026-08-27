@@ -117,5 +117,32 @@ TEST(RecoveryFrontierWireTest, IncrementalSuffixPreservesGenerationAndOffsets) {
   EXPECT_EQ(local_return, 1U);
 }
 
+TEST(RecoveryFrontierWireTest, EnvelopeRoundTripsAndRejectsMagicOnlyPayload) {
+  RecoveryFrontierPlanner planner(/*group_size=*/4);
+  const auto membership = planner.RegisterTask(MakeTask('a', 1));
+  RecoveryFrontierGroup *group = planner.GetMutableGroup(membership.group_id);
+  ASSERT_NE(group, nullptr);
+
+  auto batch = group->StageAppend();
+  ASSERT_TRUE(batch.has_value());
+  const rpc::RecoveryFrontierAppend wire = BuildRecoveryFrontierAppend(*batch);
+  const std::string payload = SerializeRecoveryFrontierAppendEnvelope(wire);
+
+  EXPECT_TRUE(IsRecoveryFrontierAppendEnvelope(payload));
+
+  rpc::RecoveryFrontierAppend decoded;
+  ASSERT_TRUE(ParseRecoveryFrontierAppendEnvelope(payload, &decoded));
+  EXPECT_EQ(decoded.SerializeAsString(), wire.SerializeAsString());
+
+  const std::string ordinary_task_spec =
+      wire.members(0).task_spec().SerializeAsString();
+  EXPECT_FALSE(IsRecoveryFrontierAppendEnvelope(ordinary_task_spec));
+  EXPECT_FALSE(ParseRecoveryFrontierAppendEnvelope(ordinary_task_spec, &decoded));
+
+  const std::string magic_only = payload.substr(0, 8);
+  EXPECT_TRUE(IsRecoveryFrontierAppendEnvelope(magic_only));
+  EXPECT_FALSE(ParseRecoveryFrontierAppendEnvelope(magic_only, &decoded));
+}
+
 }  // namespace
 }  // namespace ray::core
