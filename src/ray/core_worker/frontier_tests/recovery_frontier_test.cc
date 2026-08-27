@@ -8,9 +8,12 @@
 
 #include "ray/core_worker/recovery_frontier.h"
 
+#include <memory>
 #include <string>
 
 #include <gtest/gtest.h>
+
+#include "ray/common/task/task_spec.h"
 
 namespace ray::core {
 namespace {
@@ -21,6 +24,78 @@ rpc::TaskSpec MakeTask(char byte, int64_t num_returns = 1) {
   spec.set_num_returns(num_returns);
   spec.set_max_retries(2);
   return spec;
+}
+
+TEST(RecoveryFrontierTest, SharedRegistrationReusesCleanImmutableTaskSpec) {
+  RecoveryFrontierPlanner planner(/*group_size=*/32);
+  auto task = std::make_shared<rpc::TaskSpec>(MakeTask('s'));
+  std::shared_ptr<const rpc::TaskSpec> immutable_task = task;
+
+  const auto membership = planner.RegisterTask(immutable_task);
+  const RecoveryFrontierGroup *group = planner.GetGroup(membership.group_id);
+  ASSERT_NE(group, nullptr);
+  ASSERT_EQ(group->Members().size(), 1U);
+  ASSERT_NE(group->Members()[0].task_spec, nullptr);
+
+  // The production shared_ptr overload must not deep-copy a clean owner
+  // TaskSpec. This is the hot path isolated by Benchmarks 49/50.
+  EXPECT_EQ(group->Members()[0].task_spec.get(), task.get());
+  EXPECT_EQ(group->Members()[0].task_spec->SerializeAsString(),
+            task->SerializeAsString());
+}
+
+TEST(RecoveryFrontierTest, SharedRegistrationSanitizesRecoveryOnlyFieldsPrivately) {
+  RecoveryFrontierPlanner planner(/*group_size=*/32);
+  auto task = std::make_shared<rpc::TaskSpec>(MakeTask('d'));
+  task->mutable_recovery_manifest()->set_task_id(task->task_id());
+  auto *entry = task->add_recovery_argument_metadata();
+  entry->mutable_recovery_metadata()->set_first_holder_task_spec("transport-only");
+  std::shared_ptr<const rpc::TaskSpec> immutable_task = task;
+
+  const auto membership = planner.RegisterTask(immutable_task);
+  const RecoveryFrontierGroup *group = planner.GetGroup(membership.group_id);
+  ASSERT_NE(group, nullptr);
+  ASSERT_EQ(group->Members().size(), 1U);
+  const auto &stored = group->Members()[0].task_spec;
+  ASSERT_NE(stored, nullptr);
+
+  // Recovery-decorated TaskSpecs retain the old correctness semantics: make a
+  // private recipe and remove fields that must not become replay lineage.
+  EXPECT_NE(stored.get(), task.get());
+  EXPECT_FALSE(stored->has_recovery_manifest());
+  ASSERT_EQ(stored->recovery_argument_metadata_size(), 1);
+  EXPECT_TRUE(stored->recovery_argument_metadata(0)
+                  .recovery_metadata()
+                  .first_holder_task_spec()
+                  .empty());
+
+  // Sanitization must never mutate the caller/TaskManager-owned TaskSpec.
+  EXPECT_TRUE(task->has_recovery_manifest());
+  EXPECT_EQ(task->recovery_argument_metadata(0)
+                .recovery_metadata()
+                .first_holder_task_spec(),
+            "transport-only");
+}
+
+TEST(RecoveryFrontierTest, TaskSpecificationMutationDetachesSharedReplaySnapshot) {
+  // Actor tasks skip scheduling-class construction, which keeps this fixture
+  // intentionally minimal. The COW property itself is TaskSpecification-wide.
+  auto proto = std::make_shared<rpc::TaskSpec>();
+  proto->set_type(rpc::TaskType::ACTOR_TASK);
+  proto->set_attempt_number(3);
+  TaskSpecification task_spec(proto);
+
+  const auto replay_snapshot = task_spec.GetSharedMessage();
+  ASSERT_EQ(replay_snapshot.get(), proto.get());
+  EXPECT_EQ(replay_snapshot->attempt_number(), 3);
+
+  // Normal task retry logic mutates attempt_number through GetMutableMessage().
+  // A shared Frontier replay snapshot must remain at the original attempt.
+  task_spec.GetMutableMessage().set_attempt_number(4);
+
+  EXPECT_NE(task_spec.GetSharedMessage().get(), replay_snapshot.get());
+  EXPECT_EQ(replay_snapshot->attempt_number(), 3);
+  EXPECT_EQ(task_spec.GetMessage().attempt_number(), 4);
 }
 
 TEST(RecoveryFrontierTest, SingleTaskIsImmediateLeaderForAnyK) {
