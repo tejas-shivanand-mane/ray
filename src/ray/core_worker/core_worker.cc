@@ -1539,6 +1539,10 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
 
   const TaskID task_id = object_id.TaskId();
 
+  const bool recovery_frontier_enabled =
+      recovery_witness_holder_baseline_enabled_ &&
+      recovery_succession_manager_->RecoveryFrontierEnabled();
+
   // PERF-ONLY frontier-density selector.
   //
   // For K>1, only approximately 1/K baseline tasks pay the protection cost.
@@ -1547,7 +1551,8 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
   //
   // Returning false here exports the ordinary ObjectRef without recovery
   // metadata. This is intentionally NOT recovery-correct for K>1.
-  if (recovery_witness_holder_baseline_enabled_) {
+  if (recovery_witness_holder_baseline_enabled_ &&
+      !recovery_frontier_enabled) {
     const uint32_t protect_every_n =
         RayConfig::instance().recovery_baseline_perf_protect_every_n();
     if (protect_every_n > 1) {
@@ -1601,31 +1606,95 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
     return false;
   }
 
-  uint64_t manifest_start_ns = 0;
-  if (recovery_succession_profiling_enabled_) {
-    manifest_start_ns = RecoveryProfileNowNs();
-  }
+  const bool recovery_frontier_grouping_enabled =
+      recovery_frontier_enabled &&
+      RayConfig::instance().recovery_frontier_group_size() > 1;
 
-  rpc::RecoveryManifest manifest =
-      recovery_succession_manager_->BuildInitialManifest(
-          task_id, task_spec.JobId(), task_proto.max_retries());
+  std::optional<RecoveryFrontierMembership> frontier_membership;
+  rpc::RecoveryManifest frontier_protection_manifest;
+  rpc::RecoveryManifest manifest;
 
-  if (manifest_start_ns != 0) {
-    recovery_succession_manager_->RecordInitialManifestBuild(
-        RecoveryProfileNowNs() - manifest_start_ns,
-        static_cast<uint64_t>(manifest.ByteSizeLong()));
-  }
+  if (recovery_frontier_grouping_enabled) {
+    frontier_membership =
+        recovery_succession_manager_->GetRecoveryFrontierMembership(task_id);
+    if (!frontier_membership.has_value()) {
+      frontier_membership =
+          recovery_succession_manager_->RegisterOwnerTaskWithRecoveryFrontier(
+              task_spec);
+    }
+    if (!frontier_membership.has_value()) {
+      return false;
+    }
 
-  uint64_t witness_start_ns = 0;
-  if (recovery_succession_profiling_enabled_) {
-    witness_start_ns = RecoveryProfileNowNs();
-  }
+    if (!recovery_succession_manager_->GetRecoveryFrontierProtectionManifest(
+            frontier_membership->group_id, &frontier_protection_manifest)) {
+      const uint64_t manifest_start_ns =
+          recovery_succession_profiling_enabled_
+              ? RecoveryProfileNowNs()
+              : 0;
 
-  PopulateRecoveryWitnesses(&manifest);
+      rpc::RecoveryManifest candidate =
+          recovery_succession_manager_->BuildInitialManifest(
+              frontier_membership->group_id,
+              task_spec.JobId(),
+              task_proto.max_retries());
 
-  if (witness_start_ns != 0) {
-    recovery_succession_manager_->RecordWitnessSelectionLatency(
-        RecoveryProfileNowNs() - witness_start_ns);
+      if (manifest_start_ns != 0) {
+        recovery_succession_manager_->RecordInitialManifestBuild(
+            RecoveryProfileNowNs() - manifest_start_ns,
+            static_cast<uint64_t>(candidate.ByteSizeLong()));
+      }
+
+      const uint64_t witness_start_ns =
+          recovery_succession_profiling_enabled_
+              ? RecoveryProfileNowNs()
+              : 0;
+      PopulateRecoveryWitnesses(&candidate);
+      if (witness_start_ns != 0) {
+        recovery_succession_manager_->RecordWitnessSelectionLatency(
+            RecoveryProfileNowNs() - witness_start_ns);
+      }
+
+      RAY_CHECK(
+          recovery_succession_manager_->CacheRecoveryFrontierProtectionManifest(
+              candidate, &frontier_protection_manifest))
+          << "Failed to cache Recovery Frontier protection topology for group "
+          << frontier_membership->group_id;
+    }
+
+    // Manager/object metadata remains task-centric so borrowers continue to
+    // request the original deterministic TaskID. Only holder storage/publication
+    // is grouped under the frontier leader.
+    manifest.CopyFrom(frontier_protection_manifest);
+    manifest.set_task_id(task_id.Binary());
+    manifest.set_job_id(task_spec.JobId().Binary());
+    manifest.set_max_recovery_attempts(task_proto.max_retries());
+  } else {
+    uint64_t manifest_start_ns = 0;
+    if (recovery_succession_profiling_enabled_) {
+      manifest_start_ns = RecoveryProfileNowNs();
+    }
+
+    manifest = recovery_succession_manager_->BuildInitialManifest(
+        task_id, task_spec.JobId(), task_proto.max_retries());
+
+    if (manifest_start_ns != 0) {
+      recovery_succession_manager_->RecordInitialManifestBuild(
+          RecoveryProfileNowNs() - manifest_start_ns,
+          static_cast<uint64_t>(manifest.ByteSizeLong()));
+    }
+
+    uint64_t witness_start_ns = 0;
+    if (recovery_succession_profiling_enabled_) {
+      witness_start_ns = RecoveryProfileNowNs();
+    }
+
+    PopulateRecoveryWitnesses(&manifest);
+
+    if (witness_start_ns != 0) {
+      recovery_succession_manager_->RecordWitnessSelectionLatency(
+          RecoveryProfileNowNs() - witness_start_ns);
+    }
   }
 
   uint64_t register_start_ns = 0;
@@ -1642,6 +1711,11 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
   }
 
   if (initialized_now && recovery_witness_holder_baseline_enabled_) {
+    if (recovery_frontier_grouping_enabled) {
+      RAY_CHECK(frontier_membership.has_value());
+      PublishRecoveryFrontierGroup(
+          frontier_membership->group_id, frontier_protection_manifest);
+    } else {
     const uint32_t target_holder_count =
         RayConfig::instance().recovery_succession_target_holder_count();
 
@@ -1733,6 +1807,7 @@ bool CoreWorker::TryPopulateRecoveryMetadataForObject(
         },
         publish_task_spec,
         publish_serialized_task_spec);
+    }
   }
 
   // If another thread won the initialization race, its metadata is visible

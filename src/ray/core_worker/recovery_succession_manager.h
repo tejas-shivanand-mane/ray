@@ -261,6 +261,18 @@ class RecoverySuccessionManager {
   std::optional<RecoveryFrontierMembership> GetRecoveryFrontierMembership(
       const TaskID &task_id) const;
 
+  /// Return the immutable protection manifest selected for a frontier group.
+  /// The group leader TaskID is the manifest TaskID.
+  bool GetRecoveryFrontierProtectionManifest(
+      const TaskID &group_id, rpc::RecoveryManifest *manifest) const;
+
+  /// Cache the first protection manifest selected for a group and return the
+  /// authoritative cached value. Concurrent first activations therefore cannot
+  /// split later members across different fixed-R holder sets.
+  bool CacheRecoveryFrontierProtectionManifest(
+      const rpc::RecoveryManifest &candidate,
+      rpc::RecoveryManifest *authoritative_manifest);
+
   /// Stage/commit/abort the next contiguous group append. These methods expose
   /// the frontier acknowledged-prefix state machine to either protection
   /// backend without coupling the planner to Baseline or Succession RPCs.
@@ -507,6 +519,11 @@ class RecoverySuccessionManager {
   /// planner itself remains deliberately lock-free.
   std::unique_ptr<RecoveryFrontierPlanner> recovery_frontier_planner_
       ABSL_GUARDED_BY(mutex_);
+
+  /// Immutable backend topology for each activated frontier group. The replay
+  /// capsule grows, but its fixed-R witness/holder set never changes.
+  absl::flat_hash_map<TaskID, rpc::RecoveryManifest>
+      recovery_frontier_protection_manifests_ ABSL_GUARDED_BY(mutex_);
 
   mutable RecoverySuccessionProfile profile_ ABSL_GUARDED_BY(mutex_);
 

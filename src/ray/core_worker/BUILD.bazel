@@ -5,6 +5,7 @@ ray_cc_library(
     srcs = [
         "core_worker.cc",
         "core_worker_process.cc",
+        "recovery_frontier_publication.cc",
         "core_worker_shutdown_executor.cc",
     ],
     hdrs = [

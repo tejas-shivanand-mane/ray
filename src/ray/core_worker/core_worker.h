@@ -1651,6 +1651,13 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
     const rpc::TaskSpec *task_spec = nullptr,
     const std::string *serialized_task_spec = nullptr) const;
 
+  /// Publish every currently uncommitted replay recipe for one Recovery
+  /// Frontier group to its fixed-R holder topology. The owner-side committed
+  /// prefix advances only from the all-holder completion callback.
+  void PublishRecoveryFrontierGroup(
+      const TaskID &group_id,
+      const rpc::RecoveryManifest &protection_manifest) const;
+
 
   // Patch 4M-CERT delta publication.  Same witness durability rule as normal
   // Succession, but only one owner-issued holder certificate is transmitted.

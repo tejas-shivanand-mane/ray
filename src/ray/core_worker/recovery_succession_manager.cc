@@ -422,6 +422,45 @@ RecoverySuccessionManager::GetRecoveryFrontierMembership(
   return recovery_frontier_planner_->FindTask(task_id);
 }
 
+bool RecoverySuccessionManager::GetRecoveryFrontierProtectionManifest(
+    const TaskID &group_id, rpc::RecoveryManifest *manifest) const {
+  if (group_id.IsNil() || manifest == nullptr) {
+    return false;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  const auto it = recovery_frontier_protection_manifests_.find(group_id);
+  if (it == recovery_frontier_protection_manifests_.end()) {
+    return false;
+  }
+  manifest->CopyFrom(it->second);
+  return true;
+}
+
+bool RecoverySuccessionManager::CacheRecoveryFrontierProtectionManifest(
+    const rpc::RecoveryManifest &candidate,
+    rpc::RecoveryManifest *authoritative_manifest) {
+  if (authoritative_manifest == nullptr ||
+      candidate.task_id().size() != TaskID::Size()) {
+    return false;
+  }
+
+  const TaskID group_id = TaskID::FromBinary(candidate.task_id());
+  absl::MutexLock lock(&mutex_);
+  if (recovery_frontier_planner_ == nullptr ||
+      recovery_frontier_planner_->GetGroup(group_id) == nullptr) {
+    return false;
+  }
+
+  auto [it, inserted] =
+      recovery_frontier_protection_manifests_.try_emplace(group_id);
+  if (inserted) {
+    it->second.CopyFrom(candidate);
+  }
+  authoritative_manifest->CopyFrom(it->second);
+  return true;
+}
+
 std::optional<RecoveryFrontierAppendBatch>
 RecoverySuccessionManager::StageRecoveryFrontierAppend(
     const TaskID &group_id, uint32_t max_batch_members) {
@@ -628,7 +667,8 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
   // Register every eligible live owner task with the shared frontier planner
   // before any backend-specific activation/filtering. This is owner-local only:
   // no holder, witness, manifest, or candidate RPC is emitted here.
-  if (RecoveryFrontierEnabled() && !returned_refs.empty()) {
+  const bool frontier_enabled = RecoveryFrontierEnabled();
+  if (frontier_enabled && !returned_refs.empty()) {
     static_cast<void>(RegisterOwnerTaskWithRecoveryFrontier(task_spec));
   }
 
@@ -641,7 +681,7 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
   // retain baseline TaskManager/recovery state. This makes the experiment test
   // the cost of protecting only ~1/K tasks, not merely suppressing their
   // witness RPCs.
-  if (baseline_enabled) {
+  if (baseline_enabled && !frontier_enabled) {
     const uint32_t protect_every_n =
         RayConfig::instance().recovery_baseline_perf_protect_every_n();
     if (protect_every_n > 1) {
