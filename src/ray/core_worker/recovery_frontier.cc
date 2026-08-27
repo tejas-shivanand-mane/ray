@@ -21,6 +21,44 @@
 #include "ray/util/logging.h"
 
 namespace ray::core {
+namespace {
+
+bool CanShareRecoveryFrontierReplayRecipe(const rpc::TaskSpec &task_spec) {
+  // The owner submission path normally reaches Frontier before any recovery
+  // state is attached. In that common case the TaskManager-owned protobuf is
+  // already exactly the replay recipe we want and can be shared directly.
+  if (task_spec.has_recovery_manifest()) {
+    return false;
+  }
+
+  // Patch-4F full-lineage piggybacks are transport-only and must never become
+  // part of retained replay lineage. Fall back to a sanitized private copy if
+  // one is present instead of mutating the shared source TaskSpec.
+  for (const rpc::RecoveryTaskArgumentMetadata &entry :
+       task_spec.recovery_argument_metadata()) {
+    if (entry.has_recovery_metadata() &&
+        !entry.recovery_metadata().first_holder_task_spec().empty()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::shared_ptr<const rpc::TaskSpec> MakeSanitizedRecoveryFrontierReplayRecipe(
+    const rpc::TaskSpec &task_spec) {
+  auto stored_task_spec = std::make_shared<rpc::TaskSpec>();
+  stored_task_spec->CopyFrom(task_spec);
+  stored_task_spec->clear_recovery_manifest();
+  for (rpc::RecoveryTaskArgumentMetadata &entry :
+       *stored_task_spec->mutable_recovery_argument_metadata()) {
+    if (entry.has_recovery_metadata()) {
+      entry.mutable_recovery_metadata()->clear_first_holder_task_spec();
+    }
+  }
+  return stored_task_spec;
+}
+
+}  // namespace
 
 RecoveryFrontierGroup::RecoveryFrontierGroup(TaskID group_id, uint32_t max_members)
     : group_id_(std::move(group_id)), max_members_(max_members) {
@@ -29,12 +67,13 @@ RecoveryFrontierGroup::RecoveryFrontierGroup(TaskID group_id, uint32_t max_membe
 }
 
 std::optional<RecoveryFrontierMembership> RecoveryFrontierGroup::AddTask(
-    const rpc::TaskSpec &task_spec) {
-  if (task_spec.task_id().size() != TaskID::Size() || task_spec.num_returns() == 0) {
+    std::shared_ptr<const rpc::TaskSpec> task_spec) {
+  if (task_spec == nullptr || task_spec->task_id().size() != TaskID::Size() ||
+      task_spec->num_returns() == 0) {
     return std::nullopt;
   }
 
-  const TaskID task_id = TaskID::FromBinary(task_spec.task_id());
+  const TaskID task_id = TaskID::FromBinary(task_spec->task_id());
   const auto existing = task_to_member_index_.find(task_id);
   if (existing != task_to_member_index_.end()) {
     const RecoveryFrontierMember &member = members_[existing->second];
@@ -55,24 +94,17 @@ std::optional<RecoveryFrontierMembership> RecoveryFrontierGroup::AddTask(
   member.task_id = task_id;
   member.member_index = static_cast<uint32_t>(members_.size());
   member.first_group_return_index = next_group_return_index_;
-  member.num_returns = static_cast<uint32_t>(task_spec.num_returns());
+  member.num_returns = static_cast<uint32_t>(task_spec->num_returns());
 
-  // Keep exactly one immutable owner-local replay recipe. Staged append batches
-  // share this object, so staging K members does not deep-copy K protobufs.
-  auto stored_task_spec = std::make_shared<rpc::TaskSpec>();
-  stored_task_spec->CopyFrom(task_spec);
-
-  // A group stores replay recipes, not per-task protection state. Protection
-  // metadata belongs to the shared group leader and is attached by the backend
-  // when the capsule is installed/replayed.
-  stored_task_spec->clear_recovery_manifest();
-  for (rpc::RecoveryTaskArgumentMetadata &entry :
-       *stored_task_spec->mutable_recovery_argument_metadata()) {
-    if (entry.has_recovery_metadata()) {
-      entry.mutable_recovery_metadata()->clear_first_holder_task_spec();
-    }
+  // Benchmark 50 showed that the canonical protobuf CopyFrom is a material
+  // per-task cost. The normal owner path already has immutable shared ownership
+  // through TaskSpecification/TaskManager, so reuse it. If recovery-only fields
+  // need stripping, preserve the old semantics with a sanitized private copy.
+  if (CanShareRecoveryFrontierReplayRecipe(*task_spec)) {
+    member.task_spec = std::move(task_spec);
+  } else {
+    member.task_spec = MakeSanitizedRecoveryFrontierReplayRecipe(*task_spec);
   }
-  member.task_spec = std::move(stored_task_spec);
 
   const uint32_t member_index = member.member_index;
   const uint32_t first_return = member.first_group_return_index;
@@ -215,8 +247,14 @@ RecoveryFrontierPlanner::RecoveryFrontierPlanner(uint32_t group_size)
 
 RecoveryFrontierMembership RecoveryFrontierPlanner::RegisterTask(
     const rpc::TaskSpec &task_spec) {
-  RAY_CHECK_EQ(task_spec.task_id().size(), TaskID::Size());
-  const TaskID task_id = TaskID::FromBinary(task_spec.task_id());
+  return RegisterTask(MakeSanitizedRecoveryFrontierReplayRecipe(task_spec));
+}
+
+RecoveryFrontierMembership RecoveryFrontierPlanner::RegisterTask(
+    std::shared_ptr<const rpc::TaskSpec> task_spec) {
+  RAY_CHECK(task_spec != nullptr);
+  RAY_CHECK_EQ(task_spec->task_id().size(), TaskID::Size());
+  const TaskID task_id = TaskID::FromBinary(task_spec->task_id());
 
   const auto existing = membership_by_task_.find(task_id);
   if (existing != membership_by_task_.end()) {
@@ -237,7 +275,7 @@ RecoveryFrontierMembership RecoveryFrontierPlanner::RegisterTask(
     groups_.try_emplace(open_group_id_, open_group_id_, group_size_);
     group = GetMutableGroup(open_group_id_);
     RAY_CHECK(group != nullptr);
-    membership = group->AddTask(task_spec);
+    membership = group->AddTask(std::move(task_spec));
   }
 
   RAY_CHECK(membership.has_value());
