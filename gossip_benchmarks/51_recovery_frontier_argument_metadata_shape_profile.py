@@ -5,7 +5,7 @@ Benchmark 42 showed that, once a K32 Frontier group is already committed, almost
 all of the remaining extra C++ BuildCommonTaskSpec time is in task-argument
 metadata population rather than EnsureRecoverySuccessionForTaskArguments.
 
-This benchmark keeps the producer recovery state precommitted and compares two
+This benchmark keeps producer recovery state precommitted and compares two
 normal-task argument shapes over the same producer ObjectRefs:
 
   direct: hold_direct.remote(ref)
@@ -28,9 +28,14 @@ Why this distinction matters:
 No witness publication belongs in the timed section: all producer refs are
 exported once before timing and protection is allowed to finish. The timed
 profile therefore measures the steady committed metadata/export path only.
+
+Unlike the first version of this benchmark, each recovery variant now starts
+ONE Ray cluster and runs every repetition/argument shape inside it. This keeps
+the measured work identical while reducing cluster startups from 30 to 3.
 """
 from __future__ import annotations
 
+import argparse
 import statistics
 import time
 from typing import Any
@@ -40,14 +45,20 @@ from ray._private.worker import global_worker
 from ray.cluster_utils import Cluster
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from _benchmark_common import disabled, safe_shutdown, system_config, wait_for_cluster, witness_baseline
+from _benchmark_common import (
+    disabled,
+    safe_shutdown,
+    system_config,
+    wait_for_cluster,
+    witness_baseline,
+)
 
 R = 2
 K = 32
-N = 32
+DEFAULT_N = 32
 PAYLOAD_BYTES = 1024
 PADDING_BYTES = 1024
-REPETITIONS = 5
+DEFAULT_REPETITIONS = 5
 
 VARIANTS = [
     ("disabled", "disabled", None),
@@ -107,8 +118,75 @@ def wait_for_updates_complete(timeout_s: float = 5.0) -> dict[str, Any]:
     return p
 
 
-def run_case(label: str, recovery_mode: str, k: int | None, arg_mode: str) -> dict[str, float]:
+def collect_timed_case(
+    label: str,
+    arg_mode: str,
+    refs,
+    hold_direct,
+    hold_nested,
+    consumer_strategy,
+    n: int,
+) -> dict[str, float]:
+    reset_profile()
+
+    start_ns = time.perf_counter_ns()
+    if arg_mode == "direct":
+        calls = [
+            hold_direct.options(
+                scheduling_strategy=consumer_strategy, num_cpus=0
+            ).remote(ref)
+            for ref in refs
+        ]
+    elif arg_mode == "nested":
+        calls = [
+            hold_nested.options(
+                scheduling_strategy=consumer_strategy, num_cpus=0
+            ).remote([ref])
+            for ref in refs
+        ]
+    else:
+        raise ValueError(arg_mode)
+    external_ns = time.perf_counter_ns() - start_ns
+
+    results = ray.get(calls)
+    if arg_mode == "direct":
+        assert results == [PAYLOAD_BYTES for _ in refs]
+    else:
+        assert results == [ref.hex() for ref in refs]
+
+    p = wait_for_updates_complete()
+    assert int(p.get("witness_update_rpcs_sent", 0)) == 0, p
+
+    prof_calls = int(p.get("normal_submit_profile_calls", 0))
+    assert prof_calls == n, (label, arg_mode, prof_calls, p)
+
+    total_cpp_us = int(p.get("normal_submit_total_time_ns", 0)) / n / 1e3
+    build_us = int(p.get("normal_submit_build_common_time_ns", 0)) / n / 1e3
+    ensure_us = int(p.get("ensure_task_arguments_time_ns", 0)) / n / 1e3
+    argmeta_us = int(p.get("task_argument_metadata_time_ns", 0)) / n / 1e3
+    external_us = external_ns / n / 1e3
+
+    return {
+        "external_us": external_us,
+        "total_cpp_us": total_cpp_us,
+        "build_us": build_us,
+        "ensure_us": ensure_us,
+        "argmeta_us": argmeta_us,
+        "unaccounted_us": external_us - total_cpp_us,
+        "metadata_refs": float(p.get("task_argument_metadata_refs_attached", 0)),
+        "compact_refs": float(p.get("task_argument_metadata_compact_refs", 0)),
+    }
+
+
+def run_variant(
+    label: str,
+    recovery_mode: str,
+    k: int | None,
+    repetitions: int,
+    n: int,
+) -> dict[str, list[dict[str, float]]]:
     cluster = None
+    rows = {mode: [] for mode in MODES}
     try:
         cluster = Cluster()
         cluster.add_node(
@@ -148,75 +226,58 @@ def run_case(label: str, recovery_mode: str, k: int | None, arg_mode: str) -> di
         padding = b"p" * PADDING_BYTES
 
         refs = [
-            produce.options(scheduling_strategy=producer_strategy, num_cpus=1).remote(
-                i, PAYLOAD_BYTES, padding
-            )
-            for i in range(N)
+            produce.options(
+                scheduling_strategy=producer_strategy, num_cpus=1
+            ).remote(i, PAYLOAD_BYTES, padding)
+            for i in range(n)
         ]
         values = ray.get(refs)
-        assert len(values) == N
+        assert len(values) == n
 
-        # Prime through the nested export path so every producer ref has crossed
-        # the borrower/export boundary before the timed section. For K32 this
-        # commits one group; Fixed-R commits all N independent tasks.
+        # Prime ONCE through the nested export path. Protection is now durable
+        # for every later direct/nested repetition in this same cluster.
         reset_profile()
         prime_calls = [
-            hold_nested.options(scheduling_strategy=consumer_strategy, num_cpus=0).remote([ref])
+            hold_nested.options(
+                scheduling_strategy=consumer_strategy, num_cpus=0
+            ).remote([ref])
             for ref in refs
         ]
         assert ray.get(prime_calls) == [ref.hex() for ref in refs]
         p_prime = wait_for_updates_complete()
 
         if recovery_mode == "recovery":
-            expected_updates = (N * R) if k is None else R
+            expected_updates = (n * R) if k is None else ((n + int(k) - 1) // int(k)) * R
             assert int(p_prime.get("witness_update_rpcs_sent", 0)) == expected_updates, p_prime
             assert int(p_prime.get("witness_update_rpcs_completed", 0)) == expected_updates, p_prime
 
-        reset_profile()
+        print(
+            f"  {label}: precommit complete; running {repetitions} paired repetitions",
+            flush=True,
+        )
 
-        start_ns = time.perf_counter_ns()
-        if arg_mode == "direct":
-            calls = [
-                hold_direct.options(scheduling_strategy=consumer_strategy, num_cpus=0).remote(ref)
-                for ref in refs
-            ]
-        elif arg_mode == "nested":
-            calls = [
-                hold_nested.options(scheduling_strategy=consumer_strategy, num_cpus=0).remote([ref])
-                for ref in refs
-            ]
-        else:
-            raise ValueError(arg_mode)
-        external_ns = time.perf_counter_ns() - start_ns
+        for rep in range(repetitions):
+            mode_order = MODES if rep % 2 == 0 else tuple(reversed(MODES))
+            print(f"    repetition {rep + 1}/{repetitions}", flush=True)
+            for mode in mode_order:
+                row = collect_timed_case(
+                    label,
+                    mode,
+                    refs,
+                    hold_direct,
+                    hold_nested,
+                    consumer_strategy,
+                    n,
+                )
+                rows[mode].append(row)
+                print(
+                    f"      {mode:<6} external={row['external_us']:.2f}  "
+                    f"cpp={row['total_cpp_us']:.2f}  build={row['build_us']:.2f}  "
+                    f"ensure={row['ensure_us']:.2f}  argmeta={row['argmeta_us']:.2f}",
+                    flush=True,
+                )
 
-        results = ray.get(calls)
-        if arg_mode == "direct":
-            assert results == [PAYLOAD_BYTES for _ in refs]
-        else:
-            assert results == [ref.hex() for ref in refs]
-
-        p = wait_for_updates_complete()
-        assert int(p.get("witness_update_rpcs_sent", 0)) == 0, p
-
-        prof_calls = int(p.get("normal_submit_profile_calls", 0))
-        assert prof_calls == N, (label, arg_mode, prof_calls, p)
-
-        total_cpp_us = int(p.get("normal_submit_total_time_ns", 0)) / N / 1e3
-        build_us = int(p.get("normal_submit_build_common_time_ns", 0)) / N / 1e3
-        ensure_us = int(p.get("ensure_task_arguments_time_ns", 0)) / N / 1e3
-        argmeta_us = int(p.get("task_argument_metadata_time_ns", 0)) / N / 1e3
-        external_us = external_ns / N / 1e3
-
-        return {
-            "external_us": external_us,
-            "total_cpp_us": total_cpp_us,
-            "build_us": build_us,
-            "ensure_us": ensure_us,
-            "argmeta_us": argmeta_us,
-            "unaccounted_us": external_us - total_cpp_us,
-            "metadata_refs": float(p.get("task_argument_metadata_refs_attached", 0)),
-            "compact_refs": float(p.get("task_argument_metadata_compact_refs", 0)),
-        }
+        return rows
     finally:
         safe_shutdown(ray, cluster)
 
@@ -233,33 +294,38 @@ def ci95(rows: list[dict[str, float]], key: str) -> float:
 
 
 def main() -> None:
-    rows: dict[tuple[str, str], list[dict[str, float]]] = {
-        (label, mode): [] for label, _, _ in VARIANTS for mode in MODES
-    }
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repetitions", type=int, default=DEFAULT_REPETITIONS)
+    parser.add_argument("--n", type=int, default=DEFAULT_N)
+    args = parser.parse_args()
+    if args.repetitions < 1:
+        raise ValueError("--repetitions must be >= 1")
+    if args.n < 1:
+        raise ValueError("--n must be >= 1")
 
-    for rep in range(REPETITIONS):
-        print(f"repetition {rep + 1}/{REPETITIONS}", flush=True)
-        # Alternate mode order each repetition to reduce order bias.
-        mode_order = MODES if rep % 2 == 0 else tuple(reversed(MODES))
-        for label, recovery_mode, k in VARIANTS:
-            for mode in mode_order:
-                print(f"  {label:<14} {mode}...", flush=True)
-                row = run_case(label, recovery_mode, k, mode)
-                rows[(label, mode)].append(row)
-                print(
-                    f"    external={row['external_us']:.2f}  cpp={row['total_cpp_us']:.2f}  "
-                    f"build={row['build_us']:.2f}  ensure={row['ensure_us']:.2f}  "
-                    f"argmeta={row['argmeta_us']:.2f}",
-                    flush=True,
-                )
+    all_rows: dict[tuple[str, str], list[dict[str, float]]] = {}
+
+    print(
+        f"Benchmark 51: {len(VARIANTS)} clusters total, "
+        f"N={args.n}, repetitions={args.repetitions}",
+        flush=True,
+    )
+    for label, recovery_mode, k in VARIANTS:
+        print(f"\nStarting variant {label}...", flush=True)
+        variant_rows = run_variant(
+            label, recovery_mode, k, args.repetitions, args.n
+        )
+        for mode in MODES:
+            all_rows[(label, mode)] = variant_rows[mode]
 
     print("\nPrecommitted argument-shape metadata profile (us/task):")
     print(
-        "  variant        mode       external          total_cpp         build_common      ensure            argmeta           unaccounted"
+        "  variant        mode       external          total_cpp         "
+        "build_common      ensure            argmeta           unaccounted"
     )
     for label, _, _ in VARIANTS:
         for mode in MODES:
-            group = rows[(label, mode)]
+            group = all_rows[(label, mode)]
             print(
                 f"  {label:<14} {mode:<8} "
                 f"{mean(group,'external_us'):>8.2f} +/- {ci95(group,'external_us'):>6.2f}  "
@@ -273,8 +339,8 @@ def main() -> None:
     print("\nNested - direct paired-shape deltas (difference of repetition means, us/task):")
     print("  variant        external    total_cpp   build_common   ensure   argmeta")
     for label, _, _ in VARIANTS:
-        direct = rows[(label, "direct")]
-        nested = rows[(label, "nested")]
+        direct = all_rows[(label, "direct")]
+        nested = all_rows[(label, "nested")]
         print(
             f"  {label:<14} "
             f"{mean(nested,'external_us') - mean(direct,'external_us'):>8.2f}  "
@@ -284,16 +350,21 @@ def main() -> None:
             f"{mean(nested,'argmeta_us') - mean(direct,'argmeta_us'):>7.2f}"
         )
 
-    f_direct = rows[("frontier_k32", "direct")]
-    f_nested = rows[("frontier_k32", "nested")]
+    f_direct = all_rows[("frontier_k32", "direct")]
+    f_nested = all_rows[("frontier_k32", "nested")]
     print("\nFrontier K32 decision guide:")
     print(
         f"  direct argmeta = {mean(f_direct,'argmeta_us'):.2f} us/task; "
         f"nested argmeta = {mean(f_nested,'argmeta_us'):.2f} us/task; "
-        f"nested-direct = {mean(f_nested,'argmeta_us') - mean(f_direct,'argmeta_us'):.2f} us/task"
+        f"nested-direct = "
+        f"{mean(f_nested,'argmeta_us') - mean(f_direct,'argmeta_us'):.2f} us/task"
     )
-    print("  materially larger nested argmeta -> optimize legacy ObjectRef metadata fallback handling")
-    print("  similar direct/nested argmeta     -> optimize manager metadata reconstruction / compact encoding")
+    print(
+        "  materially larger nested argmeta -> optimize legacy ObjectRef metadata fallback handling"
+    )
+    print(
+        "  similar direct/nested argmeta     -> optimize manager metadata reconstruction / compact encoding"
+    )
     print("  Benchmark 48 remains the final authority after any source optimization")
 
 
