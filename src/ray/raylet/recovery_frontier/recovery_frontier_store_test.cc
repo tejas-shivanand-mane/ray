@@ -67,6 +67,15 @@ TEST(RecoveryFrontierStoreTest, AppliesInitialPrefixAndExtractsIndependentTask) 
   ASSERT_TRUE(store.ExtractTaskForReturn(group_id, 2, &replay, &local_return));
   EXPECT_EQ(replay.task_id(), append.members(1).task_id());
   EXPECT_EQ(local_return, 0U);
+
+  RecoveryFrontierStore::CommittedMember member;
+  ASSERT_TRUE(store.LookupCommittedMember(
+      TaskID::FromBinary(append.members(1).task_id()), &member));
+  EXPECT_EQ(member.group_id, group_id);
+  EXPECT_EQ(member.member_index, 1U);
+  EXPECT_EQ(member.first_group_return_index, 2U);
+  EXPECT_EQ(member.num_returns, 1U);
+  EXPECT_EQ(member.task_spec.task_id(), append.members(1).task_id());
 }
 
 TEST(RecoveryFrontierStoreTest, AppliesOnlyContiguousNextGeneration) {
@@ -97,6 +106,13 @@ TEST(RecoveryFrontierStoreTest, AppliesOnlyContiguousNextGeneration) {
   ASSERT_TRUE(store.ExtractTaskForReturn(group_id, 4, &replay, &local_return));
   EXPECT_EQ(replay.task_id(), third.task_id());
   EXPECT_EQ(local_return, 1U);
+
+  RecoveryFrontierStore::CommittedMember member;
+  ASSERT_TRUE(store.LookupCommittedMember(TaskID::FromBinary(third.task_id()), &member));
+  EXPECT_EQ(member.group_id, group_id);
+  EXPECT_EQ(member.member_index, 2U);
+  EXPECT_EQ(member.first_group_return_index, 3U);
+  EXPECT_EQ(member.num_returns, 3U);
 }
 
 TEST(RecoveryFrontierStoreTest, RejectsStaleAndOutOfOrderAppends) {
@@ -135,6 +151,28 @@ TEST(RecoveryFrontierStoreTest, RejectsMalformedPrefixCoordinates) {
             RecoveryFrontierStore::ApplyResult::INVALID);
 }
 
+TEST(RecoveryFrontierStoreTest, RejectsTaskIdAliasedIntoTwoGroups) {
+  RecoveryFrontierStore store;
+  const auto first_group = MakeInitialAppend();
+  ASSERT_EQ(store.ApplyAppend(first_group),
+            RecoveryFrontierStore::ApplyResult::APPLIED);
+
+  const rpc::TaskSpec other_leader = MakeTask('z', 1);
+  const rpc::TaskSpec reused_member = MakeTask('b', 1);
+  rpc::RecoveryFrontierAppend conflicting;
+  conflicting.set_group_id(other_leader.task_id());
+  conflicting.set_base_generation(0);
+  conflicting.set_generation(1);
+  conflicting.set_begin_member_index(0);
+  conflicting.set_end_member_index(2);
+  AddMember(&conflicting, other_leader, 0, 0);
+  AddMember(&conflicting, reused_member, 1, 1);
+
+  EXPECT_EQ(store.ApplyAppend(conflicting),
+            RecoveryFrontierStore::ApplyResult::INVALID);
+  EXPECT_FALSE(store.Generation(TaskID::FromBinary(other_leader.task_id())).has_value());
+}
+
 TEST(RecoveryFrontierStoreTest, KOneShapeIsOrdinarySingleTaskCapsule) {
   RecoveryFrontierStore store;
   const rpc::TaskSpec task = MakeTask('q', 1);
@@ -157,6 +195,10 @@ TEST(RecoveryFrontierStoreTest, KOneShapeIsOrdinarySingleTaskCapsule) {
                                          &local_return));
   EXPECT_EQ(replay.task_id(), task.task_id());
   EXPECT_EQ(local_return, 0U);
+
+  RecoveryFrontierStore::CommittedMember member;
+  ASSERT_TRUE(store.LookupCommittedMember(TaskID::FromBinary(task.task_id()), &member));
+  EXPECT_EQ(member.group_id, TaskID::FromBinary(task.task_id()));
 }
 
 TEST(RecoveryFrontierStoreTest, TransportEnvelopeRoundTripsAndRejectsTaskSpecBytes) {
@@ -178,18 +220,23 @@ TEST(RecoveryFrontierStoreTest, TransportEnvelopeRoundTripsAndRejectsTaskSpecByt
   EXPECT_FALSE(ParseRecoveryFrontierAppendEnvelope(truncated, &decoded));
 }
 
-TEST(RecoveryFrontierStoreTest, TombstoneCleanupErasesGroup) {
+TEST(RecoveryFrontierStoreTest, TombstoneCleanupErasesGroupAndMemberAliases) {
   RecoveryFrontierStore store;
   const auto append = MakeInitialAppend();
   const TaskID group_id = TaskID::FromBinary(append.group_id());
+  const TaskID member_id = TaskID::FromBinary(append.members(1).task_id());
   ASSERT_EQ(store.ApplyAppend(append),
             RecoveryFrontierStore::ApplyResult::APPLIED);
   ASSERT_TRUE(store.Generation(group_id).has_value());
+
+  RecoveryFrontierStore::CommittedMember member;
+  ASSERT_TRUE(store.LookupCommittedMember(member_id, &member));
 
   store.EraseGroup(group_id);
 
   EXPECT_FALSE(store.Generation(group_id).has_value());
   EXPECT_FALSE(store.CommittedMemberCount(group_id).has_value());
+  EXPECT_FALSE(store.LookupCommittedMember(member_id, &member));
   rpc::TaskSpec replay;
   uint32_t local_return = 0;
   EXPECT_FALSE(store.ExtractTaskForReturn(group_id, 0, &replay, &local_return));
