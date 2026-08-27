@@ -1,0 +1,164 @@
+name: Apply Recovery Frontier visibility barrier
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-recovery-frontier-visibility-barrier.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply acknowledged-prefix visibility barrier
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected exactly one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/ray/core_worker/recovery_succession_manager.h",
+              '''  std::optional<RecoveryFrontierAppendBatch> StageRecoveryFrontierAppend(
+              const TaskID &group_id, uint32_t max_batch_members = 0);
+          bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
+          bool AbortRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
+          ''',
+              '''  std::optional<RecoveryFrontierAppendBatch> StageRecoveryFrontierAppend(
+              const TaskID &group_id, uint32_t max_batch_members = 0);
+
+          /// True while at least one member of the group remains outside the
+          /// acknowledged durable prefix. Used by synchronous object export to
+          /// wait behind an append already being published by another thread.
+          bool RecoveryFrontierGroupHasUncommittedMembers(
+              const TaskID &group_id) const;
+
+          bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
+          bool AbortRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
+          ''')
+
+          replace_once(
+              "src/ray/core_worker/recovery_succession_manager.cc",
+              '''std::optional<RecoveryFrontierAppendBatch>
+          RecoverySuccessionManager::StageRecoveryFrontierAppend(
+              const TaskID &group_id, uint32_t max_batch_members) {
+            absl::MutexLock lock(&mutex_);
+            if (recovery_frontier_planner_ == nullptr) {
+              return std::nullopt;
+            }
+            RecoveryFrontierGroup *group =
+                recovery_frontier_planner_->GetMutableGroup(group_id);
+            return group == nullptr ? std::nullopt : group->StageAppend(max_batch_members);
+          }
+
+          bool RecoverySuccessionManager::CommitRecoveryFrontierAppend(
+          ''',
+              '''std::optional<RecoveryFrontierAppendBatch>
+          RecoverySuccessionManager::StageRecoveryFrontierAppend(
+              const TaskID &group_id, uint32_t max_batch_members) {
+            absl::MutexLock lock(&mutex_);
+            if (recovery_frontier_planner_ == nullptr) {
+              return std::nullopt;
+            }
+            RecoveryFrontierGroup *group =
+                recovery_frontier_planner_->GetMutableGroup(group_id);
+            return group == nullptr ? std::nullopt : group->StageAppend(max_batch_members);
+          }
+
+          bool RecoverySuccessionManager::RecoveryFrontierGroupHasUncommittedMembers(
+              const TaskID &group_id) const {
+            if (group_id.IsNil()) {
+              return false;
+            }
+
+            absl::MutexLock lock(&mutex_);
+            if (recovery_frontier_planner_ == nullptr) {
+              return false;
+            }
+            const RecoveryFrontierGroup *group =
+                recovery_frontier_planner_->GetGroup(group_id);
+            return group != nullptr && group->HasUncommittedMembers();
+          }
+
+          bool RecoverySuccessionManager::CommitRecoveryFrontierAppend(
+          ''')
+
+          replace_once(
+              "src/ray/core_worker/recovery_succession_manager.cc",
+              '''  if (known_object && task_it != task_states_.end() &&
+              !task_it->second.manifest.task_id().empty()) {
+            if (metadata != nullptr) {
+          ''',
+              '''  if (known_object && task_it != task_states_.end() &&
+              !task_it->second.manifest.task_id().empty()) {
+            // Recovery Frontier metadata is an acknowledged-prefix capability.
+            // The owner may construct task-local recovery state before the fixed-R
+            // append completes, but that state must remain invisible to exporters
+            // until the member's replay recipe is committed on every group holder.
+            if (recovery_frontier_planner_ != nullptr &&
+                recovery_frontier_planner_->GroupSize() > 1) {
+              const auto membership = recovery_frontier_planner_->FindTask(task_id);
+              if (membership.has_value()) {
+                const RecoveryFrontierGroup *group =
+                    recovery_frontier_planner_->GetGroup(membership->group_id);
+                if (group == nullptr || !group->IsTaskCommitted(task_id)) {
+                  return false;
+                }
+              }
+            }
+
+            if (metadata != nullptr) {
+          ''')
+
+          replace_once(
+              "src/ray/core_worker/core_worker.cc",
+              '''  if (initialized_now && recovery_witness_holder_baseline_enabled_) {
+            if (recovery_frontier_grouping_enabled) {
+              RAY_CHECK(frontier_membership.has_value());
+              PublishRecoveryFrontierGroup(
+                  frontier_membership->group_id, frontier_protection_manifest);
+            } else {
+            const uint32_t target_holder_count =
+          ''',
+              '''  if (recovery_witness_holder_baseline_enabled_) {
+            if (recovery_frontier_grouping_enabled) {
+              RAY_CHECK(frontier_membership.has_value());
+
+              // RegisterOwnedTaskLazy creates the task-local state first, but
+              // BuildRecoveryMetadataLocked deliberately hides it until the
+              // frontier member is inside the acknowledged prefix. Every exporter
+              // that observes that hidden state joins the same publication barrier.
+              if (!recovery_succession_manager_->HasRecoveryMetadata(object_id)) {
+                PublishRecoveryFrontierGroup(
+                    frontier_membership->group_id, frontier_protection_manifest);
+              }
+            } else if (initialized_now) {
+              const uint32_t target_holder_count =
+          ''')
+          PY
+
+      - name: Commit source changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/ray/core_worker/core_worker.cc \
+                  src/ray/core_worker/recovery_succession_manager.cc \
+                  src/ray/core_worker/recovery_succession_manager.h
+          git commit -m "Close recovery frontier metadata visibility window [skip ci]"
+          git push origin HEAD:main
