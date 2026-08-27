@@ -21,51 +21,41 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
-          path = Path('src/ray/core_worker/core_worker.cc')
+          path = Path("src/ray/core_worker/core_worker.cc")
           text = path.read_text()
-
-          old = '''  if (recovery_witness_holder_baseline_enabled_) {
-  if (recovery_frontier_grouping_enabled) {
-    RAY_CHECK(frontier_membership.has_value());
-
-    // RegisterOwnedTaskLazy creates task-local state first, but the
-    // manager deliberately hides its recovery metadata until the member
-    // is inside the acknowledged frontier prefix. Concurrent exporters
-    // join the same barrier instead of escaping with an ordinary ref.
-    if (!recovery_succession_manager_->HasRecoveryMetadata(object_id)) {
-      PublishRecoveryFrontierGroup(
-          frontier_membership->group_id, frontier_protection_manifest);
-    }
-  } else if (initialized_now) {
-'''
-
-          new = '''  if (recovery_witness_holder_baseline_enabled_) {
-    if (recovery_frontier_grouping_enabled) {
-      RAY_CHECK(frontier_membership.has_value());
-
-      // The initial metadata fast-path above already established that this
-      // export still needs activation. PublishRecoveryFrontierGroup() is the
-      // acknowledged-prefix visibility barrier: it returns only after this
-      // group's currently registered members are durable on every fixed-R
-      // holder. Calling HasRecoveryMetadata() again before and after the
-      // barrier therefore adds two manager lock/hash lookups without adding a
-      // correctness check. Racing exporters safely join the same barrier.
-      PublishRecoveryFrontierGroup(
-          frontier_membership->group_id, frontier_protection_manifest);
-
-      if (metadata == nullptr) {
-        return true;
-      }
-      return recovery_succession_manager_->PopulateRecoveryMetadata(
-          object_id, metadata);
-    } else if (initialized_now) {
-'''
-
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f'expected exactly one patch site, found {count}')
-          path.write_text(text.replace(old, new, 1))
+          start_marker = "  if (recovery_witness_holder_baseline_enabled_) {\n  if (recovery_frontier_grouping_enabled) {"
+          end_marker = "  } else if (initialized_now) {"
+          start = text.find(start_marker)
+          if start < 0:
+              raise SystemExit("frontier baseline block start not found")
+          end = text.find(end_marker, start)
+          if end < 0:
+              raise SystemExit("frontier baseline block end not found")
+          end += len(end_marker)
+          new_lines = [
+              "  if (recovery_witness_holder_baseline_enabled_) {",
+              "    if (recovery_frontier_grouping_enabled) {",
+              "      RAY_CHECK(frontier_membership.has_value());",
+              "",
+              "      // The initial metadata fast-path above already established that this",
+              "      // export still needs activation. PublishRecoveryFrontierGroup() is the",
+              "      // acknowledged-prefix visibility barrier: it returns only after this",
+              "      // group's currently registered members are durable on every fixed-R",
+              "      // holder. Re-checking HasRecoveryMetadata() around that barrier adds",
+              "      // manager lock/hash lookups without adding a correctness check.",
+              "      // Racing exporters safely join the same barrier.",
+              "      PublishRecoveryFrontierGroup(",
+              "          frontier_membership->group_id, frontier_protection_manifest);",
+              "",
+              "      if (metadata == nullptr) {",
+              "        return true;",
+              "      }",
+              "      return recovery_succession_manager_->PopulateRecoveryMetadata(",
+              "          object_id, metadata);",
+              "    } else if (initialized_now) {",
+          ]
+          replacement = "\n".join(new_lines)
+          path.write_text(text[:start] + replacement + text[end:])
           PY
       - name: Commit source patch
         shell: bash
