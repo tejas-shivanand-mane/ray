@@ -22,6 +22,16 @@
 #include "ray/util/logging.h"
 
 namespace ray::core {
+namespace {
+
+uint64_t RecoveryFrontierProfileNowNs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+}  // namespace
 
 void CoreWorker::PublishRecoveryFrontierGroupAsync(
     const TaskID &group_id,
@@ -71,7 +81,7 @@ void CoreWorker::PublishRecoveryFrontierGroupAsync(
       std::move(staged.value()));
   const std::string serialized_append = BuildRecoveryFrontierAppendEnvelope(*batch);
   const uint64_t publish_start_ns =
-      recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+      recovery_succession_profiling_enabled_ ? RecoveryFrontierProfileNowNs() : 0;
 
   PublishRecoveryManifestToWitnesses(
       protection_manifest,
@@ -86,7 +96,7 @@ void CoreWorker::PublishRecoveryFrontierGroupAsync(
           std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
         if (publish_start_ns != 0) {
           manager->RecordWitnessPublishLatency(
-              RecoveryProfileNowNs() - publish_start_ns);
+              RecoveryFrontierProfileNowNs() - publish_start_ns);
         }
 
         if (!stored) {
@@ -159,7 +169,7 @@ void CoreWorker::PublishRecoveryFrontierGroup(
     auto completion = std::make_shared<std::promise<bool>>();
     std::future<bool> completion_future = completion->get_future();
     const uint64_t publish_start_ns =
-        recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+        recovery_succession_profiling_enabled_ ? RecoveryFrontierProfileNowNs() : 0;
 
     PublishRecoveryManifestToWitnesses(
         protection_manifest,
@@ -172,7 +182,7 @@ void CoreWorker::PublishRecoveryFrontierGroup(
                      std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
           if (publish_start_ns != 0) {
             manager->RecordWitnessPublishLatency(
-                RecoveryProfileNowNs() - publish_start_ns);
+                RecoveryFrontierProfileNowNs() - publish_start_ns);
           }
 
           if (!stored) {
@@ -204,6 +214,5 @@ void CoreWorker::PublishRecoveryFrontierGroup(
         << "Recovery Frontier synchronous publication failed for group " << group_id;
   }
 }
-
 
 }  // namespace ray::core
