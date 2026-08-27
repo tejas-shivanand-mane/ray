@@ -35,14 +35,6 @@ jobs:
               replacement = insertion + marker if before else marker + insertion
               p.write_text(text.replace(marker, replacement, 1))
 
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise RuntimeError(f"{path}: expected exactly one match, found {count}")
-              p.write_text(text.replace(old, new, 1))
-
           def insert_after_two_lines(path, first, second, insertion):
               p = Path(path)
               text = p.read_text()
@@ -57,6 +49,42 @@ jobs:
                   raise RuntimeError(f"{path}: expected one two-line anchor, found {len(matches)}")
               i = matches[0]
               lines.insert(i + 2, insertion)
+              p.write_text("".join(lines))
+
+          def replace_core_worker_frontier_branch(path):
+              p = Path(path)
+              lines = p.read_text().splitlines(keepends=True)
+              target = "if (initialized_now && recovery_witness_holder_baseline_enabled_) {"
+              matches = [i for i, line in enumerate(lines) if line.strip() == target]
+              if len(matches) != 1:
+                  raise RuntimeError(f"{path}: expected one CoreWorker frontier branch, found {len(matches)}")
+              i = matches[0]
+              expected = [
+                  "if (recovery_frontier_grouping_enabled) {",
+                  "RAY_CHECK(frontier_membership.has_value());",
+                  "PublishRecoveryFrontierGroup(",
+                  "frontier_membership->group_id, frontier_protection_manifest);",
+                  "} else {",
+              ]
+              actual = [lines[i + j].strip() for j in range(1, 6)]
+              if actual != expected:
+                  raise RuntimeError(f"{path}: unexpected CoreWorker frontier block: {actual}")
+
+              replacement = '''  if (recovery_witness_holder_baseline_enabled_) {
+            if (recovery_frontier_grouping_enabled) {
+              RAY_CHECK(frontier_membership.has_value());
+
+              // RegisterOwnedTaskLazy creates task-local state first, but the
+              // manager deliberately hides its recovery metadata until the member
+              // is inside the acknowledged frontier prefix. Concurrent exporters
+              // join the same barrier instead of escaping with an ordinary ref.
+              if (!recovery_succession_manager_->HasRecoveryMetadata(object_id)) {
+                PublishRecoveryFrontierGroup(
+                    frontier_membership->group_id, frontier_protection_manifest);
+              }
+            } else if (initialized_now) {
+          '''.splitlines(keepends=True)
+              lines[i:i + 6] = replacement
               p.write_text("".join(lines))
 
           insert_once(
@@ -114,29 +142,7 @@ jobs:
 
           ''')
 
-          replace_once(
-              "src/ray/core_worker/core_worker.cc",
-              '''  if (initialized_now && recovery_witness_holder_baseline_enabled_) {
-            if (recovery_frontier_grouping_enabled) {
-              RAY_CHECK(frontier_membership.has_value());
-              PublishRecoveryFrontierGroup(
-                  frontier_membership->group_id, frontier_protection_manifest);
-            } else {
-          ''',
-              '''  if (recovery_witness_holder_baseline_enabled_) {
-            if (recovery_frontier_grouping_enabled) {
-              RAY_CHECK(frontier_membership.has_value());
-
-              // RegisterOwnedTaskLazy creates task-local state first, but the
-              // manager deliberately hides its recovery metadata until the member
-              // is inside the acknowledged frontier prefix. Concurrent exporters
-              // join the same barrier instead of escaping with an ordinary ref.
-              if (!recovery_succession_manager_->HasRecoveryMetadata(object_id)) {
-                PublishRecoveryFrontierGroup(
-                    frontier_membership->group_id, frontier_protection_manifest);
-              }
-            } else if (initialized_now) {
-          ''')
+          replace_core_worker_frontier_branch("src/ray/core_worker/core_worker.cc")
           PY
 
       - name: Commit source changes
