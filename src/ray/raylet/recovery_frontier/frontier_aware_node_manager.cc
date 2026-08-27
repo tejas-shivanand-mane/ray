@@ -11,6 +11,7 @@
 #include <functional>
 #include <utility>
 
+#include "ray/common/ray_config.h"
 #include "ray/util/logging.h"
 
 namespace ray::raylet {
@@ -85,6 +86,19 @@ void FrontierAwareNodeManager::HandleUpdateRecoveryWitness(
     absl::MutexLock lock(&recovery_frontier_mutex_);
 
     if (tombstone_request) {
+      // Claims are per original member task even though storage is grouped.
+      // Remove every claim whose member belongs to the terminal group before
+      // deleting the member aliases themselves.
+      for (auto it = recovery_frontier_claims_.begin();
+           it != recovery_frontier_claims_.end();) {
+        RecoveryFrontierStore::CommittedMember member;
+        if (recovery_frontier_store_.LookupCommittedMember(it->first, &member) &&
+            member.group_id == tombstoned_group_id) {
+          it = recovery_frontier_claims_.erase(it);
+        } else {
+          ++it;
+        }
+      }
       recovery_frontier_store_.EraseGroup(tombstoned_group_id);
     } else if (has_frontier_envelope) {
       const RecoveryFrontierStore::ApplyResult result =
@@ -120,6 +134,165 @@ void FrontierAwareNodeManager::HandleUpdateRecoveryWitnessBatch(
         std::move(item_request),
         item_reply,
         [](Status, std::function<void()>, std::function<void()>) {});
+  }
+
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
+void FrontierAwareNodeManager::HandleGetRecoveryWitness(
+    rpc::GetRecoveryWitnessRequest request,
+    rpc::GetRecoveryWitnessReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  if (request.task_id().size() != TaskID::Size()) {
+    NodeManager::HandleGetRecoveryWitness(
+        std::move(request), reply, std::move(send_reply_callback));
+    return;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(request.task_id());
+  RecoveryFrontierStore::CommittedMember member;
+  {
+    absl::MutexLock lock(&recovery_frontier_mutex_);
+    if (!recovery_frontier_store_.LookupCommittedMember(task_id, &member)) {
+      NodeManager::HandleGetRecoveryWitness(
+          std::move(request), reply, std::move(send_reply_callback));
+      return;
+    }
+  }
+
+  // Reuse the base NodeManager as the authority for the group's mutable
+  // manifest. Frontier storage contains replay recipes only. A compact lookup
+  // is synchronous in NodeManager, so no lock is held while delegating.
+  rpc::GetRecoveryWitnessRequest group_request;
+  group_request.set_task_id(member.group_id.Binary());
+  rpc::GetRecoveryWitnessReply group_reply;
+  bool group_replied = false;
+  Status group_status = Status::OK();
+  std::function<void()> group_success;
+  std::function<void()> group_failure;
+
+  NodeManager::HandleGetRecoveryWitness(
+      std::move(group_request),
+      &group_reply,
+      [&group_replied, &group_status, &group_success, &group_failure](
+          Status status,
+          std::function<void()> success,
+          std::function<void()> failure) {
+        group_replied = true;
+        group_status = std::move(status);
+        group_success = std::move(success);
+        group_failure = std::move(failure);
+      });
+  RAY_CHECK(group_replied);
+
+  if (!group_status.ok()) {
+    send_reply_callback(std::move(group_status),
+                        std::move(group_success),
+                        std::move(group_failure));
+    return;
+  }
+  if (!group_reply.found() || !group_reply.has_manifest() ||
+      group_reply.manifest().task_id() != member.group_id.Binary()) {
+    reply->set_found(false);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  rpc::RecoveryManifest member_manifest;
+  member_manifest.CopyFrom(group_reply.manifest());
+  member_manifest.set_task_id(task_id.Binary());
+  member_manifest.set_max_recovery_attempts(member.task_spec.max_retries());
+
+  reply->set_found(true);
+
+  if (!request.claim_recovery()) {
+    reply->mutable_manifest()->CopyFrom(member_manifest);
+    reply->set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_NOT_REQUESTED);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  const bool baseline_enabled =
+      RayConfig::instance().enable_recovery_succession() &&
+      RayConfig::instance().enable_recovery_witness_holder_baseline();
+  if (!baseline_enabled || !request.has_claimant_address() ||
+      request.claimant_address().worker_id().size() != WorkerID::Size() ||
+      request.claimant_address().node_id().size() != NodeID::Size()) {
+    reply->set_found(false);
+    reply->set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_INVALID);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  if (member_manifest.tombstoned()) {
+    reply->mutable_manifest()->CopyFrom(member_manifest);
+    reply->set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_TOMBSTONED);
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
+  }
+
+  const auto same_worker = [](const rpc::Address &left, const rpc::Address &right) {
+    return left.worker_id() == right.worker_id() &&
+           left.node_id() == right.node_id();
+  };
+
+  {
+    absl::MutexLock lock(&recovery_frontier_mutex_);
+
+    // Revalidate the alias after the group-manifest lookup. A concurrent
+    // tombstone may have erased the group while no frontier lock was held.
+    RecoveryFrontierStore::CommittedMember current_member;
+    if (!recovery_frontier_store_.LookupCommittedMember(task_id, &current_member) ||
+        current_member.group_id != member.group_id) {
+      reply->set_found(false);
+      reply->set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_INVALID);
+      send_reply_callback(Status::OK(), nullptr, nullptr);
+      return;
+    }
+
+    auto claim_it = recovery_frontier_claims_.find(task_id);
+    if (claim_it != recovery_frontier_claims_.end()) {
+      member_manifest.set_recovery_attempt(claim_it->second.recovery_attempt);
+      reply->mutable_acting_owner()->CopyFrom(claim_it->second.acting_owner);
+
+      if (same_worker(claim_it->second.acting_owner, request.claimant_address())) {
+        // Idempotent retry by the already-selected acting owner.
+        reply->set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_GRANTED);
+        reply->mutable_task_spec()->CopyFrom(current_member.task_spec);
+        reply->mutable_task_spec()->mutable_recovery_manifest()->CopyFrom(
+            member_manifest);
+      } else {
+        reply->set_claim_result(
+            rpc::GetRecoveryWitnessReply::CLAIM_ALREADY_GRANTED);
+      }
+      reply->mutable_manifest()->CopyFrom(member_manifest);
+      send_reply_callback(Status::OK(), nullptr, nullptr);
+      return;
+    }
+
+    const int32_t max_recovery_attempts = current_member.task_spec.max_retries();
+    const uint32_t current_attempt = 0;
+    if (max_recovery_attempts >= 0 &&
+        current_attempt >= static_cast<uint32_t>(max_recovery_attempts)) {
+      member_manifest.set_recovery_attempt(current_attempt);
+      reply->mutable_manifest()->CopyFrom(member_manifest);
+      reply->set_claim_result(
+          rpc::GetRecoveryWitnessReply::CLAIM_RETRY_LIMIT_EXCEEDED);
+      send_reply_callback(Status::OK(), nullptr, nullptr);
+      return;
+    }
+
+    FrontierMemberClaimState claim_state;
+    claim_state.acting_owner.CopyFrom(request.claimant_address());
+    claim_state.recovery_attempt = current_attempt + 1;
+    member_manifest.set_recovery_attempt(claim_state.recovery_attempt);
+    recovery_frontier_claims_[task_id] = claim_state;
+
+    reply->set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_GRANTED);
+    reply->mutable_acting_owner()->CopyFrom(request.claimant_address());
+    reply->mutable_manifest()->CopyFrom(member_manifest);
+    reply->mutable_task_spec()->CopyFrom(current_member.task_spec);
+    reply->mutable_task_spec()->mutable_recovery_manifest()->CopyFrom(member_manifest);
   }
 
   send_reply_callback(Status::OK(), nullptr, nullptr);
