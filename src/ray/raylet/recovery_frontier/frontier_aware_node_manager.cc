@@ -23,6 +23,8 @@ void FrontierAwareNodeManager::HandleUpdateRecoveryWitness(
       IsRecoveryFrontierAppendEnvelope(request.serialized_task_spec());
   const bool tombstone_request =
       request.has_manifest() && request.manifest().tombstoned();
+  const TaskID tombstoned_group_id =
+      tombstone_request ? TaskID::FromBinary(request.manifest().task_id()) : TaskID::Nil();
 
   // Keep the existing fixed-R and Succession hot paths exactly unchanged.
   if (!has_frontier_envelope && !tombstone_request) {
@@ -83,8 +85,7 @@ void FrontierAwareNodeManager::HandleUpdateRecoveryWitness(
     absl::MutexLock lock(&recovery_frontier_mutex_);
 
     if (tombstone_request) {
-      recovery_frontier_store_.EraseGroup(
-          TaskID::FromBinary(request.manifest().task_id()));
+      recovery_frontier_store_.EraseGroup(tombstoned_group_id);
     } else if (has_frontier_envelope) {
       const RecoveryFrontierStore::ApplyResult result =
           recovery_frontier_store_.ApplyAppend(frontier_append);
