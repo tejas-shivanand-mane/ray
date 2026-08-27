@@ -409,7 +409,7 @@ RecoverySuccessionManager::RegisterOwnerTaskWithRecoveryFrontier(
   if (recovery_frontier_planner_ == nullptr) {
     return std::nullopt;
   }
-  return recovery_frontier_planner_->RegisterTask(task_proto);
+  return recovery_frontier_planner_->RegisterTask(task_spec.GetSharedMessage());
 }
 
 std::optional<RecoveryFrontierMembership>
