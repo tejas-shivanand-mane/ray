@@ -1,0 +1,25 @@
+load("//bazel:ray.bzl", "ray_cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+ray_cc_library(
+    name = "recovery_frontier_wire",
+    srcs = ["recovery_frontier_wire.cc"],
+    hdrs = ["recovery_frontier_wire.h"],
+    deps = [
+        "//src/ray/core_worker:recovery_frontier",
+        "//src/ray/protobuf/frontier:recovery_frontier_cc_proto",
+        "//src/ray/util:logging",
+    ],
+)
+
+cc_test(
+    name = "recovery_frontier_wire_test",
+    srcs = ["recovery_frontier_wire_test.cc"],
+    deps = [
+        ":recovery_frontier_wire",
+        "//src/ray/core_worker:recovery_frontier",
+        "//src/ray/raylet/recovery_frontier:recovery_frontier_store",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
