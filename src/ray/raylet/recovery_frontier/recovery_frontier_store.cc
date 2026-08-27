@@ -46,7 +46,11 @@ std::string SerializeRecoveryFrontierAppendEnvelope(
 
 bool ParseRecoveryFrontierAppendEnvelope(std::string_view payload,
                                          rpc::RecoveryFrontierAppend *append) {
-  if (append == nullptr || !IsRecoveryFrontierAppendEnvelope(payload)) {
+  // A magic-only envelope is not a valid frontier append. Protobuf accepts an
+  // empty byte sequence as a valid default message, so explicitly require a
+  // non-empty message body before parsing.
+  if (append == nullptr || !IsRecoveryFrontierAppendEnvelope(payload) ||
+      payload.size() == kRecoveryFrontierAppendMagicSize) {
     return false;
   }
   append->Clear();
