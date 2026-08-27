@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -32,7 +33,11 @@ namespace ray::core {
 /// topology amortize control-plane work across a window of fine-grained tasks.
 struct RecoveryFrontierMember {
   TaskID task_id = TaskID::Nil();
-  rpc::TaskSpec task_spec;
+  // The replay recipe is immutable after registration. Staged append batches
+  // share this canonical copy instead of deep-copying a protobuf for every
+  // publication generation. The shared ownership also keeps the recipe alive
+  // safely while asynchronous holder publication is in flight.
+  std::shared_ptr<const rpc::TaskSpec> task_spec;
   uint32_t member_index = 0;
   uint32_t first_group_return_index = 0;
   uint32_t num_returns = 0;
