@@ -43,6 +43,22 @@ jobs:
                   raise RuntimeError(f"{path}: expected exactly one match, found {count}")
               p.write_text(text.replace(old, new, 1))
 
+          def insert_after_two_lines(path, first, second, insertion):
+              p = Path(path)
+              text = p.read_text()
+              if insertion.strip() in text:
+                  raise RuntimeError(f"{path}: insertion already present")
+              lines = text.splitlines(keepends=True)
+              matches = [
+                  i for i in range(len(lines) - 1)
+                  if lines[i].rstrip("\n") == first and lines[i + 1].rstrip("\n") == second
+              ]
+              if len(matches) != 1:
+                  raise RuntimeError(f"{path}: expected one two-line anchor, found {len(matches)}")
+              i = matches[0]
+              lines.insert(i + 2, insertion)
+              p.write_text("".join(lines))
+
           insert_once(
               "src/ray/core_worker/recovery_succession_manager.h",
               "  bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);\n",
@@ -76,11 +92,10 @@ jobs:
           ''',
               before=True)
 
-          insert_once(
+          insert_after_two_lines(
               "src/ray/core_worker/recovery_succession_manager.cc",
-              '''  if (known_object && task_it != task_states_.end() &&
-              !task_it->second.manifest.task_id().empty()) {
-          ''',
+              "  if (known_object && task_it != task_states_.end() &&",
+              "      !task_it->second.manifest.task_id().empty()) {",
               '''    // Recovery Frontier metadata is an acknowledged-prefix capability.
             // The owner may construct task-local recovery state before the fixed-R
             // append completes, but that state must remain invisible to exporters
