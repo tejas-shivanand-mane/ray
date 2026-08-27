@@ -1815,19 +1815,19 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
       return;
     }
 
-    // A legacy/pre-4I ObjectRef may already carry recovery metadata. Save it
-    // as a compatibility fallback, then make the ObjectReference ordinary on
-    // the TaskSpec wire path.
-    rpc::RecoveryObjectMetadata legacy_transport;
+    // A legacy/pre-4I ObjectRef may already carry recovery metadata. Keep it
+    // in place while checking authoritative manager state so the common path
+    // does not deep-copy a protobuf that will immediately be discarded. If
+    // manager state misses, expand the compatibility fallback directly from
+    // the ObjectReference. In every case, clear the per-ref transport field
+    // before the TaskSpec continues to the wire.
     const bool had_legacy_transport = object_ref->has_recovery_metadata();
-    if (had_legacy_transport) {
-      legacy_transport.CopyFrom(object_ref->recovery_metadata());
-    }
-    object_ref->clear_recovery_metadata();
 
     // One sidecar per unique dependency even if the same ObjectRef appears in
-    // multiple direct/nested argument positions.
+    // multiple direct/nested argument positions. Duplicate legacy metadata is
+    // still stripped from the ordinary ObjectReference wire path.
     if (attached_object_ids.contains(object_id)) {
+      object_ref->clear_recovery_metadata();
       return;
     }
 
@@ -1838,17 +1838,15 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
     if (BuildRecoveryMetadataLocked(
             object_id, &source_storage, require_frontier_commit)) {
       source = &source_storage;
-    } else if (had_legacy_transport) {
-      rpc::ObjectReference synthetic_ref;
-      synthetic_ref.set_object_id(object_id.Binary());
-      if (object_ref->has_owner_address()) {
-        synthetic_ref.mutable_owner_address()->CopyFrom(object_ref->owner_address());
-      }
-      synthetic_ref.mutable_recovery_metadata()->CopyFrom(legacy_transport);
-      if (ExpandTaskArgumentRecoveryMetadata(synthetic_ref, &legacy_expanded)) {
-        source = &legacy_expanded;
-      }
+    } else if (had_legacy_transport &&
+               ExpandTaskArgumentRecoveryMetadata(*object_ref, &legacy_expanded)) {
+      source = &legacy_expanded;
     }
+
+    // Recovery metadata is carried only in the TaskSpec-level Patch-4I sidecar
+    // after this point, regardless of whether manager state or the legacy
+    // compatibility fallback supplied it.
+    object_ref->clear_recovery_metadata();
 
     if (source == nullptr || source->task_id().empty() || !source->has_manifest()) {
       return;
