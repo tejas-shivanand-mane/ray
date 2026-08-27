@@ -2299,6 +2299,11 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   const bool recovery_succession_profiling_enabled_;
 
+  // Unlike the recovery profiler above, submit-stage profiling is also useful
+  // for the recovery-disabled control. It follows the profiling config directly
+  // and never enables any recovery behavior.
+  const bool normal_submit_stage_profiling_enabled_;
+
   // Diagnostic-only normal-task submit-stage timers. These are CoreWorker-local
   // so the disabled control can be measured with exactly the same instrumentation.
   mutable std::atomic<uint64_t> normal_submit_profile_calls_{0};

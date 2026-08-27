@@ -546,6 +546,8 @@ CoreWorker::CoreWorker(
       recovery_succession_profiling_enabled_(
           recovery_succession_enabled_ &&
           RayConfig::instance().enable_recovery_succession_profiling()),
+      normal_submit_stage_profiling_enabled_(
+          RayConfig::instance().enable_recovery_succession_profiling()),
       recovery_succession_manager_(nullptr),
       object_recovery_manager_(std::move(object_recovery_manager)),
       actor_manager_(std::move(actor_manager)),
@@ -3380,7 +3382,7 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     const std::string &serialized_retry_exception_allowlist,
     const std::string &call_site,
     const TaskID current_task_id) {
-  const bool profile_normal_submit = recovery_succession_profiling_enabled_;
+  const bool profile_normal_submit = normal_submit_stage_profiling_enabled_;
   const uint64_t normal_submit_start_ns =
       profile_normal_submit ? RecoveryProfileNowNs() : 0;
 
