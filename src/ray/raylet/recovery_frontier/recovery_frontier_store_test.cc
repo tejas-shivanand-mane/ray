@@ -159,5 +159,41 @@ TEST(RecoveryFrontierStoreTest, KOneShapeIsOrdinarySingleTaskCapsule) {
   EXPECT_EQ(local_return, 0U);
 }
 
+TEST(RecoveryFrontierStoreTest, TransportEnvelopeRoundTripsAndRejectsTaskSpecBytes) {
+  const auto append = MakeInitialAppend();
+  const std::string payload = SerializeRecoveryFrontierAppendEnvelope(append);
+
+  EXPECT_TRUE(IsRecoveryFrontierAppendEnvelope(payload));
+
+  rpc::RecoveryFrontierAppend decoded;
+  ASSERT_TRUE(ParseRecoveryFrontierAppendEnvelope(payload, &decoded));
+  EXPECT_EQ(decoded.SerializeAsString(), append.SerializeAsString());
+
+  const std::string ordinary_task_spec = append.members(0).task_spec().SerializeAsString();
+  EXPECT_FALSE(IsRecoveryFrontierAppendEnvelope(ordinary_task_spec));
+  EXPECT_FALSE(ParseRecoveryFrontierAppendEnvelope(ordinary_task_spec, &decoded));
+
+  std::string truncated = payload.substr(0, 8);
+  EXPECT_TRUE(IsRecoveryFrontierAppendEnvelope(truncated));
+  EXPECT_FALSE(ParseRecoveryFrontierAppendEnvelope(truncated, &decoded));
+}
+
+TEST(RecoveryFrontierStoreTest, TombstoneCleanupErasesGroup) {
+  RecoveryFrontierStore store;
+  const auto append = MakeInitialAppend();
+  const TaskID group_id = TaskID::FromBinary(append.group_id());
+  ASSERT_EQ(store.ApplyAppend(append),
+            RecoveryFrontierStore::ApplyResult::APPLIED);
+  ASSERT_TRUE(store.Generation(group_id).has_value());
+
+  store.EraseGroup(group_id);
+
+  EXPECT_FALSE(store.Generation(group_id).has_value());
+  EXPECT_FALSE(store.CommittedMemberCount(group_id).has_value());
+  rpc::TaskSpec replay;
+  uint32_t local_return = 0;
+  EXPECT_FALSE(store.ExtractTaskForReturn(group_id, 0, &replay, &local_return));
+}
+
 }  // namespace
 }  // namespace ray::raylet
