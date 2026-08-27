@@ -1,31 +1,13 @@
 #!/usr/bin/env python3
 """Diagnostic 43: decisive Recovery Frontier cold-path decomposition.
 
-This benchmark is intentionally narrow. It explains the remaining K=32 cold
-submission penalty by separating, in the same Ray process/cluster:
+One paired experiment separates the remaining K32 cold-path cost into:
+  1) precommitted/base submission cost,
+  2) synchronous first-borrow kickoff cost, and
+  3) interference while the one K32 publication is in flight.
 
-  1. precommitted/base submission cost,
-  2. synchronous cost paid by the first cold borrower that kicks off one K32
-     Frontier publication, and
-  3. interference paid by later submissions while that publication is in flight.
-
-It additionally wraps the driver's real SerializationContext.serialize() method,
-so nested-[ObjectRef] Python serialization is measured rather than inferred.
-
-For K32 the split case does:
-  - time borrower call #1,
-  - wait until exactly R witness updates for the one full group have ACKed,
-  - time calls #2..#32.
-
-Therefore, ignoring the deliberately excluded wait:
-
-  split_weighted = (first_call + 31 * clean_rest_mean) / 32
-  kickoff_tax    = split_weighted - precommitted
-  overlap_tax    = cold_burst - split_weighted
-
-The two taxes add back to the measured cold-vs-precommitted gap (up to noise).
-That tells us whether the final optimization belongs in synchronous append
-construction/serialization or in concurrent publication/RPC callback isolation.
+It also wraps the driver's actual SerializationContext.serialize() so nested
+[ObjectRef] Python serialization is measured directly.
 """
 from __future__ import annotations
 
@@ -74,8 +56,6 @@ class SerializationStats:
 
 
 class TimedSerializer:
-    """Temporarily wrap the driver's actual SerializationContext.serialize."""
-
     def __init__(self):
         self.ctx = global_worker.get_serialization_context()
         self.original: Callable[[Any], Any] | None = None
@@ -94,8 +74,6 @@ class TimedSerializer:
                 stats.calls += 1
                 stats.time_ns += time.perf_counter_ns() - start
 
-        # SerializationContext is a normal Python class, so an instance-level
-        # wrapper safely shadows the bound method for this diagnostic interval.
         self.ctx.serialize = timed
         return stats
 
@@ -205,12 +183,10 @@ def timed_submit_all(consumer, refs):
 
 
 def precommit_group(consumer, refs, expected: int):
-    """Activate protection before the timed interval, then fully settle it."""
     reset_profile()
     warm = [consumer.hold.remote([ref]) for ref in refs]
     ray.get(warm)
     p = wait_updates(expected)
-    # Ensure the async callback/manager side has quiesced before resetting.
     time.sleep(0.01)
     return p
 
@@ -246,7 +222,6 @@ def run_precommitted_case(consumer, refs, expected: int) -> dict[str, float]:
 
 
 def run_split_case(consumer, refs, expected_first: int) -> dict[str, float]:
-    """For K32, isolate first-call kickoff from in-flight interference."""
     reset_profile()
 
     with TimedSerializer() as first_ser:
@@ -254,10 +229,9 @@ def run_split_case(consumer, refs, expected_first: int) -> dict[str, float]:
         first_call = consumer.hold.remote([refs[0]])
         first_ns = time.perf_counter_ns() - first_start
 
-    # For one full K32 group, the first borrower kicks off exactly R physical
-    # witness writes for the entire group. Exclude the wait itself from the
-    # submission timings; it deliberately removes publication overlap before
-    # measuring the remaining 31 calls.
+    # For one full K32 group, call #1 kicks off exactly R witness writes. The
+    # wait is intentionally excluded from submission timing, so calls 2..32 are
+    # measured after publication has stopped interfering with the caller path.
     p_after_publish = wait_updates(expected_first)
 
     with TimedSerializer() as rest_ser:
@@ -281,6 +255,9 @@ def run_split_case(consumer, refs, expected_first: int) -> dict[str, float]:
 def run_variant(label: str, recovery_mode: str, k: int | None):
     cluster = None
     rows = []
+    # Keep every measured producer ref alive until this variant finishes. This
+    # suppresses tombstone/retirement callbacks from contaminating later phases.
+    keepalive_refs = []
     try:
         cluster = Cluster()
         cluster.add_node(
@@ -301,7 +278,13 @@ def run_variant(label: str, recovery_mode: str, k: int | None):
                 _ = padding[0]
             if delay_s:
                 time.sleep(delay_s)
-            return int(i).to_bytes(8, "little") + b"x" * max(0, payload_bytes - 8)
+            return int(i).to_bytes(8, "little", signed=True) + b"x" * max(0, payload_bytes - 8)
+
+        # Warmup must be recovery-ineligible so it cannot consume one slot in
+        # the K32 planner and shift every measured group boundary.
+        @ray.remote(max_retries=0)
+        def warm_produce(payload_bytes: int):
+            return b"w" * payload_bytes
 
         @ray.remote(max_restarts=0, max_task_retries=0, max_concurrency=256)
         class Consumer:
@@ -318,29 +301,31 @@ def run_variant(label: str, recovery_mode: str, k: int | None):
         padding = b"p" * PADDING_BYTES
         expected = expected_updates(recovery_mode, k)
 
-        # Warm generic task/actor machinery before measurements.
-        warm_ref = produce.options(scheduling_strategy=strategy, num_cpus=1).remote(
-            -1, 0.0, PAYLOAD_BYTES, padding
+        warm_ref = warm_produce.options(scheduling_strategy=strategy, num_cpus=1).remote(
+            PAYLOAD_BYTES
         )
         ray.get(consumer.hold.remote([warm_ref]))
+        ray.get(warm_ref)
         time.sleep(0.02)
+        reset_profile()
 
         for rep in range(REPETITIONS):
             for state in STATES:
-                # Fresh full groups for each mode; never reuse a cold group across
-                # burst/split/precommitted measurements.
                 refs = make_refs(produce, strategy, state, padding)
+                keepalive_refs.extend(refs)
                 burst = run_burst_case(consumer, refs, expected)
                 drain_refs(refs)
                 rows.append((rep, state, "burst", burst))
 
                 refs = make_refs(produce, strategy, state, padding)
+                keepalive_refs.extend(refs)
                 pre = run_precommitted_case(consumer, refs, expected)
                 drain_refs(refs)
                 rows.append((rep, state, "precommitted", pre))
 
                 if label in ("disabled", "frontier_k32"):
                     refs = make_refs(produce, strategy, state, padding)
+                    keepalive_refs.extend(refs)
                     first_expected = 0 if label == "disabled" else R
                     split = run_split_case(consumer, refs, first_expected)
                     drain_refs(refs)
@@ -380,7 +365,7 @@ def main() -> None:
                     f"{mean_rows(rows,state,mode,'rpc_us_update'):>13.1f}"
                 )
 
-    print("\nK32 split decomposition (wait for group ACK excluded from split timing):")
+    print("\nK32 split decomposition (ACK wait excluded from split timing):")
     krows = all_rows["frontier_k32"]
     drows = all_rows["disabled"]
     for state in STATES:
@@ -415,10 +400,10 @@ def main() -> None:
         print(f"    net K32 cold-path gap         {net_k32_gap:9.2f} us/task")
 
     print("\nDecision rule:")
-    print("  - large synchronous kickoff tax -> move StageAppend/envelope construction off caller thread")
-    print("  - large in-flight overlap tax   -> isolate publication/RPC callback work from submission path")
-    print("  - large Python serialization    -> fix nested-ObjectRef serializer path")
-    print("  - small taxes but large gap     -> profile only the remaining residual boundary")
+    print("  large synchronous kickoff tax -> move StageAppend/envelope construction off caller thread")
+    print("  large in-flight overlap tax   -> isolate publication/RPC callback work from submission path")
+    print("  large Python serialization    -> fix nested-ObjectRef serializer path")
+    print("  small taxes but large gap     -> only then inspect the residual boundary")
 
 
 if __name__ == "__main__":
