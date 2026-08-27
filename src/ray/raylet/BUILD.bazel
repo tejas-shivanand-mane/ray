@@ -331,7 +331,6 @@ ray_cc_library(
         "//src/ray/object_manager/plasma:plasma_client",
         "//src/ray/observability:metric_interface",
         "//src/ray/pubsub:subscriber",
-        "//src/ray/raylet/recovery_frontier:recovery_frontier_store",
         "//src/ray/raylet/scheduling:scheduler",
         "//src/ray/rpc:node_manager_server",
         "//src/ray/rpc:rpc_callback_types",
