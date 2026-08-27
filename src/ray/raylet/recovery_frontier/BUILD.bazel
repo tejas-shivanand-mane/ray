@@ -13,6 +13,18 @@ ray_cc_library(
     ],
 )
 
+ray_cc_library(
+    name = "frontier_aware_node_manager",
+    srcs = ["frontier_aware_node_manager.cc"],
+    hdrs = ["frontier_aware_node_manager.h"],
+    deps = [
+        ":recovery_frontier_store",
+        "//src/ray/raylet:raylet_lib",
+        "//src/ray/util:logging",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
 cc_test(
     name = "recovery_frontier_store_test",
     srcs = ["recovery_frontier_store_test.cc"],
