@@ -43,6 +43,16 @@ TEST(RecoveryFrontierTest, SingleTaskIsImmediateLeaderForAnyK) {
   ASSERT_TRUE(batch.has_value());
   EXPECT_EQ(batch->begin_member_index, 0U);
   EXPECT_EQ(batch->end_member_index, 1U);
+
+  // Staging must share the immutable canonical replay recipe instead of
+  // deep-copying the TaskSpec into every append batch.
+  ASSERT_EQ(group->Members().size(), 1U);
+  ASSERT_EQ(batch->members.size(), 1U);
+  ASSERT_TRUE(group->Members()[0].task_spec != nullptr);
+  ASSERT_TRUE(batch->members[0].task_spec != nullptr);
+  EXPECT_EQ(batch->members[0].task_spec.get(),
+            group->Members()[0].task_spec.get());
+  EXPECT_EQ(batch->members[0].task_spec->task_id(), task.task_id());
 }
 
 TEST(RecoveryFrontierTest, IndependentTasksShareOneGroup) {
