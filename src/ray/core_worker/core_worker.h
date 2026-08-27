@@ -2325,6 +2325,19 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   mutable absl::flat_hash_map<TaskID, std::shared_ptr<DeferredRecoveryTaskState>>
       recovery_frontier_deferred_tasks_;
 
+  struct RecoveryFrontierPublicationState {
+    bool driving = false;
+    rpc::RecoveryManifest protection_manifest;
+    std::vector<RecoveryFrontierPublicationCallback> waiters;
+  };
+
+  // Single-flight publication per frontier group. The first downstream task
+  // drives the holder append; later tasks only register completion callbacks.
+  mutable std::mutex recovery_frontier_publication_mutex_;
+  mutable absl::flat_hash_map<
+      TaskID, std::shared_ptr<RecoveryFrontierPublicationState>>
+      recovery_frontier_publications_;
+
   absl::flat_hash_set<TaskID> recovery_tombstones_in_flight_;
 
   /// Manages recovery of objects stored in remote plasma nodes.
