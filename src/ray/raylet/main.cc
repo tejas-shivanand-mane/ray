@@ -47,6 +47,7 @@
 #include "ray/raylet/local_object_manager_interface.h"
 #include "ray/raylet/metrics.h"
 #include "ray/raylet/node_manager.h"
+#include "ray/raylet/recovery_frontier/frontier_aware_node_manager.h"
 #include "ray/raylet_ipc_client/client_connection.h"
 #include "ray/raylet_rpc_client/raylet_client.h"
 #include "ray/stats/stats.h"
@@ -1035,7 +1036,7 @@ int main(int argc, char *argv[]) {
         std::make_unique<ray::raylet::NewPlacementGroupResourceManager>(
             *cluster_resource_scheduler);
 
-    node_manager = std::make_unique<ray::raylet::NodeManager>(
+    node_manager = std::make_unique<ray::raylet::FrontierAwareNodeManager>(
         main_service,
         ray::PeriodicalRunner::Create(main_service),
         raylet_node_id,
