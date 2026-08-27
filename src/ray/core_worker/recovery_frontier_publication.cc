@@ -84,52 +84,20 @@ void CoreWorker::PublishRecoveryFrontierGroupAsync(
     state->driving = true;
   }
 
-  // Finalization is checked while holding the publication mutex. If a new
-  // member registers after this check, its later Async() call creates a fresh
-  // single-flight generation. Existing waiters depend only on the prefix that
-  // is already durable and may safely dispatch.
-  if (!recovery_succession_manager_
-           ->RecoveryFrontierGroupHasUncommittedMembers(group_id)) {
-    std::vector<RecoveryFrontierPublicationCallback> waiters;
-    bool continue_driving = false;
-    {
-      std::lock_guard<std::mutex> lock(recovery_frontier_publication_mutex_);
-      auto it = recovery_frontier_publications_.find(group_id);
-      if (it == recovery_frontier_publications_.end() || it->second != state) {
-        return;
-      }
-
-      if (recovery_succession_manager_
-              ->RecoveryFrontierGroupHasUncommittedMembers(group_id)) {
-        state->driving = false;
-        continue_driving = true;
-      } else {
-        waiters.swap(state->waiters);
-        recovery_frontier_publications_.erase(it);
-      }
-    }
-
-    if (continue_driving) {
-      PublishRecoveryFrontierGroupAsync(
-          group_id, state->protection_manifest, {});
-      return;
-    }
-
-    for (auto &waiter : waiters) {
-      if (waiter) {
-        waiter();
-      }
-    }
-    return;
-  }
-
-  auto staged = recovery_succession_manager_->StageRecoveryFrontierAppend(group_id);
-  if (!staged.has_value()) {
-    // A synchronous explicit-export path may currently own the append. Keep a
-    // single delayed retry for the whole group instead of one retry loop per
-    // downstream task.
-    io_service_.post(
-        [this, group_id, state]() mutable {
+  // Keep all expensive publication kickoff work off the task-submission caller.
+  // In particular StageAppend(), append-envelope serialization, request
+  // construction, and witness RPC dispatch must not inflate caller-visible
+  // .remote() latency. The acknowledged-prefix barrier is unchanged: waiters
+  // are released only after every fixed-R holder ACKs and CommitAppend succeeds.
+  io_service_.post(
+      [this, group_id, state]() mutable {
+        // Finalization is checked after publication work has moved onto the IO
+        // service. If a new member registers after this check, its later Async()
+        // call creates/drives the next contiguous generation.
+        if (!recovery_succession_manager_
+                 ->RecoveryFrontierGroupHasUncommittedMembers(group_id)) {
+          std::vector<RecoveryFrontierPublicationCallback> waiters;
+          bool continue_driving = false;
           {
             std::lock_guard<std::mutex> lock(
                 recovery_frontier_publication_mutex_);
@@ -138,82 +106,129 @@ void CoreWorker::PublishRecoveryFrontierGroupAsync(
                 it->second != state) {
               return;
             }
-            state->driving = false;
+
+            if (recovery_succession_manager_
+                    ->RecoveryFrontierGroupHasUncommittedMembers(group_id)) {
+              state->driving = false;
+              continue_driving = true;
+            } else {
+              waiters.swap(state->waiters);
+              recovery_frontier_publications_.erase(it);
+            }
           }
-          PublishRecoveryFrontierGroupAsync(
-              group_id, state->protection_manifest, {});
-        },
-        "CoreWorker.RetryRecoveryFrontierPublication",
-        /*delay_us=*/50);
-    return;
-  }
 
-  auto batch = std::make_shared<RecoveryFrontierAppendBatch>(
-      std::move(staged.value()));
-  const std::string serialized_append = BuildRecoveryFrontierAppendEnvelope(*batch);
-  const uint64_t publish_start_ns =
-      recovery_succession_profiling_enabled_
-          ? RecoveryFrontierProfileNowNs()
-          : 0;
+          if (continue_driving) {
+            PublishRecoveryFrontierGroupAsync(
+                group_id, state->protection_manifest, {});
+            return;
+          }
 
-  PublishRecoveryManifestToWitnesses(
-      protection_manifest,
-      [this,
-       manager = recovery_succession_manager_,
-       group_id,
-       state,
-       batch,
-       publish_start_ns](
-          bool stored,
-          std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
-        if (publish_start_ns != 0) {
-          manager->RecordWitnessPublishLatency(
-              RecoveryFrontierProfileNowNs() - publish_start_ns);
-        }
-
-        if (!stored) {
-          const bool aborted = manager->AbortRecoveryFrontierAppend(*batch);
-          RAY_CHECK(aborted)
-              << "Failed to abort Recovery Frontier append generation "
-              << batch->generation << " for group " << group_id;
-          RAY_LOG(FATAL)
-              .WithField(group_id)
-              << "Recovery Frontier failed to install append generation "
-              << batch->generation << " on every fixed-R holder."
-              << (newer_manifest.has_value()
-                      ? " A newer holder manifest was observed."
-                      : "");
+          for (auto &waiter : waiters) {
+            if (waiter) {
+              waiter();
+            }
+          }
           return;
         }
 
-        const bool committed = manager->CommitRecoveryFrontierAppend(*batch);
-        RAY_CHECK(committed)
-            << "Stale or mismatched Recovery Frontier ACK for generation "
-            << batch->generation << " group " << group_id;
-
-        RAY_LOG(INFO)
-            .WithField(group_id)
-            << "Committed Recovery Frontier append generation "
-            << batch->generation << " members=["
-            << batch->begin_member_index << ","
-            << batch->end_member_index << ") on all fixed-R holders";
-
-        {
-          std::lock_guard<std::mutex> lock(
-              recovery_frontier_publication_mutex_);
-          auto it = recovery_frontier_publications_.find(group_id);
-          if (it == recovery_frontier_publications_.end() ||
-              it->second != state) {
-            return;
-          }
-          state->driving = false;
+        auto staged =
+            recovery_succession_manager_->StageRecoveryFrontierAppend(group_id);
+        if (!staged.has_value()) {
+          // A synchronous explicit-export path may currently own the append.
+          // Keep a single delayed retry for the whole group instead of one
+          // retry loop per downstream task.
+          io_service_.post(
+              [this, group_id, state]() mutable {
+                {
+                  std::lock_guard<std::mutex> lock(
+                      recovery_frontier_publication_mutex_);
+                  auto it = recovery_frontier_publications_.find(group_id);
+                  if (it == recovery_frontier_publications_.end() ||
+                      it->second != state) {
+                    return;
+                  }
+                  state->driving = false;
+                }
+                PublishRecoveryFrontierGroupAsync(
+                    group_id, state->protection_manifest, {});
+              },
+              "CoreWorker.RetryRecoveryFrontierPublication",
+              /*delay_us=*/50);
+          return;
         }
 
-        PublishRecoveryFrontierGroupAsync(
-            group_id, state->protection_manifest, {});
+        auto batch = std::make_shared<RecoveryFrontierAppendBatch>(
+            std::move(staged.value()));
+        const std::string serialized_append =
+            BuildRecoveryFrontierAppendEnvelope(*batch);
+        const uint64_t publish_start_ns =
+            recovery_succession_profiling_enabled_
+                ? RecoveryFrontierProfileNowNs()
+                : 0;
+
+        PublishRecoveryManifestToWitnesses(
+            state->protection_manifest,
+            [this,
+             manager = recovery_succession_manager_,
+             group_id,
+             state,
+             batch,
+             publish_start_ns](
+                bool stored,
+                std::optional<rpc::RecoveryManifest> newer_manifest) mutable {
+              if (publish_start_ns != 0) {
+                manager->RecordWitnessPublishLatency(
+                    RecoveryFrontierProfileNowNs() - publish_start_ns);
+              }
+
+              if (!stored) {
+                const bool aborted =
+                    manager->AbortRecoveryFrontierAppend(*batch);
+                RAY_CHECK(aborted)
+                    << "Failed to abort Recovery Frontier append generation "
+                    << batch->generation << " for group " << group_id;
+                RAY_LOG(FATAL)
+                    .WithField(group_id)
+                    << "Recovery Frontier failed to install append generation "
+                    << batch->generation << " on every fixed-R holder."
+                    << (newer_manifest.has_value()
+                            ? " A newer holder manifest was observed."
+                            : "");
+                return;
+              }
+
+              const bool committed =
+                  manager->CommitRecoveryFrontierAppend(*batch);
+              RAY_CHECK(committed)
+                  << "Stale or mismatched Recovery Frontier ACK for generation "
+                  << batch->generation << " group " << group_id;
+
+              RAY_LOG(INFO)
+                  .WithField(group_id)
+                  << "Committed Recovery Frontier append generation "
+                  << batch->generation << " members=["
+                  << batch->begin_member_index << ","
+                  << batch->end_member_index << ") on all fixed-R holders";
+
+              {
+                std::lock_guard<std::mutex> lock(
+                    recovery_frontier_publication_mutex_);
+                auto it = recovery_frontier_publications_.find(group_id);
+                if (it == recovery_frontier_publications_.end() ||
+                    it->second != state) {
+                  return;
+                }
+                state->driving = false;
+              }
+
+              // The next generation, if any, is also kicked off asynchronously.
+              PublishRecoveryFrontierGroupAsync(
+                  group_id, state->protection_manifest, {});
+            },
+            /*task_spec=*/nullptr,
+            &serialized_append);
       },
-      /*task_spec=*/nullptr,
-      &serialized_append);
+      "CoreWorker.DriveRecoveryFrontierPublication");
 }
 
 
