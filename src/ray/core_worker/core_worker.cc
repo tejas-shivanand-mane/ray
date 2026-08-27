@@ -1295,6 +1295,23 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
   result["profiling_enabled"] =
       recovery_succession_profiling_enabled_;
 
+  result["normal_submit_profile_calls"] =
+      normal_submit_profile_calls_.load(std::memory_order_relaxed);
+  result["normal_submit_prebuild_time_ns"] =
+      normal_submit_prebuild_time_ns_.load(std::memory_order_relaxed);
+  result["normal_submit_build_common_time_ns"] =
+      normal_submit_build_common_time_ns_.load(std::memory_order_relaxed);
+  result["normal_submit_finalize_spec_time_ns"] =
+      normal_submit_finalize_spec_time_ns_.load(std::memory_order_relaxed);
+  result["normal_submit_add_pending_time_ns"] =
+      normal_submit_add_pending_time_ns_.load(std::memory_order_relaxed);
+  result["normal_submit_owner_setup_time_ns"] =
+      normal_submit_owner_setup_time_ns_.load(std::memory_order_relaxed);
+  result["normal_submit_dispatch_setup_time_ns"] =
+      normal_submit_dispatch_setup_time_ns_.load(std::memory_order_relaxed);
+  result["normal_submit_total_time_ns"] =
+      normal_submit_total_time_ns_.load(std::memory_order_relaxed);
+
   if (!recovery_succession_profiling_enabled_ ||
       recovery_succession_manager_ == nullptr) {
     return result.dump();
@@ -1474,6 +1491,15 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
 }
 
 void CoreWorker::ResetRecoverySuccessionProfile() {
+  normal_submit_profile_calls_.store(0, std::memory_order_relaxed);
+  normal_submit_prebuild_time_ns_.store(0, std::memory_order_relaxed);
+  normal_submit_build_common_time_ns_.store(0, std::memory_order_relaxed);
+  normal_submit_finalize_spec_time_ns_.store(0, std::memory_order_relaxed);
+  normal_submit_add_pending_time_ns_.store(0, std::memory_order_relaxed);
+  normal_submit_owner_setup_time_ns_.store(0, std::memory_order_relaxed);
+  normal_submit_dispatch_setup_time_ns_.store(0, std::memory_order_relaxed);
+  normal_submit_total_time_ns_.store(0, std::memory_order_relaxed);
+
   if (recovery_succession_manager_ != nullptr) {
     recovery_succession_manager_->ResetProfile();
   }
@@ -3354,6 +3380,10 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     const std::string &serialized_retry_exception_allowlist,
     const std::string &call_site,
     const TaskID current_task_id) {
+  const bool profile_normal_submit = recovery_succession_profiling_enabled_;
+  const uint64_t normal_submit_start_ns =
+      profile_normal_submit ? RecoveryProfileNowNs() : 0;
+
   SubscribeToNodeChanges();
   RAY_CHECK(scheduling_strategy.scheduling_strategy_case() !=
             rpc::SchedulingStrategy::SchedulingStrategyCase::SCHEDULING_STRATEGY_NOT_SET);
@@ -3380,6 +3410,9 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   std::vector<DeferredRecoveryFrontierGroup> deferred_recovery_frontier_groups;
 
   // TODO(ekl) offload task building onto a thread pool for performance
+
+  const uint64_t normal_submit_prebuild_done_ns =
+      profile_normal_submit ? RecoveryProfileNowNs() : 0;
 
   BuildCommonTaskSpec(builder,
                       worker_context_->GetCurrentJobID(),
@@ -3413,6 +3446,9 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                       defer_recovery_frontier_dispatch
                           ? &deferred_recovery_frontier_groups
                           : nullptr);
+  const uint64_t normal_submit_build_common_done_ns =
+      profile_normal_submit ? RecoveryProfileNowNs() : 0;
+
   ActorID root_detached_actor_id;
   if (!worker_context_->GetRootDetachedActorID().IsNil()) {
     root_detached_actor_id = worker_context_->GetRootDetachedActorID();
@@ -3425,9 +3461,14 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
 
   TaskSpecification task_spec = std::move(builder).ConsumeAndBuild();
   RAY_LOG(DEBUG) << "Submitting normal task " << task_spec.DebugString();
+  const uint64_t normal_submit_finalize_done_ns =
+      profile_normal_submit ? RecoveryProfileNowNs() : 0;
+
   std::vector<rpc::ObjectReference> returned_refs;
   returned_refs = task_manager_->AddPendingTask(
       task_spec.CallerAddress(), task_spec, CurrentCallSite(), max_retries);
+  const uint64_t normal_submit_add_pending_done_ns =
+      profile_normal_submit ? RecoveryProfileNowNs() : 0;
 
   // Patch 4L: retain one correctness-preserving owner TaskSpec copy for
   // eligible lazy-recovery tasks. This does NOT activate recovery: no manifest,
@@ -3534,6 +3575,9 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     }
   }
 
+  const uint64_t normal_submit_owner_setup_done_ns =
+      profile_normal_submit ? RecoveryProfileNowNs() : 0;
+
   if (defer_recovery_frontier_dispatch &&
       !deferred_recovery_frontier_groups.empty()) {
     const TaskID deferred_task_id = task_spec.TaskId();
@@ -3583,6 +3627,33 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
         },
         "CoreWorker.SubmitTask");
   }
+
+  if (profile_normal_submit) {
+    const uint64_t normal_submit_end_ns = RecoveryProfileNowNs();
+    normal_submit_profile_calls_.fetch_add(1, std::memory_order_relaxed);
+    normal_submit_prebuild_time_ns_.fetch_add(
+        normal_submit_prebuild_done_ns - normal_submit_start_ns,
+        std::memory_order_relaxed);
+    normal_submit_build_common_time_ns_.fetch_add(
+        normal_submit_build_common_done_ns - normal_submit_prebuild_done_ns,
+        std::memory_order_relaxed);
+    normal_submit_finalize_spec_time_ns_.fetch_add(
+        normal_submit_finalize_done_ns - normal_submit_build_common_done_ns,
+        std::memory_order_relaxed);
+    normal_submit_add_pending_time_ns_.fetch_add(
+        normal_submit_add_pending_done_ns - normal_submit_finalize_done_ns,
+        std::memory_order_relaxed);
+    normal_submit_owner_setup_time_ns_.fetch_add(
+        normal_submit_owner_setup_done_ns - normal_submit_add_pending_done_ns,
+        std::memory_order_relaxed);
+    normal_submit_dispatch_setup_time_ns_.fetch_add(
+        normal_submit_end_ns - normal_submit_owner_setup_done_ns,
+        std::memory_order_relaxed);
+    normal_submit_total_time_ns_.fetch_add(
+        normal_submit_end_ns - normal_submit_start_ns,
+        std::memory_order_relaxed);
+  }
+
   return returned_refs;
 }
 

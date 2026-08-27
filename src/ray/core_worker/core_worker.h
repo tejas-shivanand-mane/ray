@@ -2299,6 +2299,17 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
 
   const bool recovery_succession_profiling_enabled_;
 
+  // Diagnostic-only normal-task submit-stage timers. These are CoreWorker-local
+  // so the disabled control can be measured with exactly the same instrumentation.
+  mutable std::atomic<uint64_t> normal_submit_profile_calls_{0};
+  mutable std::atomic<uint64_t> normal_submit_prebuild_time_ns_{0};
+  mutable std::atomic<uint64_t> normal_submit_build_common_time_ns_{0};
+  mutable std::atomic<uint64_t> normal_submit_finalize_spec_time_ns_{0};
+  mutable std::atomic<uint64_t> normal_submit_add_pending_time_ns_{0};
+  mutable std::atomic<uint64_t> normal_submit_owner_setup_time_ns_{0};
+  mutable std::atomic<uint64_t> normal_submit_dispatch_setup_time_ns_{0};
+  mutable std::atomic<uint64_t> normal_submit_total_time_ns_{0};
+
   /// Distributed recovery succession state. Null when the feature is disabled.
   std::shared_ptr<RecoverySuccessionManager> recovery_succession_manager_;
 
