@@ -141,6 +141,44 @@ bool RecoveryFrontierStore::AppendMatchesCommittedSuffix(
   return true;
 }
 
+bool RecoveryFrontierStore::AppendHasTaskIdCollision(
+    const rpc::RecoveryFrontierAppend &append,
+    const TaskID &group_id) const {
+  for (int i = 0; i < append.members_size(); ++i) {
+    const TaskID task_id = TaskID::FromBinary(append.members(i).task_id());
+
+    // A task recipe belongs to exactly one frontier group and one stable member
+    // index. This prevents a later/corrupt append from aliasing the same
+    // externally visible ObjectID through two recovery capsules.
+    const auto existing = member_locations_.find(task_id);
+    if (existing != member_locations_.end() &&
+        (existing->second.group_id != group_id ||
+         existing->second.member_index != append.members(i).member_index())) {
+      return true;
+    }
+
+    // Also reject duplicates within a new append before mutating either index.
+    for (int j = 0; j < i; ++j) {
+      if (append.members(j).task_id() == append.members(i).task_id()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void RecoveryFrontierStore::IndexAppendMembers(
+    const rpc::RecoveryFrontierAppend &append,
+    const TaskID &group_id) {
+  for (const rpc::RecoveryFrontierMemberRecord &member : append.members()) {
+    const TaskID task_id = TaskID::FromBinary(member.task_id());
+    MemberLocation location;
+    location.group_id = group_id;
+    location.member_index = member.member_index();
+    member_locations_[task_id] = std::move(location);
+  }
+}
+
 RecoveryFrontierStore::ApplyResult RecoveryFrontierStore::ApplyAppend(
     const rpc::RecoveryFrontierAppend &append) {
   if (!ValidAppendShape(append)) {
@@ -155,6 +193,9 @@ RecoveryFrontierStore::ApplyResult RecoveryFrontierStore::ApplyAppend(
         append.members(0).first_group_return_index() != 0) {
       return ApplyResult::STALE;
     }
+    if (AppendHasTaskIdCollision(append, group_id)) {
+      return ApplyResult::INVALID;
+    }
 
     GroupState state;
     state.generation = append.generation();
@@ -167,6 +208,7 @@ RecoveryFrontierStore::ApplyResult RecoveryFrontierStore::ApplyAppend(
     state.next_group_return_index =
         last.first_group_return_index() + last.num_returns();
     groups_.emplace(group_id, std::move(state));
+    IndexAppendMembers(append, group_id);
     return ApplyResult::APPLIED;
   }
 
@@ -188,6 +230,9 @@ RecoveryFrontierStore::ApplyResult RecoveryFrontierStore::ApplyAppend(
           state.next_group_return_index) {
     return ApplyResult::INVALID;
   }
+  if (AppendHasTaskIdCollision(append, group_id)) {
+    return ApplyResult::INVALID;
+  }
 
   for (const rpc::RecoveryFrontierMemberRecord &member : append.members()) {
     state.members.push_back(member);
@@ -197,6 +242,7 @@ RecoveryFrontierStore::ApplyResult RecoveryFrontierStore::ApplyAppend(
   const auto &last = state.members.back();
   state.next_group_return_index =
       last.first_group_return_index() + last.num_returns();
+  IndexAppendMembers(append, group_id);
   return ApplyResult::APPLIED;
 }
 
@@ -228,6 +274,40 @@ bool RecoveryFrontierStore::ExtractTaskForReturn(
   return false;
 }
 
+bool RecoveryFrontierStore::LookupCommittedMember(
+    const TaskID &task_id,
+    CommittedMember *member) const {
+  if (member == nullptr || task_id.IsNil()) {
+    return false;
+  }
+
+  const auto location_it = member_locations_.find(task_id);
+  if (location_it == member_locations_.end()) {
+    return false;
+  }
+
+  const MemberLocation &location = location_it->second;
+  const auto group_it = groups_.find(location.group_id);
+  if (group_it == groups_.end() ||
+      location.member_index >= group_it->second.members.size() ||
+      location.member_index >= group_it->second.committed_member_count) {
+    return false;
+  }
+
+  const rpc::RecoveryFrontierMemberRecord &record =
+      group_it->second.members[location.member_index];
+  if (record.task_id() != task_id.Binary()) {
+    return false;
+  }
+
+  member->group_id = location.group_id;
+  member->member_index = record.member_index();
+  member->first_group_return_index = record.first_group_return_index();
+  member->num_returns = record.num_returns();
+  member->task_spec.CopyFrom(record.task_spec());
+  return true;
+}
+
 std::optional<uint64_t> RecoveryFrontierStore::Generation(
     const TaskID &group_id) const {
   const auto it = groups_.find(group_id);
@@ -247,7 +327,23 @@ std::optional<uint32_t> RecoveryFrontierStore::CommittedMemberCount(
 }
 
 void RecoveryFrontierStore::EraseGroup(const TaskID &group_id) {
-  groups_.erase(group_id);
+  const auto group_it = groups_.find(group_id);
+  if (group_it == groups_.end()) {
+    return;
+  }
+
+  for (const rpc::RecoveryFrontierMemberRecord &member : group_it->second.members) {
+    if (member.task_id().size() != TaskID::Size()) {
+      continue;
+    }
+    const TaskID task_id = TaskID::FromBinary(member.task_id());
+    const auto location_it = member_locations_.find(task_id);
+    if (location_it != member_locations_.end() &&
+        location_it->second.group_id == group_id) {
+      member_locations_.erase(location_it);
+    }
+  }
+  groups_.erase(group_it);
 }
 
 }  // namespace ray::raylet
