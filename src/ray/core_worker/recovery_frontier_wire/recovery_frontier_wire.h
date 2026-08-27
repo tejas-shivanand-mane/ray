@@ -25,6 +25,11 @@ namespace ray::core {
 rpc::RecoveryFrontierAppend BuildRecoveryFrontierAppend(
     const RecoveryFrontierAppendBatch &batch);
 
+/// Build and serialize one staged append in a single call. This keeps callers
+/// that only need transport bytes independent of the frontier protobuf type.
+std::string BuildRecoveryFrontierAppendEnvelope(
+    const RecoveryFrontierAppendBatch &batch);
+
 /// Versioned transport envelope used while Recovery Frontiers share the
 /// existing UpdateRecoveryWitness RPC. The prefix makes frontier appends
 /// unambiguous with the fixed-R baseline's serialized TaskSpec payload.
