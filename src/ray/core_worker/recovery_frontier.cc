@@ -15,6 +15,7 @@
 #include "ray/core_worker/recovery_frontier.h"
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 #include "ray/util/logging.h"
@@ -55,18 +56,23 @@ std::optional<RecoveryFrontierMembership> RecoveryFrontierGroup::AddTask(
   member.member_index = static_cast<uint32_t>(members_.size());
   member.first_group_return_index = next_group_return_index_;
   member.num_returns = static_cast<uint32_t>(task_spec.num_returns());
-  member.task_spec.CopyFrom(task_spec);
+
+  // Keep exactly one immutable owner-local replay recipe. Staged append batches
+  // share this object, so staging K members does not deep-copy K protobufs.
+  auto stored_task_spec = std::make_shared<rpc::TaskSpec>();
+  stored_task_spec->CopyFrom(task_spec);
 
   // A group stores replay recipes, not per-task protection state. Protection
   // metadata belongs to the shared group leader and is attached by the backend
   // when the capsule is installed/replayed.
-  member.task_spec.clear_recovery_manifest();
+  stored_task_spec->clear_recovery_manifest();
   for (rpc::RecoveryTaskArgumentMetadata &entry :
-       *member.task_spec.mutable_recovery_argument_metadata()) {
+       *stored_task_spec->mutable_recovery_argument_metadata()) {
     if (entry.has_recovery_metadata()) {
       entry.mutable_recovery_metadata()->clear_first_holder_task_spec();
     }
   }
+  member.task_spec = std::move(stored_task_spec);
 
   const uint32_t member_index = member.member_index;
   const uint32_t first_return = member.first_group_return_index;
@@ -104,6 +110,9 @@ std::optional<RecoveryFrontierAppendBatch> RecoveryFrontierGroup::StageAppend(
   batch.end_member_index = committed_member_count_ + batch_size;
   batch.members.reserve(batch_size);
 
+  // RecoveryFrontierMember is intentionally cheap to copy: the exact replay
+  // TaskSpec is immutable and shared. This preserves the staged batch lifetime
+  // needed by asynchronous publication without duplicating TaskSpec payloads.
   for (uint32_t i = batch.begin_member_index; i < batch.end_member_index; ++i) {
     batch.members.push_back(members_[i]);
   }
@@ -191,7 +200,8 @@ bool RecoveryFrontierGroup::ExtractTaskForReturn(uint32_t group_return_index,
     if (group_return_index < begin || group_return_index >= end) {
       continue;
     }
-    task_spec->CopyFrom(member.task_spec);
+    RAY_CHECK(member.task_spec != nullptr);
+    task_spec->CopyFrom(*member.task_spec);
     *task_return_index = group_return_index - begin;
     return true;
   }
