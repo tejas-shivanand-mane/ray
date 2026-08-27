@@ -44,10 +44,9 @@ TEST(RecoveryFrontierTest, SharedRegistrationReusesCleanImmutableTaskSpec) {
             task->SerializeAsString());
 }
 
-TEST(RecoveryFrontierTest, SharedRegistrationSanitizesRecoveryOnlyFieldsPrivately) {
+TEST(RecoveryFrontierTest, SharedRegistrationSanitizesTransportPiggybackPrivately) {
   RecoveryFrontierPlanner planner(/*group_size=*/32);
-  auto task = std::make_shared<rpc::TaskSpec>(MakeTask('d'));
-  task->mutable_recovery_manifest()->set_task_id(task->task_id());
+  auto task = std::make_shared<rpc::TaskSpec>(MakeTask('p'));
   auto *entry = task->add_recovery_argument_metadata();
   entry->mutable_recovery_metadata()->set_first_holder_task_spec("transport-only");
   std::shared_ptr<const rpc::TaskSpec> immutable_task = task;
@@ -59,10 +58,9 @@ TEST(RecoveryFrontierTest, SharedRegistrationSanitizesRecoveryOnlyFieldsPrivatel
   const auto &stored = group->Members()[0].task_spec;
   ASSERT_NE(stored, nullptr);
 
-  // Recovery-decorated TaskSpecs retain the old correctness semantics: make a
-  // private recipe and remove fields that must not become replay lineage.
+  // A Patch-4F full-lineage sidecar is transport-only. Even without a recovery
+  // manifest it must force a private sanitized recipe instead of being shared.
   EXPECT_NE(stored.get(), task.get());
-  EXPECT_FALSE(stored->has_recovery_manifest());
   ASSERT_EQ(stored->recovery_argument_metadata_size(), 1);
   EXPECT_TRUE(stored->recovery_argument_metadata(0)
                   .recovery_metadata()
@@ -70,11 +68,28 @@ TEST(RecoveryFrontierTest, SharedRegistrationSanitizesRecoveryOnlyFieldsPrivatel
                   .empty());
 
   // Sanitization must never mutate the caller/TaskManager-owned TaskSpec.
-  EXPECT_TRUE(task->has_recovery_manifest());
   EXPECT_EQ(task->recovery_argument_metadata(0)
                 .recovery_metadata()
                 .first_holder_task_spec(),
             "transport-only");
+}
+
+TEST(RecoveryFrontierTest, SharedRegistrationRemovesRecoveryManifestPrivately) {
+  RecoveryFrontierPlanner planner(/*group_size=*/32);
+  auto task = std::make_shared<rpc::TaskSpec>(MakeTask('m'));
+  task->mutable_recovery_manifest()->set_task_id(task->task_id());
+  std::shared_ptr<const rpc::TaskSpec> immutable_task = task;
+
+  const auto membership = planner.RegisterTask(immutable_task);
+  const RecoveryFrontierGroup *group = planner.GetGroup(membership.group_id);
+  ASSERT_NE(group, nullptr);
+  ASSERT_EQ(group->Members().size(), 1U);
+  const auto &stored = group->Members()[0].task_spec;
+  ASSERT_NE(stored, nullptr);
+
+  EXPECT_NE(stored.get(), task.get());
+  EXPECT_FALSE(stored->has_recovery_manifest());
+  EXPECT_TRUE(task->has_recovery_manifest());
 }
 
 TEST(RecoveryFrontierTest, TaskSpecificationMutationDetachesSharedReplaySnapshot) {
