@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -17,6 +19,19 @@
 #include "src/ray/protobuf/frontier/recovery_frontier.pb.h"
 
 namespace ray::raylet {
+
+// Versioned transport envelope used while Recovery Frontiers are integrated
+// through the existing UpdateRecoveryWitness RPC. The prefix makes frontier
+// appends unambiguous with the fixed-R baseline's serialized TaskSpec payload.
+//
+// This is intentionally an internal wire encoding. Once the frontier protocol
+// is stable it can be promoted to a dedicated protobuf field without changing
+// RecoveryFrontierStore semantics.
+bool IsRecoveryFrontierAppendEnvelope(std::string_view payload);
+std::string SerializeRecoveryFrontierAppendEnvelope(
+    const rpc::RecoveryFrontierAppend &append);
+bool ParseRecoveryFrontierAppendEnvelope(std::string_view payload,
+                                         rpc::RecoveryFrontierAppend *append);
 
 // Holder-local materialization of append-only Recovery Frontier capsules.
 //
@@ -44,6 +59,10 @@ class RecoveryFrontierStore {
 
   std::optional<uint64_t> Generation(const TaskID &group_id) const;
   std::optional<uint32_t> CommittedMemberCount(const TaskID &group_id) const;
+
+  // Tombstones are absorbing in the recovery protocol. Once a group's
+  // authoritative manifest is tombstoned, drop its replay recipes as well.
+  void EraseGroup(const TaskID &group_id);
 
  private:
   struct GroupState {
