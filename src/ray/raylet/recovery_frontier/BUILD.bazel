@@ -19,8 +19,10 @@ ray_cc_library(
     hdrs = ["frontier_aware_node_manager.h"],
     deps = [
         ":recovery_frontier_store",
+        "//src/ray/common:ray_config",
         "//src/ray/raylet:raylet_lib",
         "//src/ray/util:logging",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/synchronization",
     ],
 )
