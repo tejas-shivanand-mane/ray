@@ -103,6 +103,38 @@ TEST(RecoveryFrontierTest, AckedPrefixControlsRecoverability) {
   EXPECT_TRUE(group->IsTaskCommitted(TaskID::FromBinary(second.task_id())));
 }
 
+TEST(RecoveryFrontierTest, InFlightAppendKeepsGroupPendingUntilAck) {
+  RecoveryFrontierPlanner planner(/*group_size=*/4);
+  const auto first = planner.RegisterTask(MakeTask('a'));
+  planner.RegisterTask(MakeTask('b'));
+
+  RecoveryFrontierGroup *group = planner.GetMutableGroup(first.group_id);
+  ASSERT_NE(group, nullptr);
+  EXPECT_TRUE(group->HasUncommittedMembers());
+
+  // Model one exporter publishing only the leader while another exporter
+  // reaches the same group. A second physical append must not be stageable
+  // until the first ACK either commits or aborts its prefix.
+  auto leader_batch = group->StageAppend(/*max_batch_members=*/1);
+  ASSERT_TRUE(leader_batch.has_value());
+  EXPECT_TRUE(group->HasUncommittedMembers());
+  EXPECT_TRUE(group->AppendInFlight());
+  EXPECT_FALSE(group->StageAppend().has_value());
+
+  ASSERT_TRUE(group->CommitAppend(*leader_batch));
+  EXPECT_FALSE(group->AppendInFlight());
+  EXPECT_TRUE(group->HasUncommittedMembers());
+
+  // The waiting exporter can now stage the remaining contiguous suffix. Only
+  // after its ACK is the whole group outside the publication barrier.
+  auto suffix_batch = group->StageAppend();
+  ASSERT_TRUE(suffix_batch.has_value());
+  EXPECT_EQ(suffix_batch->begin_member_index, 1U);
+  EXPECT_EQ(suffix_batch->end_member_index, 2U);
+  ASSERT_TRUE(group->CommitAppend(*suffix_batch));
+  EXPECT_FALSE(group->HasUncommittedMembers());
+}
+
 TEST(RecoveryFrontierTest, GroupReturnIndexSelectsCommittedOriginalTaskAndReturn) {
   RecoveryFrontierPlanner planner(/*group_size=*/4);
   const rpc::TaskSpec first = MakeTask('a', /*num_returns=*/2);
