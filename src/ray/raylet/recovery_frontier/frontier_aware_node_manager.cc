@@ -94,7 +94,8 @@ void FrontierAwareNodeManager::HandleUpdateRecoveryWitness(
         RecoveryFrontierStore::CommittedMember member;
         if (recovery_frontier_store_.LookupCommittedMember(it->first, &member) &&
             member.group_id == tombstoned_group_id) {
-          it = recovery_frontier_claims_.erase(it);
+          const auto erase_it = it++;
+          recovery_frontier_claims_.erase(erase_it);
         } else {
           ++it;
         }
