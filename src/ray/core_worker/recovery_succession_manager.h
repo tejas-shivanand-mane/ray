@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -245,6 +246,21 @@ class RecoverySuccessionManager {
   RecoverySuccessionManager(const RecoverySuccessionManager &) = delete;
   RecoverySuccessionManager &operator=(const RecoverySuccessionManager &) = delete;
 
+  using AdaptiveFrontierPublisher = std::function<bool(
+      const rpc::RecoveryManifest &, const rpc::RecoveryFrontierAppend &)>;
+
+  /// Registers the process-local CoreWorker transport used to make adaptive
+  /// Frontier recipe suffixes durable on the already-admitted H1..HR holders.
+  /// Standalone manager tests may leave this unset.
+  static void RegisterAdaptiveFrontierPublisher(AdaptiveFrontierPublisher publisher);
+
+  /// Returns the one Recovery Succession manager owned by this CoreWorker
+  /// process. CoreWorker's RPC proxy uses this only for typed Frontier-append
+  /// requests; normal recovery RPCs continue through CoreWorker itself.
+  static RecoverySuccessionManager *GetProcessRecoveryManager() {
+    return process_recovery_manager_.load(std::memory_order_acquire);
+  }
+
   /// Returns true when recovery succession supports the task.
   static bool IsEligibleTask(const rpc::TaskSpec &task_spec);
 
@@ -279,10 +295,10 @@ class RecoverySuccessionManager {
   std::optional<RecoveryFrontierAppendBatch> StageRecoveryFrontierAppend(
       const TaskID &group_id, uint32_t max_batch_members = 0);
   /// True while at least one member of the group remains outside the
-/// acknowledged durable prefix. Used by synchronous object export to
-/// wait behind an append already being published by another thread.
-bool RecoveryFrontierGroupHasUncommittedMembers(
-    const TaskID &group_id) const;
+  /// acknowledged durable prefix. Used by synchronous object export to
+  /// wait behind an append already being published by another thread.
+  bool RecoveryFrontierGroupHasUncommittedMembers(
+      const TaskID &group_id) const;
 
   bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
   bool AbortRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
@@ -390,12 +406,22 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
   /// Applies a committed manifest received from the coordinator.
   bool ApplyCommittedManifest(const rpc::RecoveryManifest &manifest);
 
-  /// Copies known recovery metadata into metadata.
+  /// Metadata lookup used by CoreWorker. The non-const overload first drives
+  /// any pending adaptive Frontier recipe suffix to the established holders,
+  /// then delegates to the existing const state lookup below.
+  bool PopulateRecoveryMetadata(const ObjectID &object_id,
+                                rpc::RecoveryObjectMetadata *metadata);
+
+  /// Copies known recovery metadata without performing publication. Retained
+  /// for manager-internal/standalone state inspection.
   bool PopulateRecoveryMetadata(const ObjectID &object_id,
                                 rpc::RecoveryObjectMetadata *metadata) const;
 
-  /// Patch 4H no-copy fast path used by task-argument activation. This checks
-  /// whether metadata already exists without copying the full metadata proto.
+  /// Patch 4H no-copy fast path used by task-argument activation. The
+  /// non-const overload drives an adaptive suffix when necessary.
+  bool HasRecoveryMetadata(const ObjectID &object_id);
+
+  /// State-only no-copy lookup used by the adaptive wrapper and const callers.
   bool HasRecoveryMetadata(const ObjectID &object_id) const;
 
   /// Adds recovery metadata to direct and nested ObjectRef arguments.
@@ -475,6 +501,13 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
   void EraseTaskObjectMetadataLocked(const TaskID &task_id)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
+  /// If object_id is a member appended after the adaptive H1..HR topology was
+  /// established, synchronously publish the next contiguous recipe suffix and
+  /// advance the owner prefix. Returns true when the requested member is
+  /// committed (including when another concurrent exporter committed it).
+  bool PublishAdaptiveRecoveryFrontierForObjectIfNeeded(
+      const ObjectID &object_id);
+
   // Patch 4J: reconstruct ordinary RecoveryObjectMetadata from task-level
   // state. object_recovery_metadata_ is only a legacy compatibility fallback.
   bool BuildRecoveryMetadataLocked(
@@ -544,6 +577,24 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
                                    const rpc::RecoveryManifest &manifest,
                                    bool committed) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
+  inline static std::atomic<RecoverySuccessionManager *> process_recovery_manager_{
+      nullptr};
+
+  struct ProcessRecoveryManagerRegistration {
+    explicit ProcessRecoveryManagerRegistration(RecoverySuccessionManager *manager)
+        : manager(manager) {
+      process_recovery_manager_.store(manager, std::memory_order_release);
+    }
+
+    ~ProcessRecoveryManagerRegistration() {
+      RecoverySuccessionManager *expected = manager;
+      process_recovery_manager_.compare_exchange_strong(
+          expected, nullptr, std::memory_order_acq_rel);
+    }
+
+    RecoverySuccessionManager *manager;
+  };
+
   /// Address of this CoreWorker.
   rpc::Address self_address_;
 
@@ -612,6 +663,10 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
 
   /// Nodes definitively reported dead by the GCS.
   absl::flat_hash_set<NodeID> failed_nodes_ ABSL_GUARDED_BY(mutex_);
+
+  // Declared last so its destructor clears the process pointer before the
+  // manager's state begins destruction.
+  ProcessRecoveryManagerRegistration process_registration_{this};
 };
 
 }  // namespace ray::core
