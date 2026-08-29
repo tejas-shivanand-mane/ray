@@ -58,6 +58,16 @@ std::shared_ptr<const rpc::TaskSpec> MakeSanitizedRecoveryFrontierReplayRecipe(
   return stored_task_spec;
 }
 
+bool SameFrontierMemberRecord(const RecoveryFrontierMember &stored,
+                              const rpc::RecoveryFrontierMemberRecord &record) {
+  return stored.task_spec != nullptr &&
+         stored.task_id.Binary() == record.task_id() &&
+         stored.member_index == record.member_index() &&
+         stored.first_group_return_index == record.first_group_return_index() &&
+         stored.num_returns == record.num_returns() &&
+         stored.task_spec->SerializeAsString() == record.task_spec().SerializeAsString();
+}
+
 }  // namespace
 
 RecoveryFrontierGroup::RecoveryFrontierGroup(TaskID group_id, uint32_t max_members)
@@ -194,6 +204,104 @@ bool RecoveryFrontierGroup::AbortAppend(const RecoveryFrontierAppendBatch &batch
   return true;
 }
 
+bool RecoveryFrontierGroup::ApplyCommittedAppend(
+    const rpc::RecoveryFrontierAppend &append) {
+  if (append.group_id() != group_id_.Binary() ||
+      append.members_size() <= 0 ||
+      append.end_member_index() <= append.begin_member_index() ||
+      static_cast<uint32_t>(append.members_size()) !=
+          append.end_member_index() - append.begin_member_index() ||
+      append.end_member_index() > max_members_) {
+    return false;
+  }
+
+  // Retry/idempotency path. A retransmitted committed generation is accepted
+  // only when every record is byte-for-byte the recipe already stored at the
+  // same membership coordinates.
+  if (append.generation() == generation_) {
+    if (append.end_member_index() > committed_member_count_ ||
+        append.begin_member_index() >= append.end_member_index()) {
+      return false;
+    }
+    for (int i = 0; i < append.members_size(); ++i) {
+      const auto &record = append.members(i);
+      const uint32_t expected_index =
+          append.begin_member_index() + static_cast<uint32_t>(i);
+      if (record.member_index() != expected_index ||
+          expected_index >= members_.size() ||
+          !SameFrontierMemberRecord(members_[expected_index], record)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (append.base_generation() != generation_ ||
+      append.generation() != generation_ + 1 ||
+      append.begin_member_index() != committed_member_count_ ||
+      append.begin_member_index() != MemberCount()) {
+    return false;
+  }
+
+  // Validate the whole append before mutating the group. This is important on
+  // holders: a malformed/stale RPC must not leave an uncommitted recipe suffix
+  // that could accidentally be made visible by a later valid append.
+  uint32_t expected_first_return = next_group_return_index_;
+  std::vector<TaskID> incoming_task_ids;
+  incoming_task_ids.reserve(static_cast<size_t>(append.members_size()));
+
+  for (int i = 0; i < append.members_size(); ++i) {
+    const auto &record = append.members(i);
+    const uint32_t expected_index =
+        append.begin_member_index() + static_cast<uint32_t>(i);
+
+    if (record.task_id().size() != TaskID::Size() ||
+        !record.has_task_spec() ||
+        record.task_spec().task_id() != record.task_id() ||
+        record.member_index() != expected_index ||
+        record.first_group_return_index() != expected_first_return ||
+        record.num_returns() == 0 ||
+        static_cast<uint32_t>(record.task_spec().num_returns()) !=
+            record.num_returns()) {
+      return false;
+    }
+
+    const TaskID task_id = TaskID::FromBinary(record.task_id());
+    if (task_to_member_index_.contains(task_id)) {
+      return false;
+    }
+    for (const TaskID &seen : incoming_task_ids) {
+      if (seen == task_id) {
+        return false;
+      }
+    }
+    incoming_task_ids.push_back(task_id);
+    expected_first_return += record.num_returns();
+  }
+
+  for (int i = 0; i < append.members_size(); ++i) {
+    const auto &record = append.members(i);
+    auto stored_task_spec = std::make_shared<rpc::TaskSpec>();
+    stored_task_spec->CopyFrom(record.task_spec());
+    auto membership = AddTask(std::move(stored_task_spec));
+    RAY_CHECK(membership.has_value());
+    RAY_CHECK_EQ(membership->member_index, record.member_index());
+    RAY_CHECK_EQ(membership->first_group_return_index,
+                 record.first_group_return_index());
+    RAY_CHECK_EQ(membership->num_returns, record.num_returns());
+  }
+
+  auto staged = StageAppend(static_cast<uint32_t>(append.members_size()));
+  RAY_CHECK(staged.has_value());
+  RAY_CHECK_EQ(staged->group_id, group_id_);
+  RAY_CHECK_EQ(staged->base_generation, append.base_generation());
+  RAY_CHECK_EQ(staged->generation, append.generation());
+  RAY_CHECK_EQ(staged->begin_member_index, append.begin_member_index());
+  RAY_CHECK_EQ(staged->end_member_index, append.end_member_index());
+  RAY_CHECK(CommitAppend(staged.value()));
+  return true;
+}
+
 bool RecoveryFrontierGroup::IsTaskCommitted(const TaskID &task_id) const {
   const auto it = task_to_member_index_.find(task_id);
   return it != task_to_member_index_.end() && it->second < committed_member_count_;
@@ -286,6 +394,50 @@ RecoveryFrontierMembership RecoveryFrontierPlanner::RegisterTask(
   }
 
   return membership.value();
+}
+
+bool RecoveryFrontierPlanner::ApplyCommittedAppend(
+    const rpc::RecoveryFrontierAppend &append) {
+  if (append.group_id().size() != TaskID::Size()) {
+    return false;
+  }
+  const TaskID group_id = TaskID::FromBinary(append.group_id());
+
+  // Reject aliases that would make one producer task appear in two different
+  // recovery groups before mutating the holder-local group.
+  for (const auto &record : append.members()) {
+    if (record.task_id().size() != TaskID::Size()) {
+      return false;
+    }
+    const TaskID task_id = TaskID::FromBinary(record.task_id());
+    const auto existing = membership_by_task_.find(task_id);
+    if (existing != membership_by_task_.end() &&
+        (existing->second.group_id != group_id ||
+         existing->second.member_index != record.member_index() ||
+         existing->second.first_group_return_index !=
+             record.first_group_return_index() ||
+         existing->second.num_returns != record.num_returns())) {
+      return false;
+    }
+  }
+
+  auto [group_it, inserted] =
+      groups_.try_emplace(group_id, group_id, group_size_);
+  RecoveryFrontierGroup &group = group_it->second;
+  if (!group.ApplyCommittedAppend(append)) {
+    if (inserted && group.MemberCount() == 0) {
+      groups_.erase(group_it);
+    }
+    return false;
+  }
+
+  for (const auto &record : append.members()) {
+    const TaskID task_id = TaskID::FromBinary(record.task_id());
+    const auto membership = group.FindTask(task_id);
+    RAY_CHECK(membership.has_value());
+    membership_by_task_[task_id] = membership.value();
+  }
+  return true;
 }
 
 std::optional<RecoveryFrontierMembership> RecoveryFrontierPlanner::FindTask(
