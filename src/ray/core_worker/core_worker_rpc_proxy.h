@@ -21,6 +21,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 #include "ray/core_worker/core_worker.h"
+#include "ray/core_worker/recovery_succession_manager.h"
 
 namespace ray {
 namespace core {
@@ -57,7 +58,38 @@ class CoreWorkerServiceHandlerProxy : public rpc::CoreWorkerServiceHandler {
   RAY_CORE_WORKER_RPC_PROXY(ReportRecoveryCandidateBatch)
   RAY_CORE_WORKER_RPC_PROXY(InstallRecoveryHolder)
   RAY_CORE_WORKER_RPC_PROXY(InstallRecoveryHolderBatch)
-  RAY_CORE_WORKER_RPC_PROXY(CommitRecoveryManifest)
+
+  void HandleCommitRecoveryManifest(
+      rpc::CommitRecoveryManifestRequest request,
+      rpc::CommitRecoveryManifestReply *reply,
+      rpc::SendReplyCallback send_reply_callback) override {
+    if (!request.has_frontier_append()) {
+      core_worker_->HandleCommitRecoveryManifest(
+          std::move(request), reply, std::move(send_reply_callback));
+      return;
+    }
+
+    bool applied = false;
+    if (request.has_manifest()) {
+      RecoverySuccessionManager *manager =
+          RecoverySuccessionManager::GetProcessRecoveryManager();
+      applied = manager != nullptr &&
+                manager->ApplyAdaptiveRecoveryFrontierAppend(
+                    request.frontier_append(), request.manifest());
+    }
+
+    reply->set_applied(applied);
+    if (!applied) {
+      send_reply_callback(
+          Status::Invalid("Failed to apply adaptive Recovery Frontier recipe append"),
+          nullptr,
+          nullptr);
+      return;
+    }
+
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+  }
+
   RAY_CORE_WORKER_RPC_PROXY(RecoverTaskOutput)
   RAY_CORE_WORKER_RPC_PROXY(ApplyRecoveryTombstone)
 
