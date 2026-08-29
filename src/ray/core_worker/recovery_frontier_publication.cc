@@ -16,10 +16,13 @@
 #include <thread>
 #include <utility>
 
+#include <grpcpp/grpcpp.h>
+
 #include "ray/common/ray_config.h"
 #include "ray/core_worker/recovery_frontier_wire/recovery_frontier_wire.h"
 #include "ray/core_worker/recovery_succession_manager.h"
 #include "ray/util/logging.h"
+#include "src/ray/protobuf/core_worker.grpc.pb.h"
 
 namespace ray::core {
 namespace {
@@ -30,6 +33,77 @@ uint64_t RecoveryFrontierProfileNowNs() {
           std::chrono::steady_clock::now().time_since_epoch())
           .count());
 }
+
+bool PublishAdaptiveFrontierAppendToExistingHolders(
+    const rpc::RecoveryManifest &protection_manifest,
+    const rpc::RecoveryFrontierAppend &append) {
+  if (!protection_manifest.frozen() ||
+      protection_manifest.task_id().empty() ||
+      append.group_id() != protection_manifest.task_id() ||
+      append.members_size() <= 0) {
+    return false;
+  }
+
+  const uint32_t target_holder_count =
+      protection_manifest.target_holder_count();
+  if (target_holder_count == 0) {
+    return false;
+  }
+
+  uint32_t published = 0;
+  for (const rpc::RecoveryHolder &holder : protection_manifest.succession()) {
+    if (holder.rank() == 0) {
+      continue;
+    }
+
+    const rpc::Address &address = holder.address();
+    if (address.worker_id().empty() || address.ip_address().empty() ||
+        address.port() <= 0) {
+      return false;
+    }
+
+    rpc::CommitRecoveryManifestRequest request;
+    request.mutable_manifest()->CopyFrom(protection_manifest);
+    request.mutable_frontier_append()->CopyFrom(append);
+
+    rpc::CommitRecoveryManifestReply reply;
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() +
+                         std::chrono::seconds(10));
+
+    const std::string endpoint =
+        address.ip_address() + ":" + std::to_string(address.port());
+    auto channel =
+        grpc::CreateChannel(endpoint, grpc::InsecureChannelCredentials());
+    auto stub = rpc::CoreWorkerService::NewStub(channel);
+
+    const grpc::Status status =
+        stub->CommitRecoveryManifest(&context, request, &reply);
+    if (!status.ok() || !reply.applied()) {
+      RAY_LOG(WARNING)
+          .WithField(TaskID::FromBinary(append.group_id()))
+          << "Failed adaptive Recovery Frontier recipe append generation "
+          << append.generation() << " on holder rank " << holder.rank()
+          << ": grpc_ok=" << status.ok()
+          << ", applied=" << reply.applied()
+          << (status.ok() ? "" : ", error=" + status.error_message());
+      return false;
+    }
+
+    ++published;
+  }
+
+  return published == target_holder_count;
+}
+
+struct AdaptiveFrontierPublisherRegistration {
+  AdaptiveFrontierPublisherRegistration() {
+    RecoverySuccessionManager::RegisterAdaptiveFrontierPublisher(
+        PublishAdaptiveFrontierAppendToExistingHolders);
+  }
+};
+
+const AdaptiveFrontierPublisherRegistration kAdaptiveFrontierPublisherRegistration;
 
 }  // namespace
 
