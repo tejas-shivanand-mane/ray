@@ -154,6 +154,37 @@ bool RecoverySuccessionManager::PublishAdaptiveRecoveryFrontierForObjectIfNeeded
         << "Stale or mismatched adaptive Recovery Frontier append ACK for generation "
         << batch.generation << " group " << batch.group_id;
 
+    // CommitAdaptiveRecoveryFrontierAppend installs the authoritative member
+    // manifests, but dynamically appended members may not yet have gone through
+    // RegisterOwnedTaskLazy. BuildRecoveryMetadataLocked deliberately requires
+    // owned_num_returns > 0 before treating an ObjectID as an owner return.
+    // Populate that owner-local identity from the already-committed Frontier
+    // recipe before allowing the export-side metadata lookup to resume.
+    //
+    // This does not make the member visible early: we reach this block only
+    // after every existing H1..HR ACKed the exact suffix and CommitAppend()
+    // advanced the durable prefix.
+    {
+      absl::MutexLock lock(&mutex_);
+      for (const RecoveryFrontierMember &member : batch.members) {
+        RAY_CHECK_GT(member.num_returns, 0U);
+
+        auto state_it = task_states_.find(member.task_id);
+        RAY_CHECK(state_it != task_states_.end())
+            << "Committed adaptive Frontier member is missing task recovery state: "
+            << member.task_id;
+        RAY_CHECK_EQ(state_it->second.manifest.task_id(), member.task_id.Binary());
+
+        if (state_it->second.owned_num_returns == 0) {
+          state_it->second.owned_num_returns = member.num_returns;
+        } else {
+          RAY_CHECK_EQ(state_it->second.owned_num_returns, member.num_returns)
+              << "Adaptive Frontier return-count mismatch for task "
+              << member.task_id;
+        }
+      }
+    }
+
     RAY_LOG(INFO)
         .WithField(batch.group_id)
         << "Committed adaptive Recovery Frontier recipe append generation "
