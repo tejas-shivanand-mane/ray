@@ -419,6 +419,42 @@ inline rpc::RecoveryManifest BuildFrontierMemberManifest(
   return manifest;
 }
 
+inline bool BuildFrontierSuccessionAppend(
+    const RecoveryFrontierAppendBatch &batch,
+    rpc::RecoveryFrontierAppend *append) {
+  if (append == nullptr || batch.group_id.IsNil() ||
+      batch.members.empty() ||
+      batch.end_member_index <= batch.begin_member_index ||
+      batch.members.size() != static_cast<size_t>(
+          batch.end_member_index - batch.begin_member_index)) {
+    return false;
+  }
+
+  append->Clear();
+  append->set_group_id(batch.group_id.Binary());
+  append->set_base_generation(batch.base_generation);
+  append->set_generation(batch.generation);
+  append->set_begin_member_index(batch.begin_member_index);
+  append->set_end_member_index(batch.end_member_index);
+
+  for (const RecoveryFrontierMember &member : batch.members) {
+    if (member.task_spec == nullptr ||
+        member.task_id.IsNil() ||
+        member.task_spec->task_id() != member.task_id.Binary()) {
+      append->Clear();
+      return false;
+    }
+
+    rpc::RecoveryFrontierMemberRecord *record = append->add_members();
+    record->set_task_id(member.task_id.Binary());
+    record->set_member_index(member.member_index);
+    record->set_first_group_return_index(member.first_group_return_index);
+    record->set_num_returns(member.num_returns);
+    record->mutable_task_spec()->CopyFrom(*member.task_spec);
+  }
+  return true;
+}
+
 inline bool BuildFrontierSuccessionSnapshot(const RecoveryFrontierGroup &group,
                                             rpc::RecoveryFrontierAppend *append) {
   if (append == nullptr || group.MemberCount() == 0) {

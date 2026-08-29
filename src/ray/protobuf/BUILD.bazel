@@ -220,6 +220,7 @@ proto_library(
         ":common_proto",
         ":gcs_service_proto",
         ":pubsub_proto",
+        "//src/ray/protobuf/frontier:recovery_frontier_proto",
     ],
 )
 

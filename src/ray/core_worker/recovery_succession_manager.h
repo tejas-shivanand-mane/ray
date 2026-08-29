@@ -287,6 +287,24 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
   bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
   bool AbortRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
 
+  /// Serialize one staged append using the shared holder wire format.
+  static bool BuildRecoveryFrontierAppendProto(
+      const RecoveryFrontierAppendBatch &batch,
+      rpc::RecoveryFrontierAppend *append);
+
+  /// Commit an adaptive Frontier recipe suffix on the owner after every
+  /// already-admitted Succession holder ACKed that exact append.
+  bool CommitAdaptiveRecoveryFrontierAppend(
+      const RecoveryFrontierAppendBatch &batch,
+      const rpc::RecoveryManifest &group_manifest);
+
+  /// Holder-side import of a committed adaptive Frontier recipe suffix.
+  /// The shared Succession topology is unchanged; only the newly appended
+  /// member TaskSpecs become replayable.
+  bool ApplyAdaptiveRecoveryFrontierAppend(
+      const rpc::RecoveryFrontierAppend &append,
+      const rpc::RecoveryManifest &group_manifest);
+
   /// Resolve a committed group-global return index back to the original task
   /// replay recipe. Uncommitted members deliberately return false.
   bool ExtractRecoveryFrontierTaskForReturn(const TaskID &group_id,
@@ -418,11 +436,14 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
       rpc::RecoveryManifest *latest_manifest);
 
   /// Promotes a provisional holder only from a manifest obtained directly
-  /// from one of the task's compact witnesses.
+  /// from one of the task's compact witnesses. For an adaptive Recovery
+  /// Frontier member, the witness record is group-keyed and is translated back
+  /// into the requested task's member manifest before promotion.
   ///
   /// A newer witness-backed generation may also be adopted if this worker
   /// remains in the succession list.
   bool ConfirmProvisionalHolderFromWitness(
+      const TaskID &task_id,
       const rpc::RecoveryManifest &witness_manifest,
       rpc::RecoveryManifest *confirmed_manifest);
 
@@ -541,6 +562,12 @@ bool RecoveryFrontierGroupHasUncommittedMembers(
   /// capsule grows, but its fixed-R witness/holder set never changes.
   absl::flat_hash_map<TaskID, rpc::RecoveryManifest>
       recovery_frontier_protection_manifests_ ABSL_GUARDED_BY(mutex_);
+
+  /// Exact initial recipe prefix frozen for the duration of adaptive holder
+  /// admission. The Frontier itself remains open so later owner tasks can join
+  /// it; H1..HR nevertheless all receive the same initial replay snapshot.
+  absl::flat_hash_map<TaskID, RecoveryFrontierAppendBatch>
+      adaptive_frontier_initial_append_batches_ ABSL_GUARDED_BY(mutex_);
 
   mutable RecoverySuccessionProfile profile_ ABSL_GUARDED_BY(mutex_);
 

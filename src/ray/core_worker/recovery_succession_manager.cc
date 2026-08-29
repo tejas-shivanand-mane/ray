@@ -511,6 +511,117 @@ bool RecoverySuccessionManager::AbortRecoveryFrontierAppend(
   return group != nullptr && group->AbortAppend(batch);
 }
 
+bool RecoverySuccessionManager::BuildRecoveryFrontierAppendProto(
+    const RecoveryFrontierAppendBatch &batch,
+    rpc::RecoveryFrontierAppend *append) {
+  return recovery_succession_internal::BuildFrontierSuccessionAppend(
+      batch, append);
+}
+
+bool RecoverySuccessionManager::CommitAdaptiveRecoveryFrontierAppend(
+    const RecoveryFrontierAppendBatch &batch,
+    const rpc::RecoveryManifest &group_manifest) {
+  if (batch.group_id.IsNil() ||
+      group_manifest.task_id() != batch.group_id.Binary() ||
+      !group_manifest.frozen() ||
+      !ContainsWorker(group_manifest, self_address_)) {
+    return false;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  if (!recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
+          recovery_frontier_planner_.get())) {
+    return false;
+  }
+
+  RecoveryFrontierGroup *group =
+      recovery_frontier_planner_->GetMutableGroup(batch.group_id);
+  if (group == nullptr || !group->CommitAppend(batch)) {
+    return false;
+  }
+
+  recovery_frontier_protection_manifests_[batch.group_id].CopyFrom(
+      group_manifest);
+
+  for (const RecoveryFrontierMember &member : batch.members) {
+    if (member.task_spec == nullptr ||
+        !group->IsTaskCommitted(member.task_id)) {
+      return false;
+    }
+    rpc::RecoveryManifest member_manifest =
+        recovery_succession_internal::BuildFrontierMemberManifest(
+            group_manifest, member);
+    UpdateManifestForTaskLocked(member.task_id, member_manifest, true);
+  }
+
+  return true;
+}
+
+bool RecoverySuccessionManager::ApplyAdaptiveRecoveryFrontierAppend(
+    const rpc::RecoveryFrontierAppend &append,
+    const rpc::RecoveryManifest &group_manifest) {
+  if (append.group_id().size() != TaskID::Size() ||
+      group_manifest.task_id() != append.group_id() ||
+      !group_manifest.frozen() ||
+      !ContainsWorker(group_manifest, self_address_) ||
+      append.members_size() <= 0) {
+    return false;
+  }
+
+  for (const rpc::RecoveryFrontierMemberRecord &record : append.members()) {
+    if (!record.has_task_spec() ||
+        record.task_spec().task_id() != record.task_id() ||
+        !IsEligibleTask(record.task_spec())) {
+      return false;
+    }
+  }
+
+  const TaskID group_id = TaskID::FromBinary(append.group_id());
+  absl::MutexLock lock(&mutex_);
+  if (!recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
+          recovery_frontier_planner_.get()) ||
+      !recovery_frontier_planner_->ApplyCommittedAppend(append)) {
+    return false;
+  }
+
+  const RecoveryFrontierGroup *group =
+      recovery_frontier_planner_->GetGroup(group_id);
+  if (group == nullptr ||
+      append.end_member_index() > group->MemberCount()) {
+    return false;
+  }
+
+  recovery_frontier_protection_manifests_[group_id].CopyFrom(group_manifest);
+
+  for (uint32_t index = append.begin_member_index();
+       index < append.end_member_index();
+       ++index) {
+    const RecoveryFrontierMember &member = group->Members()[index];
+    if (member.task_spec == nullptr || !IsEligibleTask(*member.task_spec)) {
+      return false;
+    }
+
+    rpc::RecoveryManifest member_manifest =
+        recovery_succession_internal::BuildFrontierMemberManifest(
+            group_manifest, member);
+
+    rpc::TaskSpec stored_task_spec;
+    stored_task_spec.CopyFrom(*member.task_spec);
+    ClearFirstHolderTaskSpecPiggybacks(&stored_task_spec);
+    stored_task_spec.mutable_recovery_manifest()->CopyFrom(member_manifest);
+
+    TaskRecoveryState &member_state = task_states_[member.task_id];
+    member_state.manifest.CopyFrom(member_manifest);
+    member_state.task_spec = std::move(stored_task_spec);
+    member_state.manifest_committed = true;
+    member_state.provisional_reservation_id.clear();
+    member_state.provisional_piggyback_task_spec = false;
+  }
+
+  candidate_reports_sent_.insert(group_id);
+  return true;
+}
+
 bool RecoverySuccessionManager::ExtractRecoveryFrontierTaskForReturn(
     const TaskID &group_id,
     uint32_t group_return_index,
@@ -1214,11 +1325,31 @@ RecoverySuccessionManager::PrepareHolderAdmission(
           recovery_frontier_planner_.get()) &&
       recovery_frontier_planner_->GetGroup(task_id) != nullptr;
 
+  std::optional<RecoveryFrontierAppendBatch> frontier_install_batch;
   if (frontier_group_admission) {
-    // First adaptive admission freezes the set of recipes in this initial
-    // composition slice. Later dynamic append propagation is implemented
-    // separately; a new owner task therefore opens a new Frontier after this.
-    RAY_CHECK(recovery_frontier_planner_->SealGroup(task_id));
+    RecoveryFrontierGroup *group =
+        recovery_frontier_planner_->GetMutableGroup(task_id);
+    RAY_CHECK(group != nullptr);
+
+    // Freeze only the INITIAL RECIPE PREFIX, not the Frontier itself. This
+    // guarantees that every concurrently admitted H1..HR receives the exact
+    // same snapshot while later owner tasks remain free to join the group.
+    if (group->CommittedMemberCount() == 0) {
+      auto initial_it =
+          adaptive_frontier_initial_append_batches_.find(task_id);
+      if (initial_it ==
+          adaptive_frontier_initial_append_batches_.end()) {
+        auto staged = group->StageAppend();
+        if (!staged.has_value()) {
+          return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
+        }
+        initial_it =
+            adaptive_frontier_initial_append_batches_
+                .emplace(task_id, std::move(staged.value()))
+                .first;
+      }
+      frontier_install_batch = initial_it->second;
+    }
   }
 
   const TaskRecoveryState &task_state = task_it->second;
@@ -1399,8 +1530,13 @@ RecoverySuccessionManager::PrepareHolderAdmission(
         recovery_frontier_planner_->GetGroup(task_id);
     RAY_CHECK(group != nullptr);
     rpc::RecoveryFrontierAppend snapshot;
-    if (!recovery_succession_internal::BuildFrontierSuccessionSnapshot(
-            *group, &snapshot)) {
+    const bool built =
+        frontier_install_batch.has_value()
+            ? recovery_succession_internal::BuildFrontierSuccessionAppend(
+                  frontier_install_batch.value(), &snapshot)
+            : recovery_succession_internal::BuildFrontierSuccessionSnapshot(
+                  *group, &snapshot);
+    if (!built) {
       EraseHolderReservationLocked(reservation_id);
       return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
     }
@@ -1543,8 +1679,21 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
   const rpc::RecoveryManifest &current = task_it->second.manifest;
   const rpc::RecoveryManifest &proposed = reservation.proposed_manifest;
 
+  auto committed_frontier_member_limit =
+      [this, &task_id](const RecoveryFrontierGroup &group) {
+        uint32_t limit = group.CommittedMemberCount();
+        const auto initial_it =
+            adaptive_frontier_initial_append_batches_.find(task_id);
+        if (initial_it != adaptive_frontier_initial_append_batches_.end()) {
+          limit = std::max(
+              limit, initial_it->second.end_member_index);
+        }
+        return limit;
+      };
+
   auto update_committed_topology =
-      [this, &task_id](const rpc::RecoveryManifest &group_manifest) {
+      [this, &task_id, &committed_frontier_member_limit](
+          const rpc::RecoveryManifest &group_manifest) {
         if (!recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
                 recovery_frontier_planner_.get())) {
           UpdateManifestForTaskLocked(task_id, group_manifest, true);
@@ -1559,12 +1708,42 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
         }
 
         recovery_frontier_protection_manifests_[task_id].CopyFrom(group_manifest);
+        const uint32_t member_limit =
+            committed_frontier_member_limit(*group);
         for (const RecoveryFrontierMember &member : group->Members()) {
+          if (member.member_index >= member_limit) {
+            break;
+          }
           rpc::RecoveryManifest member_manifest =
               recovery_succession_internal::BuildFrontierMemberManifest(
                   group_manifest, member);
           UpdateManifestForTaskLocked(member.task_id, member_manifest, true);
         }
+      };
+
+  auto commit_initial_frontier_prefix_if_ready =
+      [this, &task_id](const rpc::RecoveryManifest &group_manifest) {
+        if (!recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
+                recovery_frontier_planner_.get()) ||
+            !group_manifest.frozen()) {
+          return true;
+        }
+
+        const auto initial_it =
+            adaptive_frontier_initial_append_batches_.find(task_id);
+        if (initial_it ==
+            adaptive_frontier_initial_append_batches_.end()) {
+          return true;
+        }
+
+        RecoveryFrontierGroup *group =
+            recovery_frontier_planner_->GetMutableGroup(task_id);
+        if (group == nullptr ||
+            !group->CommitAppend(initial_it->second)) {
+          return false;
+        }
+        adaptive_frontier_initial_append_batches_.erase(initial_it);
+        return true;
       };
 
 
@@ -1588,6 +1767,9 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
       return false;
     }
 
+    if (!commit_initial_frontier_prefix_if_ready(merged)) {
+      return false;
+    }
     update_committed_topology(merged);
 
     if (profiling_enabled_) {
@@ -1627,6 +1809,9 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
     }
   }
 
+  if (!commit_initial_frontier_prefix_if_ready(proposed)) {
+    return false;
+  }
   update_committed_topology(proposed);
 
   if (profiling_enabled_) {
@@ -1896,6 +2081,19 @@ bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
         if (group != nullptr && leader_it != task_states_.end() &&
             !leader_it->second.manifest.task_id().empty() &&
             membership->member_index < group->Members().size()) {
+          const auto protection_it =
+              recovery_frontier_protection_manifests_.find(
+                  membership->group_id);
+          const bool adaptive_topology_established =
+              protection_it !=
+                  recovery_frontier_protection_manifests_.end() &&
+              protection_it->second.frozen();
+          if (require_frontier_commit &&
+              adaptive_topology_established &&
+              !group->IsTaskCommitted(task_id)) {
+            return false;
+          }
+
           const RecoveryFrontierMember &member =
               group->Members()[membership->member_index];
           if (member.task_id == task_id) {
@@ -2408,19 +2606,56 @@ RecoverySuccessionManager::PrepareTaskReplay(
 
 
 bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
+    const TaskID &task_id,
     const rpc::RecoveryManifest &witness_manifest,
     rpc::RecoveryManifest *confirmed_manifest) {
-  if (confirmed_manifest == nullptr ||
+  if (task_id.IsNil() || confirmed_manifest == nullptr ||
       witness_manifest.task_id().size() != TaskID::Size() ||
       !witness_manifest.has_version() ||
       witness_manifest.tombstoned()) {
     return false;
   }
 
-  const TaskID task_id =
-      TaskID::FromBinary(witness_manifest.task_id());
-
   absl::MutexLock lock(&mutex_);
+
+  // Ordinary Succession stores one witness record per task. Adaptive Frontier
+  // Succession stores the shared topology under the group/leader TaskID. The
+  // holder imported the Frontier snapshot before the owner published that
+  // witness generation, so a matching witness-backed group manifest can be
+  // translated safely into the requested member's task-local manifest.
+  rpc::RecoveryManifest task_witness_manifest;
+  task_witness_manifest.CopyFrom(witness_manifest);
+
+  if (recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
+          recovery_frontier_planner_.get())) {
+    const auto membership = recovery_frontier_planner_->FindTask(task_id);
+    if (membership.has_value()) {
+      if (witness_manifest.task_id() != membership->group_id.Binary()) {
+        return false;
+      }
+
+      const RecoveryFrontierGroup *group =
+          recovery_frontier_planner_->GetGroup(membership->group_id);
+      if (group == nullptr ||
+          membership->member_index >= group->Members().size()) {
+        return false;
+      }
+
+      const RecoveryFrontierMember &member =
+          group->Members()[membership->member_index];
+      if (member.task_id != task_id) {
+        return false;
+      }
+
+      task_witness_manifest =
+          recovery_succession_internal::BuildFrontierMemberManifest(
+              witness_manifest, member);
+    } else if (witness_manifest.task_id() != task_id.Binary()) {
+      return false;
+    }
+  } else if (witness_manifest.task_id() != task_id.Binary()) {
+    return false;
+  }
 
   const auto task_it = task_states_.find(task_id);
 
@@ -2431,16 +2666,17 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
 
   TaskRecoveryState &state = task_it->second;
 
-  if (state.manifest.task_id() != witness_manifest.task_id() ||
+  if (state.manifest.task_id() != task_id.Binary() ||
+      task_witness_manifest.task_id() != task_id.Binary() ||
       state.manifest.tombstoned() ||
-      !ContainsWorker(witness_manifest, self_address_)) {
+      !ContainsWorker(task_witness_manifest, self_address_)) {
     return false;
   }
 
 
   if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
       !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
-    // Patch 4M-CERT witness set promotion.  Presence in a directly queried
+    // Patch 4M-CERT witness set promotion. Presence in a directly queried
     // witness's merged set is the durability proof; rank/prefix is irrelevant.
     const bool installed_provisional =
         !state.provisional_reservation_id.empty() &&
@@ -2453,7 +2689,7 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
 
     rpc::RecoveryManifest merged;
     merged.CopyFrom(state.manifest);
-    if (!MergeRecoveryHolderSets(witness_manifest, &merged) ||
+    if (!MergeRecoveryHolderSets(task_witness_manifest, &merged) ||
         !ContainsWorker(merged, self_address_)) {
       return false;
     }
@@ -2485,7 +2721,7 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
   }
 
   const int comparison =
-      CompareManifestVersions(witness_manifest, state.manifest);
+      CompareManifestVersions(task_witness_manifest, state.manifest);
 
   if (comparison < 0) {
     if (!state.manifest_committed) {
@@ -2497,12 +2733,13 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
   }
 
   if (comparison == 0 &&
-      witness_manifest.SerializeAsString() != state.manifest.SerializeAsString()) {
+      task_witness_manifest.SerializeAsString() !=
+          state.manifest.SerializeAsString()) {
     return false;
   }
 
   if (comparison > 0 || !state.manifest_committed) {
-    UpdateManifestForTaskLocked(task_id, witness_manifest, true);
+    UpdateManifestForTaskLocked(task_id, task_witness_manifest, true);
   }
 
   candidate_reports_sent_.insert(task_id);

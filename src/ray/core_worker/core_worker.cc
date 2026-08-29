@@ -6777,6 +6777,22 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     rpc::RecoveryManifest provisional_manifest;
     provisional_manifest.CopyFrom(latest_manifest);
 
+    // Adaptive Recovery Frontier witnesses store the shared topology under
+    // the group/leader TaskID, while replay requests remain task-centric.
+    // Query the shared witness key, but keep requested_task_id so the manager
+    // can translate the verified group manifest back to this member.
+    const TaskID requested_task_id = TaskID::FromBinary(request.task_id());
+    rpc::RecoveryManifest witness_lookup_manifest;
+    witness_lookup_manifest.CopyFrom(provisional_manifest);
+    std::string expected_witness_task_id = request.task_id();
+    const auto frontier_membership =
+        recovery_succession_manager_->GetRecoveryFrontierMembership(
+            requested_task_id);
+    if (frontier_membership.has_value()) {
+      expected_witness_task_id = frontier_membership->group_id.Binary();
+      witness_lookup_manifest.set_task_id(expected_witness_task_id);
+    }
+
     // TEST ONLY: deterministically make the holder's own witness
     // confirmation unavailable. The requester may still have obtained the
     // holder manifest from a real witness; this hook verifies that the
@@ -6798,14 +6814,16 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     }
 
     LookupRecoveryManifestFromWitnesses(
-        provisional_manifest,
+        witness_lookup_manifest,
         [this,
         request = std::move(request),
+        requested_task_id,
+        expected_witness_task_id = std::move(expected_witness_task_id),
         reply,
         send_reply_callback = std::move(send_reply_callback)](
             std::optional<rpc::RecoveryManifest> witness_manifest) mutable {
           if (!witness_manifest.has_value() ||
-              witness_manifest->task_id() != request.task_id() ||
+              witness_manifest->task_id() != expected_witness_task_id ||
               !witness_manifest->has_version()) {
             reply->set_result(
                 rpc::RecoverTaskOutputReply::TASK_NOT_FOUND);
@@ -6838,6 +6856,7 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
 
           if (!recovery_succession_manager_
                   ->ConfirmProvisionalHolderFromWitness(
+                      requested_task_id,
                       witness_manifest.value(),
                       &confirmed_manifest)) {
             reply->mutable_latest_manifest()->CopyFrom(

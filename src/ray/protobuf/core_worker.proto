@@ -18,6 +18,7 @@ package ray.rpc;
 
 import "src/ray/protobuf/common.proto";
 import "src/ray/protobuf/pubsub.proto";
+import "src/ray/protobuf/frontier/recovery_frontier.proto";
 
 message ActiveObjectIDs {
   repeated bytes object_ids = 1;
@@ -530,9 +531,16 @@ message InstallRecoveryHolderBatchReply {
 
 message CommitRecoveryManifestRequest {
   RecoveryManifest manifest = 1;
+
+  // Optional adaptive Recovery Frontier recipe suffix. When present, the
+  // manifest carries the already-committed shared Succession topology and the
+  // append carries only new replay recipes for that topology.
+  RecoveryFrontierAppend frontier_append = 2;
 }
 
-message CommitRecoveryManifestReply {}
+message CommitRecoveryManifestReply {
+  bool applied = 1;
+}
 
 message RecoverTaskOutputRequest {
   bytes task_id = 1;
