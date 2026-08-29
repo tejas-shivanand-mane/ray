@@ -102,14 +102,18 @@ class RecoveryFrontierGroup {
 
   /// Stage the next contiguous append. Only one append may be in flight.
   /// max_batch_members=0 means stage every currently uncommitted member.
+  /// After AbortAppend(), the exact aborted generation/boundary is retried
+  /// before any members that joined while the failed publication was in flight.
   std::optional<RecoveryFrontierAppendBatch> StageAppend(uint32_t max_batch_members = 0);
 
   /// Commit exactly the currently staged append after backend durability ACKs.
   /// Returns false for stale/out-of-order ACKs and leaves state unchanged.
   bool CommitAppend(const RecoveryFrontierAppendBatch &batch);
 
-  /// Abort exactly the currently staged append. Members remain pending and may
-  /// be staged again with a new generation.
+  /// Abort exactly the currently staged append. Members remain pending, but the
+  /// failed generation's exact [begin,end) boundary is retained. The next
+  /// StageAppend() therefore retries the same recipes under the same generation
+  /// before later members can advance the Frontier.
   bool AbortAppend(const RecoveryFrontierAppendBatch &batch);
 
   /// Import an append that another worker has already made durable. This is the
