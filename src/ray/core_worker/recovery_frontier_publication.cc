@@ -304,6 +304,14 @@ void CoreWorker::PublishRecoveryFrontierGroup(
           RAY_CHECK(committed)
               << "Stale or mismatched Recovery Frontier ACK for generation "
               << batch->generation << " group " << group_id;
+
+          RAY_LOG(INFO)
+              .WithField(group_id)
+              << "Committed Recovery Frontier append generation "
+              << batch->generation << " members=["
+              << batch->begin_member_index << ","
+              << batch->end_member_index << ") on all fixed-R holders";
+
           completion->set_value(true);
         },
         /*task_spec=*/nullptr,
