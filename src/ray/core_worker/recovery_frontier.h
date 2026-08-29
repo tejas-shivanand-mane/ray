@@ -111,6 +111,17 @@ class RecoveryFrontierGroup {
   /// be staged again with a new generation.
   bool AbortAppend(const RecoveryFrontierAppendBatch &batch);
 
+  /// Import an append that another worker has already made durable. This is the
+  /// holder-side counterpart to StageAppend()+CommitAppend(): it validates the
+  /// same contiguous generation/member invariants, installs the exact replay
+  /// recipes, and advances only the acknowledged prefix. Duplicate delivery of
+  /// the already-committed append is idempotent when the stored records match.
+  ///
+  /// This primitive is backend-neutral. Fixed-R holders and adaptive
+  /// Succession holders can therefore store the same Frontier wire record while
+  /// keeping protection topology decisions outside the planner.
+  bool ApplyCommittedAppend(const rpc::RecoveryFrontierAppend &append);
+
   bool IsTaskCommitted(const TaskID &task_id) const;
 
   /// Look up a member by its producer TaskID.
@@ -159,6 +170,12 @@ class RecoveryFrontierPlanner {
 
   RecoveryFrontierMembership RegisterTask(
       std::shared_ptr<const rpc::TaskSpec> task_spec);
+
+  /// Holder-side import for an append that is already durable according to the
+  /// selected protection backend. Unlike RegisterTask(), this never opens or
+  /// extends the owner's submission-order group; the transmitted group ID and
+  /// membership coordinates are authoritative.
+  bool ApplyCommittedAppend(const rpc::RecoveryFrontierAppend &append);
 
   std::optional<RecoveryFrontierMembership> FindTask(const TaskID &task_id) const;
 
