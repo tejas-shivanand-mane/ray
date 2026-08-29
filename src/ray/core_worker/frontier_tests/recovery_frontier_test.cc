@@ -26,6 +26,33 @@ rpc::TaskSpec MakeTask(char byte, int64_t num_returns = 1) {
   return spec;
 }
 
+rpc::RecoveryFrontierAppend MakeCommittedAppend(
+    const rpc::TaskSpec &first,
+    const rpc::TaskSpec &second) {
+  rpc::RecoveryFrontierAppend append;
+  append.set_group_id(first.task_id());
+  append.set_base_generation(0);
+  append.set_generation(1);
+  append.set_begin_member_index(0);
+  append.set_end_member_index(2);
+
+  auto *first_record = append.add_members();
+  first_record->set_task_id(first.task_id());
+  first_record->set_member_index(0);
+  first_record->set_first_group_return_index(0);
+  first_record->set_num_returns(static_cast<uint32_t>(first.num_returns()));
+  first_record->mutable_task_spec()->CopyFrom(first);
+
+  auto *second_record = append.add_members();
+  second_record->set_task_id(second.task_id());
+  second_record->set_member_index(1);
+  second_record->set_first_group_return_index(
+      static_cast<uint32_t>(first.num_returns()));
+  second_record->set_num_returns(static_cast<uint32_t>(second.num_returns()));
+  second_record->mutable_task_spec()->CopyFrom(second);
+  return append;
+}
+
 TEST(RecoveryFrontierTest, SharedRegistrationReusesCleanImmutableTaskSpec) {
   RecoveryFrontierPlanner planner(/*group_size=*/32);
   auto task = std::make_shared<rpc::TaskSpec>(MakeTask('s'));
@@ -265,6 +292,56 @@ TEST(RecoveryFrontierTest, GroupReturnIndexSelectsCommittedOriginalTaskAndReturn
                                           &local_return));
   EXPECT_EQ(replay.task_id(), second.task_id());
   EXPECT_EQ(local_return, 1U);
+}
+
+TEST(RecoveryFrontierTest, HolderImportPreservesCommittedGroupReplayMapping) {
+  RecoveryFrontierPlanner holder(/*group_size=*/4);
+  const rpc::TaskSpec first = MakeTask('a', /*num_returns=*/2);
+  const rpc::TaskSpec second = MakeTask('b', /*num_returns=*/3);
+  const rpc::RecoveryFrontierAppend append = MakeCommittedAppend(first, second);
+
+  ASSERT_TRUE(holder.ApplyCommittedAppend(append));
+  const TaskID group_id = TaskID::FromBinary(first.task_id());
+  const RecoveryFrontierGroup *group = holder.GetGroup(group_id);
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(group->Generation(), 1U);
+  EXPECT_EQ(group->CommittedMemberCount(), 2U);
+  EXPECT_TRUE(group->IsTaskCommitted(TaskID::FromBinary(first.task_id())));
+  EXPECT_TRUE(group->IsTaskCommitted(TaskID::FromBinary(second.task_id())));
+
+  rpc::TaskSpec replay;
+  uint32_t local_return = 99;
+  ASSERT_TRUE(group->ExtractTaskForReturn(/*group_return_index=*/3,
+                                          &replay,
+                                          &local_return));
+  EXPECT_EQ(replay.task_id(), second.task_id());
+  EXPECT_EQ(local_return, 1U);
+
+  // Retry of the exact already-durable append is idempotent.
+  EXPECT_TRUE(holder.ApplyCommittedAppend(append));
+  EXPECT_EQ(group->Generation(), 1U);
+  EXPECT_EQ(group->CommittedMemberCount(), 2U);
+}
+
+TEST(RecoveryFrontierTest, HolderImportRejectsConflictingDuplicateAndGenerationGap) {
+  RecoveryFrontierPlanner holder(/*group_size=*/4);
+  const rpc::TaskSpec first = MakeTask('a');
+  const rpc::TaskSpec second = MakeTask('b');
+  rpc::RecoveryFrontierAppend append = MakeCommittedAppend(first, second);
+  ASSERT_TRUE(holder.ApplyCommittedAppend(append));
+
+  rpc::RecoveryFrontierAppend conflicting;
+  conflicting.CopyFrom(append);
+  conflicting.mutable_members(1)->mutable_task_spec()->set_max_retries(7);
+  EXPECT_FALSE(holder.ApplyCommittedAppend(conflicting));
+
+  RecoveryFrontierPlanner fresh_holder(/*group_size=*/4);
+  rpc::RecoveryFrontierAppend gap;
+  gap.CopyFrom(append);
+  gap.set_base_generation(1);
+  gap.set_generation(2);
+  EXPECT_FALSE(fresh_holder.ApplyCommittedAppend(gap));
+  EXPECT_EQ(fresh_holder.GetGroup(TaskID::FromBinary(first.task_id())), nullptr);
 }
 
 TEST(RecoveryFrontierTest, StaleOrAbortedAppendCannotAdvancePrefix) {
