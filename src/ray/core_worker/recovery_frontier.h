@@ -22,6 +22,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "ray/common/id.h"
 #include "src/ray/protobuf/common.pb.h"
+#include "src/ray/protobuf/frontier/recovery_frontier.pb.h"
 
 namespace ray::core {
 
