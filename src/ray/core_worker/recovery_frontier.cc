@@ -139,17 +139,35 @@ std::optional<RecoveryFrontierAppendBatch> RecoveryFrontierGroup::StageAppend(
     return std::nullopt;
   }
 
-  const uint32_t pending = MemberCount() - committed_member_count_;
-  const uint32_t batch_size =
-      max_batch_members == 0 ? pending : std::min(max_batch_members, pending);
+  // AbortAppend deliberately retains the failed generation's coordinates.
+  // If such a retry is pending, it takes precedence over newly registered
+  // members and over max_batch_members: retry means byte-for-byte the same
+  // contiguous recipe slice under the same generation number.
+  if (in_flight_generation_ == 0) {
+    const uint32_t pending = MemberCount() - committed_member_count_;
+    const uint32_t batch_size =
+        max_batch_members == 0 ? pending : std::min(max_batch_members, pending);
+    RAY_CHECK_GT(batch_size, 0U);
+
+    in_flight_generation_ = generation_ + 1;
+    in_flight_begin_ = committed_member_count_;
+    in_flight_end_ = committed_member_count_ + batch_size;
+  } else {
+    RAY_CHECK_EQ(in_flight_generation_, generation_ + 1);
+    RAY_CHECK_EQ(in_flight_begin_, committed_member_count_);
+    RAY_CHECK_GT(in_flight_end_, in_flight_begin_);
+    RAY_CHECK_LE(in_flight_end_, MemberCount());
+  }
+
+  const uint32_t batch_size = in_flight_end_ - in_flight_begin_;
   RAY_CHECK_GT(batch_size, 0U);
 
   RecoveryFrontierAppendBatch batch;
   batch.group_id = group_id_;
   batch.base_generation = generation_;
-  batch.generation = generation_ + 1;
-  batch.begin_member_index = committed_member_count_;
-  batch.end_member_index = committed_member_count_ + batch_size;
+  batch.generation = in_flight_generation_;
+  batch.begin_member_index = in_flight_begin_;
+  batch.end_member_index = in_flight_end_;
   batch.members.reserve(batch_size);
 
   // RecoveryFrontierMember is intentionally cheap to copy: the exact replay
@@ -160,9 +178,6 @@ std::optional<RecoveryFrontierAppendBatch> RecoveryFrontierGroup::StageAppend(
   }
 
   append_in_flight_ = true;
-  in_flight_generation_ = batch.generation;
-  in_flight_begin_ = batch.begin_member_index;
-  in_flight_end_ = batch.end_member_index;
   return batch;
 }
 
@@ -197,10 +212,11 @@ bool RecoveryFrontierGroup::AbortAppend(const RecoveryFrontierAppendBatch &batch
     return false;
   }
 
+  // Keep in_flight_generation_/begin_/end_ as a retry reservation. New tasks
+  // may still join the open group behind this boundary, but the next
+  // StageAppend must reproduce exactly this failed generation before any later
+  // member can be included in a subsequent generation.
   append_in_flight_ = false;
-  in_flight_generation_ = 0;
-  in_flight_begin_ = 0;
-  in_flight_end_ = 0;
   return true;
 }
 
