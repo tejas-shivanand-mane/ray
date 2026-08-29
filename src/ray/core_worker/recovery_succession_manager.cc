@@ -1710,22 +1710,26 @@ bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
 
   if (known_object && task_it != task_states_.end() &&
       !task_it->second.manifest.task_id().empty()) {
-    // Recovery Frontier metadata is an acknowledged-prefix capability.
-  // The owner may construct task-local recovery state before the fixed-R
-  // append completes, but that state must remain invisible to exporters
-  // until the member's replay recipe is committed on every group holder.
-  if (require_frontier_commit &&
-      recovery_frontier_planner_ != nullptr &&
-      recovery_frontier_planner_->GroupSize() > 1) {
-    const auto membership = recovery_frontier_planner_->FindTask(task_id);
-    if (membership.has_value()) {
-      const RecoveryFrontierGroup *group =
-          recovery_frontier_planner_->GetGroup(membership->group_id);
-      if (group == nullptr || !group->IsTaskCommitted(task_id)) {
-        return false;
+    // Fixed-R Recovery Frontier metadata is an acknowledged-prefix capability.
+    // The owner may construct task-local recovery state before the fixed-R
+    // append completes, but that state must remain invisible to exporters
+    // until the member's replay recipe is committed on every fixed-R holder.
+    // Adaptive Succession is different: candidate formation requires metadata
+    // to reach the first borrower before any non-owner holder can be admitted.
+    // Keep this visibility gate strictly scoped to the frozen Fixed-R backend.
+    if (require_frontier_commit &&
+        RayConfig::instance().enable_recovery_witness_holder_baseline() &&
+        recovery_frontier_planner_ != nullptr &&
+        recovery_frontier_planner_->GroupSize() > 1) {
+      const auto membership = recovery_frontier_planner_->FindTask(task_id);
+      if (membership.has_value()) {
+        const RecoveryFrontierGroup *group =
+            recovery_frontier_planner_->GetGroup(membership->group_id);
+        if (group == nullptr || !group->IsTaskCommitted(task_id)) {
+          return false;
+        }
       }
     }
-  }
 
     if (metadata != nullptr) {
       metadata->Clear();
@@ -2895,8 +2899,6 @@ void RecoverySuccessionManager::RecordCandidateRpcLatency(
   ++profile_.candidate_rpc_physical_rpcs_completed;
   profile_.candidate_rpc_time_ns += latency_ns;
 }
-
-
 
 
 
