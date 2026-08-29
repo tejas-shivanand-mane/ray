@@ -63,7 +63,6 @@ class RecoverySuccessionManager {
     bool candidate_already_stores_task_spec = false;
   };
 
-
   struct RecoverySuccessionProfile {
     uint64_t candidate_reports_received = 0;
     uint64_t candidate_reports_accepted = 0;
@@ -155,7 +154,6 @@ class RecoverySuccessionManager {
     uint64_t register_owned_task_count = 0;
     uint64_t register_owned_task_time_ns = 0;
 
-
     // Patch 4G: synchronous hot-path costs. These are CPU/wall-clock durations
     // spent inside the calling thread, not asynchronous control-RPC latency.
     uint64_t recovery_metadata_lookup_calls = 0;
@@ -185,11 +183,7 @@ class RecoverySuccessionManager {
     uint64_t candidate_rpc_physical_rpcs_completed = 0;
     uint64_t candidate_rpc_request_bytes_sent = 0;
     uint64_t candidate_rpc_time_ns = 0;
-
-
-
   };
-
 
   RecoverySuccessionProfile GetProfileSnapshot() const;
 
@@ -217,12 +211,10 @@ class RecoverySuccessionManager {
 
   void RecordHolderAdmissionLatency(uint64_t latency_ns);
 
-
   void RecordTaskArgumentMetadataLatency(uint64_t latency_ns);
 
-  void RecordInitialManifestBuild(
-      uint64_t latency_ns,
-      uint64_t manifest_bytes);
+  void RecordInitialManifestBuild(uint64_t latency_ns,
+                                  uint64_t manifest_bytes);
 
   void RecordWitnessSelectionLatency(uint64_t latency_ns);
 
@@ -232,14 +224,11 @@ class RecoverySuccessionManager {
 
   void RecordRegisterOwnedTaskLatency(uint64_t latency_ns);
 
-
   // Patch 4G hot-path profiling.
   void RecordEnsureTaskArgumentsLatency(uint64_t latency_ns);
   void RecordCandidateQueueLatency(uint64_t latency_ns);
   void RecordCandidateRpcSent(uint64_t logical_reports, uint64_t request_bytes);
   void RecordCandidateRpcLatency(uint64_t logical_reports, uint64_t latency_ns);
-
-
 
   explicit RecoverySuccessionManager(rpc::Address self_address);
 
@@ -294,11 +283,11 @@ class RecoverySuccessionManager {
   /// backend without coupling the planner to Baseline or Succession RPCs.
   std::optional<RecoveryFrontierAppendBatch> StageRecoveryFrontierAppend(
       const TaskID &group_id, uint32_t max_batch_members = 0);
+
   /// True while at least one member of the group remains outside the
   /// acknowledged durable prefix. Used by synchronous object export to
   /// wait behind an append already being published by another thread.
-  bool RecoveryFrontierGroupHasUncommittedMembers(
-      const TaskID &group_id) const;
+  bool RecoveryFrontierGroupHasUncommittedMembers(const TaskID &group_id) const;
 
   bool CommitRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
   bool AbortRecoveryFrontierAppend(const RecoveryFrontierAppendBatch &batch);
@@ -394,7 +383,7 @@ class RecoverySuccessionManager {
   bool CommitHolderAdmission(const std::string &reservation_id,
                              rpc::RecoveryManifest *committed_manifest);
 
-  /// Removes a failed provisional reservation.  Patch 4D removes the
+  /// Removes a failed provisional reservation. Patch 4D removes the
   /// speculative suffix; Patch 4M-CERT removes only the failed independent
   /// certificate reservation.
   void AbortHolderAdmission(const std::string &reservation_id);
@@ -450,8 +439,6 @@ class RecoverySuccessionManager {
     WRONG_HOLDER,
   };
 
-
-
   bool GetBorrowedObjectRecoveryPlan(const ObjectID &object_id,
                                      BorrowedObjectRecoveryPlan *plan) const;
 
@@ -473,12 +460,11 @@ class RecoverySuccessionManager {
       const rpc::RecoveryManifest &witness_manifest,
       rpc::RecoveryManifest *confirmed_manifest);
 
-
-
   void UpdateBorrowedObjectManifest(const ObjectID &object_id,
                                     const rpc::RecoveryManifest &manifest);
 
-  std::optional<rpc::RecoveryManifest> BuildTombstoneForTask(const TaskID &task_id) const;
+  std::optional<rpc::RecoveryManifest> BuildTombstoneForTask(
+      const TaskID &task_id) const;
 
   /// Applies a tombstone and removes retained lineage and object metadata.
   bool ApplyRecoveryTombstone(const rpc::RecoveryManifest &tombstone);
@@ -494,7 +480,6 @@ class RecoverySuccessionManager {
   bool HasConfirmedHolderResponsibilities() const;
 
  private:
-
   void EraseHolderReservationLocked(const std::string &reservation_id)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
@@ -564,7 +549,7 @@ class RecoverySuccessionManager {
     rpc::Address candidate_address;
     rpc::RecoveryManifest proposed_manifest;
     // Patch 4M-CERT: in certificate mode this is an owner-issued admission
-    // slot/token.  The committed recovery rank is derived later from the merged set.
+    // slot/token. The committed recovery rank is derived later from the merged set.
     uint32_t proposed_rank = 0;
   };
 
@@ -581,23 +566,23 @@ class RecoverySuccessionManager {
       nullptr};
 
   struct ProcessRecoveryManagerRegistration {
-    explicit ProcessRecoveryManagerRegistration(RecoverySuccessionManager *manager)
-        : manager(manager) {
-      process_recovery_manager_.store(manager, std::memory_order_release);
+    explicit ProcessRecoveryManagerRegistration(
+        RecoverySuccessionManager *registered_manager)
+        : registered_manager(registered_manager) {
+      process_recovery_manager_.store(registered_manager, std::memory_order_release);
     }
 
     ~ProcessRecoveryManagerRegistration() {
-      RecoverySuccessionManager *expected = manager;
+      RecoverySuccessionManager *expected = registered_manager;
       process_recovery_manager_.compare_exchange_strong(
           expected, nullptr, std::memory_order_acq_rel);
     }
 
-    RecoverySuccessionManager *manager;
+    RecoverySuccessionManager *registered_manager;
   };
 
   /// Address of this CoreWorker.
   rpc::Address self_address_;
-
 
   const bool profiling_enabled_;
 
@@ -644,7 +629,6 @@ class RecoverySuccessionManager {
   /// or its tombstone is applied.
   absl::flat_hash_map<TaskID, absl::flat_hash_set<ObjectID>> task_object_ids_
       ABSL_GUARDED_BY(mutex_);
-
 
   /// Provisional owner-side holder reservations.
   absl::flat_hash_map<std::string, HolderReservation> holder_reservations_
