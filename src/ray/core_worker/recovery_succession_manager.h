@@ -566,19 +566,18 @@ class RecoverySuccessionManager {
       nullptr};
 
   struct ProcessRecoveryManagerRegistration {
-    explicit ProcessRecoveryManagerRegistration(
-        RecoverySuccessionManager *registered_manager)
-        : registered_manager(registered_manager) {
-      process_recovery_manager_.store(registered_manager, std::memory_order_release);
+    explicit ProcessRecoveryManagerRegistration(RecoverySuccessionManager *manager_ptr)
+        : registered_manager_(manager_ptr) {
+      process_recovery_manager_.store(manager_ptr, std::memory_order_release);
     }
 
     ~ProcessRecoveryManagerRegistration() {
-      RecoverySuccessionManager *expected = registered_manager;
+      RecoverySuccessionManager *expected = registered_manager_;
       process_recovery_manager_.compare_exchange_strong(
           expected, nullptr, std::memory_order_acq_rel);
     }
 
-    RecoverySuccessionManager *registered_manager;
+    RecoverySuccessionManager *registered_manager_;
   };
 
   /// Address of this CoreWorker.
