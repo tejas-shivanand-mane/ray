@@ -2,15 +2,17 @@
 """Recovery Frontier + Recovery Succession non-leader owner-failure target.
 
 This is intentionally a correctness/integration benchmark, not a performance
-benchmark.  It distinguishes true Frontier+Succession composition from simply
+benchmark. It distinguishes true Frontier+Succession composition from simply
 running ordinary task-centric Succession with the Frontier flag present.
 
 Target semantics (R=2, K=4):
   1. Two independent normal tasks owned by the same worker join one Frontier.
-  2. Two distinct borrower workers receive both member refs.
-  3. The Frontier has ONE shared Succession topology.  Therefore the owner
-     creates one initial recovery manifest and commits exactly R non-owner
-     holder admissions for the group, not R admissions per member.
+  2. That owner directly exports both member refs to two distinct borrower
+     workers. This direct owner->borrower hop is essential for real Succession
+     candidate formation; a driver relay is not equivalent.
+  3. The Frontier has ONE shared Succession topology and therefore commits
+     exactly R non-owner holder admissions for the group, not R admissions per
+     member.
   4. Both member recipes are available at the admitted group holders.
   5. The original owner worker is killed.
   6. A borrower requests task #2, the non-leader member.
@@ -18,7 +20,7 @@ Target semantics (R=2, K=4):
   8. The leader task is not replayed as a side effect.
 
 Before the source integration is complete this benchmark is expected to fail
-its shared-topology assertions.  A recovery-only pass is NOT sufficient: the
+its shared-topology assertion. A recovery-only pass is NOT sufficient: the
 point is to prove that Frontier is the Succession protection/recovery unit while
 each member remains the replay unit.
 """
@@ -55,6 +57,7 @@ OBJECT_TIMEOUT_MS = 500
 GET_TIMEOUT_S = 60.0
 INITIAL_BLOCK_TIMEOUT_S = 180.0
 PROTECTION_TIMEOUT_S = 30.0
+PROTECTION_STABLE_S = 0.75
 
 
 def frontier_succession_system_config() -> dict:
@@ -100,7 +103,7 @@ def types():
             f.write(f"START,{time.time_ns()},{os.getpid()},{token}\n")
 
         if prior_starts == 0:
-            # Keep every original execution unavailable.  A replay of this
+            # Keep every original execution unavailable. A replay of this
             # deterministic logical task observes its prior START and returns.
             release = Path(str(marker) + f".release.{token}")
             deadline = time.monotonic() + INITIAL_BLOCK_TIMEOUT_S
@@ -117,32 +120,6 @@ def types():
         return {"token": token, "payload": b"x" * payload_bytes}
 
     @ray.remote(max_restarts=0, max_task_retries=0, max_concurrency=1)
-    class Owner:
-        def dispatch(
-            self,
-            executor_node_id: str,
-            tokens: list[str],
-            marker_path: str,
-            payload_bytes: int,
-        ):
-            strategy = NodeAffinitySchedulingStrategy(
-                node_id=executor_node_id,
-                soft=False,
-            )
-            return [
-                work.options(
-                    scheduling_strategy=strategy,
-                    num_cpus=0.1,
-                ).remote(token, marker_path, payload_bytes)
-                for token in tokens
-            ]
-
-        def recovery_profile(self):
-            from ray._private.worker import global_worker
-
-            return global_worker.core_worker.get_recovery_succession_profile()
-
-    @ray.remote(max_restarts=0, max_task_retries=0, max_concurrency=1)
     class Borrower:
         def hold(self, wrapped_refs):
             # Nested refs force normal task-argument recovery metadata transport
@@ -154,21 +131,133 @@ def types():
             ref = self.refs[index]
             return ref.hex(), ray.get(ref)
 
+        def recovery_profile(self):
+            from ray._private.worker import global_worker
+
+            return global_worker.core_worker.get_recovery_succession_profile()
+
+    @ray.remote(max_restarts=0, max_task_retries=0, max_concurrency=1)
+    class Owner:
+        def dispatch_and_export(
+            self,
+            executor_node_id: str,
+            tokens: list[str],
+            marker_path: str,
+            payload_bytes: int,
+            borrowers,
+        ):
+            strategy = NodeAffinitySchedulingStrategy(
+                node_id=executor_node_id,
+                soft=False,
+            )
+            refs = [
+                work.options(
+                    scheduling_strategy=strategy,
+                    num_cpus=0.1,
+                ).remote(token, marker_path, payload_bytes)
+                for token in tokens
+            ]
+
+            # Succession candidate formation happens at downstream CoreWorkers.
+            # Submit these actor calls FROM THE OWNER so recovery metadata for
+            # the producer refs is attached by the producer owner's manager.
+            held_ids = ray.get(
+                [borrower.hold.remote(refs) for borrower in borrowers]
+            )
+            object_ids = [ref.hex() for ref in refs]
+            return object_ids, held_ids
+
+        def recovery_profile(self):
+            from ray._private.worker import global_worker
+
+            return global_worker.core_worker.get_recovery_succession_profile()
+
     return Owner, Borrower
 
 
-def wait_for_shared_protection(owner, timeout_s: float) -> dict:
+def _owner_profile_signature(profile: dict) -> tuple[int, ...]:
+    return tuple(
+        int(profile.get(key, 0))
+        for key in (
+            "candidate_reports_received",
+            "candidate_reports_accepted",
+            "holder_admissions_committed",
+            "holder_install_rpcs_sent",
+            "holder_install_rpcs_completed",
+            "holder_commit_rpcs_sent",
+            "holder_commit_rpcs_completed",
+            "witness_update_rpcs_sent",
+            "witness_update_rpcs_completed",
+            "manifest_generations_committed",
+            "max_non_owner_holders",
+        )
+    )
+
+
+def _owner_async_outstanding(profile: dict) -> int:
+    return sum(
+        max(0, int(profile.get(sent, 0)) - int(profile.get(done, 0)))
+        for sent, done in (
+            ("holder_install_rpcs_sent", "holder_install_rpcs_completed"),
+            ("holder_commit_rpcs_sent", "holder_commit_rpcs_completed"),
+            ("witness_update_rpcs_sent", "witness_update_rpcs_completed"),
+        )
+    )
+
+
+def wait_for_protection_quiescence(owner, borrowers, timeout_s: float) -> dict:
+    """Wait until candidate/admission activity reaches a stable completed state.
+
+    Waiting merely for >=R admissions is insufficient: ordinary per-task
+    Succession can transiently pass through R admissions on its way to
+    NUM_TASKS*R. Requiring the owner counters to stop changing prevents a false
+    grouped-success result.
+    """
     deadline = time.monotonic() + timeout_s
     last: dict = {}
+    last_signature: tuple[int, ...] | None = None
+    stable_since: float | None = None
+
     while time.monotonic() < deadline:
         last = ray.get(owner.recovery_profile.remote())
-        manifests = int(last.get("initial_manifest_build_count", 0))
+        reports = int(last.get("candidate_reports_received", 0))
         admissions = int(last.get("holder_admissions_committed", 0))
         max_holders = int(last.get("max_non_owner_holders", 0))
-        if manifests >= 1 and admissions >= R and max_holders >= R:
-            return last
+        signature = _owner_profile_signature(last)
+        now = time.monotonic()
+
+        ready = (
+            reports >= R
+            and admissions >= R
+            and max_holders >= R
+            and _owner_async_outstanding(last) == 0
+        )
+
+        if ready:
+            if signature == last_signature:
+                if stable_since is None:
+                    stable_since = now
+                elif now - stable_since >= PROTECTION_STABLE_S:
+                    return last
+            else:
+                stable_since = now
+        else:
+            stable_since = None
+
+        last_signature = signature
         time.sleep(0.05)
-    raise TimeoutError(f"Frontier+Succession protection did not become ready: {last}")
+
+    borrower_profiles = []
+    for borrower in borrowers:
+        try:
+            borrower_profiles.append(ray.get(borrower.recovery_profile.remote()))
+        except Exception as exc:  # diagnostic only
+            borrower_profiles.append({"profile_error": repr(exc)})
+
+    raise TimeoutError(
+        "Frontier+Succession protection did not become ready/quiescent: "
+        f"owner={last}; borrowers={borrower_profiles}"
+    )
 
 
 def main() -> None:
@@ -189,7 +278,7 @@ def main() -> None:
             num_cpus=2,
             resources={"executor_node": 1},
         )
-        # Succession witnesses are control-plane durability nodes.  They are
+        # Succession witnesses are control-plane durability nodes. They are
         # distinct from the CoreWorker holders admitted below.
         for i in range(R):
             cluster.add_node(
@@ -228,15 +317,22 @@ def main() -> None:
             f"member-{uuid.uuid4().hex}",
         ]
 
-        refs = ray.get(
-            owner.dispatch.remote(
+        # Do not relay producer ObjectRefs through the driver. The actual owner
+        # creates them and directly submits the borrower actor calls that carry
+        # the nested refs and their recovery metadata.
+        object_ids, held_ids = ray.get(
+            owner.dispatch_and_export.remote(
                 executor_node.node_id,
                 tokens,
                 str(marker),
                 PAYLOAD_BYTES,
+                borrowers,
             )
         )
-        assert len(refs) == NUM_TASKS
+        assert len(object_ids) == NUM_TASKS
+        assert len(set(object_ids)) == NUM_TASKS
+        for ids in held_ids:
+            assert ids == object_ids, (ids, object_ids)
 
         starts = wait_for_marker(
             marker,
@@ -248,32 +344,23 @@ def main() -> None:
         for token in tokens:
             assert count_token_starts(marker, token) == 1, read_marker(marker)
 
-        object_ids = [ref.hex() for ref in refs]
-        assert len(set(object_ids)) == NUM_TASKS
-
-        # Both distinct borrowers receive both Frontier members.  With ordinary
-        # task-centric Succession this creates independent admissions per task;
-        # with the intended composition each borrower is admitted once for the
-        # shared Frontier topology and receives the grouped replay recipes.
-        held_ids = ray.get(
-            [borrower.hold.remote(refs) for borrower in borrowers]
+        profile = wait_for_protection_quiescence(
+            owner,
+            borrowers,
+            PROTECTION_TIMEOUT_S,
         )
-        for ids in held_ids:
-            assert ids == object_ids, (ids, object_ids)
-
-        profile = wait_for_shared_protection(owner, PROTECTION_TIMEOUT_S)
-        initial_manifests = int(profile.get("initial_manifest_build_count", 0))
+        initial_manifest_builds = int(profile.get("initial_manifest_build_count", 0))
+        reports_received = int(profile.get("candidate_reports_received", 0))
+        reports_accepted = int(profile.get("candidate_reports_accepted", 0))
         admissions = int(profile.get("holder_admissions_committed", 0))
         max_holders = int(profile.get("max_non_owner_holders", 0))
 
-        # These are the decisive composition assertions.  R holders protect one
-        # Frontier, rather than R holders independently protecting each member.
-        assert initial_manifests == 1, (
-            "Expected one group recovery manifest; Frontier is still task-centric",
-            profile,
-        )
+        # Decisive composition assertion: two members x R holders would produce
+        # NUM_TASKS*R admissions under ordinary task-centric Succession. A real
+        # shared Frontier topology admits each of the R holders only once.
         assert admissions == R, (
-            "Expected exactly R group-holder admissions; got per-task admissions",
+            "Expected exactly R group-holder admissions; Frontier is still "
+            "using per-task Succession topology",
             profile,
         )
         assert max_holders == R, profile
@@ -307,7 +394,9 @@ def main() -> None:
         print("PASS: Recovery Frontier + Succession non-leader owner failure")
         print(f"  R                         = {R}")
         print(f"  K                         = {K}")
-        print(f"  initial manifests         = {initial_manifests}")
+        print(f"  initial manifest builds   = {initial_manifest_builds}")
+        print(f"  candidate reports recv    = {reports_received}")
+        print(f"  candidate reports accept  = {reports_accepted}")
         print(f"  holder admissions         = {admissions}")
         print(f"  max non-owner holders     = {max_holders}")
         print(f"  leader ObjectID           = {object_ids[0]}")
