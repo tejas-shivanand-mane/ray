@@ -2,19 +2,19 @@
 """Apply the Recovery Succession owner-lifetime fast-path optimization.
 
 This is intentionally a source patcher rather than a benchmark-only switch.
-It makes the production CoreWorker Recovery Succession path:
+It makes the production adaptive Recovery Succession path:
 
 1. Always use the existing TaskManager recovery pin as the sole dormant
    TaskSpec retention source.
-2. Keep the legacy manager-owned TaskSpec fallback for direct manager tests and
+2. Keep the manager-owned TaskSpec fallback for direct manager tests and
    non-CoreWorker callers.
-3. Replace OwnerRetainedTaskState.live_return_ids (a flat_hash_set<ObjectID>)
-   with a uint32_t remaining_live_returns counter.
-4. Make RecoveryFrontierEnabled() lock-free because the planner pointer is
-   fixed after RecoverySuccessionManager construction.
+3. Use a uint32_t remaining_live_returns counter instead of allocating/hashing
+   a flat_hash_set<ObjectID> for every adaptive-Succession owner task.
 
-Fixed-R semantics are not changed: it already pins TaskManager and continues to
-use the same witness-holder baseline storage/recovery protocol.
+The Fixed-R witness-holder baseline deliberately keeps its existing
+live_return_ids set path. This keeps the first optimization pass scoped to
+Succession so later Fixed-R comparisons are not silently improved by the same
+lifetime bookkeeping change.
 
 Usage from the Ray repository root:
 
@@ -77,7 +77,7 @@ def main() -> None:
 ''',
         ),
         (
-            "OwnerRetainedTaskState counter",
+            "OwnerRetainedTaskState adaptive counter",
             '''  struct OwnerRetainedTaskState {
     // Legacy Patch-4L mode stores the duplicate TaskSpec here. In 4N-PIN mode
     // this remains empty because TaskManager owns the sole dormant recipe.
@@ -87,36 +87,27 @@ def main() -> None:
   };
 ''',
             '''  struct OwnerRetainedTaskState {
-    // Production CoreWorker mode leaves this empty because TaskManager owns the
-    // sole dormant recipe. Direct manager tests/non-CoreWorker callers may use
-    // this compatibility fallback.
+    // Production adaptive Succession leaves this empty because TaskManager owns
+    // the sole dormant recipe. Direct manager tests/non-CoreWorker callers may
+    // use this compatibility fallback.
     rpc::TaskSpec task_spec;
     uint64_t task_spec_bytes = 0;
 
-    // Static owner returns have one deletion callback each, so a count is
-    // sufficient. Avoid allocating/hashing an ObjectID set for every task.
+    // Keep the original set for Fixed-R and legacy/direct-manager paths so this
+    // optimization does not change the baseline. Adaptive Succession uses only
+    // remaining_live_returns and avoids allocating/hashing the set.
+    absl::flat_hash_set<ObjectID> live_return_ids;
     uint32_t remaining_live_returns = 0;
+
+    bool HasLiveReturns() const {
+      return remaining_live_returns > 0 || !live_return_ids.empty();
+    }
   };
 ''',
         ),
     ]
 
     manager_replacements = [
-        (
-            "lock-free RecoveryFrontierEnabled",
-            '''bool RecoverySuccessionManager::RecoveryFrontierEnabled() const {
-  absl::MutexLock lock(&mutex_);
-  return recovery_frontier_planner_ != nullptr;
-}
-''',
-            '''bool RecoverySuccessionManager::RecoveryFrontierEnabled() const {
-  // recovery_frontier_planner_ is initialized in the constructor and never
-  // replaced afterwards, so this immutable feature check does not need the
-  // manager mutex on every completed owner task.
-  return recovery_frontier_planner_ != nullptr;
-}
-''',
-        ),
         (
             "RetainOwnerTaskSpec signature",
             '''void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
@@ -134,6 +125,8 @@ def main() -> None:
             '''  const bool task_manager_pin =
       baseline_enabled ||
       RayConfig::instance().enable_recovery_succession_task_manager_pin();
+
+  OwnerRetainedTaskState retained;
 ''',
             '''  // Production CoreWorker Recovery Succession always pins the existing
   // TaskManager entry. Keep the config/baseline checks for compatibility with
@@ -141,10 +134,17 @@ def main() -> None:
   const bool task_manager_pin =
       task_manager_owns_recipe || baseline_enabled ||
       RayConfig::instance().enable_recovery_succession_task_manager_pin();
+
+  // Deliberately keep Fixed-R on its old ObjectID-set lifetime path. The first
+  // optimization pass is scoped to adaptive Succession only.
+  const bool succession_counter_lifetime =
+      task_manager_owns_recipe && !baseline_enabled;
+
+  OwnerRetainedTaskState retained;
 ''',
         ),
         (
-            "replace live return set construction",
+            "adaptive counter versus baseline set construction",
             '''  for (const rpc::ObjectReference &returned_ref : returned_refs) {
     if (returned_ref.object_id().size() != ObjectID::Size()) {
       continue;
@@ -162,8 +162,7 @@ def main() -> None:
     return;
   }
 ''',
-            '''  uint32_t live_return_count = 0;
-  for (const rpc::ObjectReference &returned_ref : returned_refs) {
+            '''  for (const rpc::ObjectReference &returned_ref : returned_refs) {
     if (returned_ref.object_id().size() != ObjectID::Size()) {
       continue;
     }
@@ -173,26 +172,36 @@ def main() -> None:
       continue;
     }
 
-    ++live_return_count;
+    if (succession_counter_lifetime) {
+      ++retained.remaining_live_returns;
+    } else {
+      retained.live_return_ids.insert(object_id);
+    }
   }
 
-  if (live_return_count == 0) {
+  if (!retained.HasLiveReturns()) {
     return;
   }
-  retained.remaining_live_returns = live_return_count;
 ''',
         ),
         (
-            "idempotent retained state registration",
+            "idempotent counter registration while preserving baseline merge",
             '''  for (const ObjectID &object_id : retained.live_return_ids) {
     existing->second.live_return_ids.insert(object_id);
   }
 }
 ''',
-            '''  // Static return registration is complete on the first call. A repeated
-  // registration for the same TaskID must not re-inflate the counter after
-  // deletion callbacks may already have fired.
-  return;
+            '''  if (succession_counter_lifetime) {
+    // Static return registration is complete on the first CoreWorker call. A
+    // repeated registration must not re-inflate the count after callbacks may
+    // already have fired.
+    return;
+  }
+
+  // Preserve the existing Fixed-R/legacy merge behavior exactly.
+  for (const ObjectID &object_id : retained.live_return_ids) {
+    existing->second.live_return_ids.insert(object_id);
+  }
 }
 ''',
         ),
@@ -203,7 +212,7 @@ def main() -> None:
       it->second.task_spec.task_id().empty()) {
 ''',
             '''  if (it == owner_retained_tasks_.end() ||
-      it->second.remaining_live_returns == 0 ||
+      !it->second.HasLiveReturns() ||
       it->second.task_spec.task_id().empty()) {
 ''',
         ),
@@ -213,11 +222,11 @@ def main() -> None:
          !it->second.live_return_ids.empty();
 ''',
             '''  return it != owner_retained_tasks_.end() &&
-         it->second.remaining_live_returns > 0;
+         it->second.HasLiveReturns();
 ''',
         ),
         (
-            "decrement remaining return counter",
+            "adaptive decrement versus baseline erase",
             '''  if (retained_it->second.live_return_ids.erase(object_id) == 0) {
     return false;
   }
@@ -226,15 +235,22 @@ def main() -> None:
     return false;
   }
 ''',
-            '''  // CoreWorker registers exactly one deletion callback for each static
-  // returned ObjectRef counted above. No per-return ObjectID set is required.
-  if (retained_it->second.remaining_live_returns == 0) {
-    return false;
-  }
-
-  --retained_it->second.remaining_live_returns;
-  if (retained_it->second.remaining_live_returns > 0) {
-    return false;
+            '''  if (retained_it->second.remaining_live_returns > 0) {
+    // Adaptive Succession registers exactly one deletion callback for each
+    // static returned ObjectRef counted at owner completion.
+    --retained_it->second.remaining_live_returns;
+    if (retained_it->second.remaining_live_returns > 0) {
+      return false;
+    }
+  } else {
+    // Fixed-R and direct/legacy manager callers retain the original exact
+    // ObjectID-set behavior.
+    if (retained_it->second.live_return_ids.erase(object_id) == 0) {
+      return false;
+    }
+    if (!retained_it->second.live_return_ids.empty()) {
+      return false;
+    }
   }
 ''',
         ),
@@ -246,7 +262,7 @@ def main() -> None:
         }
 ''',
             '''        if (live_it != owner_retained_tasks_.end() &&
-            live_it->second.remaining_live_returns > 0) {
+            live_it->second.HasLiveReturns()) {
           return false;
         }
 ''',
@@ -260,7 +276,7 @@ def main() -> None:
       }
 ''',
             '''      if (retained_it != owner_retained_tasks_.end() &&
-          retained_it->second.remaining_live_returns > 0 &&
+          retained_it->second.HasLiveReturns() &&
           !retained_it->second.task_spec.task_id().empty()) {
         lineage_task_spec = &retained_it->second.task_spec;
       }
@@ -275,7 +291,7 @@ def main() -> None:
     }
 ''',
             '''    if (retained_it != owner_retained_tasks_.end() &&
-        retained_it->second.remaining_live_returns > 0 &&
+        retained_it->second.HasLiveReturns() &&
         !retained_it->second.task_spec.task_id().empty()) {
       lineage_task_spec = &retained_it->second.task_spec;
     }
@@ -289,7 +305,7 @@ def main() -> None:
         }
 ''',
             '''        if (live_it != owner_retained_tasks_.end() &&
-            live_it->second.remaining_live_returns > 0) {
+            live_it->second.HasLiveReturns()) {
           return std::nullopt;
         }
 ''',
@@ -310,8 +326,8 @@ def main() -> None:
         task_spec, returned_refs);
 ''',
             '''    // TaskManager already owns this immutable TaskSpec. Pin that existing
-    // entry rather than maintaining a second dormant protobuf in Recovery
-    // Succession. This is now the normal production path, not a perf-only mode.
+    // entry rather than maintaining a second dormant protobuf in adaptive
+    // Recovery Succession. Fixed-R already used this same TaskManager pin.
     RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
         << "Eligible recovery task disappeared before TaskManager pin: "
         << task_spec.TaskId();
@@ -343,21 +359,19 @@ def main() -> None:
         if patch_file(relpath, replacements):
             changed_files.append(relpath)
 
-    # The old ObjectID set should no longer exist in owner-lifetime code. Other
-    # flat_hash_sets in RecoverySuccessionManager are intentional.
     manager_text = (ROOT / "src/ray/core_worker/recovery_succession_manager.cc").read_text()
     header_text = (ROOT / "src/ray/core_worker/recovery_succession_manager.h").read_text()
-    if "live_return_ids" in manager_text or "live_return_ids" in header_text:
-        raise RuntimeError("live_return_ids still appears after patch")
+    if "remaining_live_returns" not in manager_text or "remaining_live_returns" not in header_text:
+        raise RuntimeError("adaptive remaining_live_returns fast path was not installed")
 
     subprocess.run(["git", "diff", "--check"], cwd=ROOT, check=True)
 
     if changed_files:
-        print("Applied Succession owner-lifetime fast path:")
+        print("Applied adaptive-Succession owner-lifetime fast path:")
         for path in changed_files:
             print(f"  {path}")
     else:
-        print("Succession owner-lifetime fast path is already applied.")
+        print("Adaptive-Succession owner-lifetime fast path is already applied.")
 
     print("\nNext: rebuild Ray, run behavior benchmarks 55/56/57, then rerun Benchmark 58.")
 
