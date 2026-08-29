@@ -22,6 +22,22 @@
 #include "ray/common/ray_config.h"
 #include "ray/core_worker/recovery_succession_manager.h"
 
+// recovery_succession_manager.cc still contains the pre-Frontier compact
+// metadata encoder while the adaptive Frontier path uses the extended encoder
+// below, which preserves the group-membership marker. Keep -Werror enabled and
+// mark only that transitional TU-local definition as intentionally unused.
+// This declaration denotes the same unnamed-namespace function when this header
+// is included by recovery_succession_manager.cc.
+namespace ray::core {
+namespace {
+[[maybe_unused]] bool WriteCompactTaskArgumentRecoveryMetadata(
+    const rpc::RecoveryObjectMetadata &source,
+    const rpc::RecoveryManifest &manifest,
+    const rpc::Address &object_owner,
+    rpc::RecoveryObjectMetadata *out);
+}  // namespace
+}  // namespace ray::core
+
 namespace ray::core::recovery_succession_internal {
 
 inline const rpc::RecoveryHolder *FindHolderByRank(
