@@ -23,6 +23,14 @@
 
 namespace ray {
 namespace core {
+namespace {
+
+bool FixedRTransparentHandoffEnabled() {
+  return RayConfig::instance().enable_recovery_succession() &&
+         RayConfig::instance().enable_recovery_witness_holder_baseline();
+}
+
+}  // namespace
 
 bool FutureResolver::RecordAndIsRecoverySuccessor(
     const ObjectID &object_id, const rpc::Address &owner_address) {
@@ -44,20 +52,26 @@ void FutureResolver::ClearRecoveryOwnerTracking(const ObjectID &object_id) {
 
 void FutureResolver::ResolveFutureAsync(const ObjectID &object_id,
                                         const rpc::Address &owner_address) {
+  const bool fixed_r_handoff = FixedRTransparentHandoffEnabled();
+
   if (rpc_address_.worker_id() == owner_address.worker_id()) {
     // We do not need to resolve objects that we own. This can happen if a task
     // with a borrowed reference executes on the object's owning worker. It also
     // happens when this worker becomes the Fixed-R acting owner; no future
     // owner-failure handoff is needed after that promotion.
-    ClearRecoveryOwnerTracking(object_id);
+    if (fixed_r_handoff) {
+      ClearRecoveryOwnerTracking(object_id);
+    }
     return;
   }
 
-  // Preserve the first owner for this unresolved ObjectID. A later call using
-  // a different owner means recovery has already handed ownership to an acting
-  // successor, which is the only case where FutureResolver itself should
-  // transparently re-enter recovery after an owner RPC failure.
-  static_cast<void>(RecordAndIsRecoverySuccessor(object_id, owner_address));
+  if (fixed_r_handoff) {
+    // Preserve the first owner for this unresolved ObjectID. A later call using
+    // a different owner means recovery has already handed ownership to an acting
+    // successor, which is the only case where FutureResolver itself should
+    // transparently re-enter recovery after an owner RPC failure.
+    static_cast<void>(RecordAndIsRecoverySuccessor(object_id, owner_address));
+  }
 
   auto conn = owner_clients_->GetOrConnect(owner_address);
 
@@ -97,13 +111,11 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     RAY_LOG(WARNING).WithField(object_id)
         << "Failed to retrieve deserialized object value: " << status;
 
-    const bool fixed_r_enabled =
-        RayConfig::instance().enable_recovery_succession() &&
-        RayConfig::instance().enable_recovery_witness_holder_baseline();
+    const bool fixed_r_handoff = FixedRTransparentHandoffEnabled();
     const bool recovery_successor =
-        RecordAndIsRecoverySuccessor(object_id, owner_address);
+        fixed_r_handoff && RecordAndIsRecoverySuccessor(object_id, owner_address);
 
-    if (fixed_r_enabled && recovery_successor && CoreWorkerProcess::IsInitialized()) {
+    if (recovery_successor && CoreWorkerProcess::IsInitialized()) {
       bool start_reentry = false;
       {
         absl::MutexLock lock(&recovery_owner_mutex_);
@@ -163,7 +175,9 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     // before it can notify the owner of another borrower). Store an error so
     // that an exception will be thrown immediately when the worker tries to
     // get the value.
-    ClearRecoveryOwnerTracking(object_id);
+    if (FixedRTransparentHandoffEnabled()) {
+      ClearRecoveryOwnerTracking(object_id);
+    }
     in_memory_store_->Put(RayObject(rpc::ErrorType::OBJECT_DELETED),
                           object_id,
                           reference_counter_->HasReference(object_id));
@@ -174,7 +188,9 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     // If the owner later fails or the object is released, the raylet
     // will eventually store an error in Plasma on our behalf.
 
-    ClearRecoveryOwnerTracking(object_id);
+    if (FixedRTransparentHandoffEnabled()) {
+      ClearRecoveryOwnerTracking(object_id);
+    }
 
     // We save the returned locality data first in order to ensure that it
     // is available for any tasks whose submission is triggered by the in-memory
