@@ -376,14 +376,27 @@ bool ExpandTaskSidecarRecoveryMetadata(
 RecoverySuccessionManager::RecoverySuccessionManager(rpc::Address self_address)
     : self_address_(std::move(self_address)),
       profiling_enabled_(
-          RayConfig::instance().enable_recovery_succession_profiling()) {
-  if (RayConfig::instance().enable_recovery_frontier()) {
-    const uint32_t group_size =
-        RayConfig::instance().recovery_frontier_group_size();
-    RAY_CHECK_GT(group_size, 0U)
+          RayConfig::instance().enable_recovery_succession_profiling()),
+      recovery_succession_enabled_config_(
+          RayConfig::instance().enable_recovery_succession()),
+      recovery_frontier_enabled_config_(
+          RayConfig::instance().enable_recovery_frontier()),
+      recovery_frontier_group_size_config_(
+          RayConfig::instance().recovery_frontier_group_size()),
+      recovery_witness_holder_baseline_enabled_config_(
+          RayConfig::instance().enable_recovery_witness_holder_baseline()),
+      recovery_succession_certificate_admission_enabled_config_(
+          RayConfig::instance().enable_recovery_succession_certificate_admission()),
+      recovery_succession_task_manager_pin_enabled_config_(
+          RayConfig::instance().enable_recovery_succession_task_manager_pin()),
+      recovery_succession_target_holder_count_config_(
+          RayConfig::instance().recovery_succession_target_holder_count()) {
+  if (recovery_frontier_enabled_config_) {
+    RAY_CHECK_GT(recovery_frontier_group_size_config_, 0U)
         << "recovery_frontier_group_size must be positive";
     recovery_frontier_planner_ =
-        std::make_unique<RecoveryFrontierPlanner>(group_size);
+        std::make_unique<RecoveryFrontierPlanner>(
+            recovery_frontier_group_size_config_);
   }
 }
 
@@ -393,29 +406,43 @@ bool RecoverySuccessionManager::IsEligibleTask(const rpc::TaskSpec &task_spec) {
 }
 
 bool RecoverySuccessionManager::RecoveryFrontierEnabled() const {
-  absl::MutexLock lock(&mutex_);
-  return recovery_frontier_planner_ != nullptr;
+  return recovery_frontier_enabled_config_;
 }
 
 std::optional<RecoveryFrontierMembership>
-RecoverySuccessionManager::RegisterOwnerTaskWithRecoveryFrontier(
-    const TaskSpecification &task_spec) {
-  const rpc::TaskSpec &task_proto = task_spec.GetMessage();
-  if (!IsEligibleTask(task_proto) || task_proto.task_id().empty() ||
-      task_spec.NumReturns() == 0) {
-    return std::nullopt;
-  }
-
-  absl::MutexLock lock(&mutex_);
-  if (recovery_frontier_planner_ == nullptr) {
+RecoverySuccessionManager::RegisterOwnerTaskWithRecoveryFrontierLocked(
+    const TaskSpecification &task_spec, const TaskID &task_id) {
+  if (!recovery_frontier_enabled_config_ ||
+      recovery_frontier_planner_ == nullptr || task_id.IsNil()) {
     return std::nullopt;
   }
   return recovery_frontier_planner_->RegisterTask(task_spec.GetSharedMessage());
 }
 
 std::optional<RecoveryFrontierMembership>
+RecoverySuccessionManager::RegisterOwnerTaskWithRecoveryFrontier(
+    const TaskSpecification &task_spec) {
+  if (!recovery_frontier_enabled_config_) {
+    return std::nullopt;
+  }
+
+  const rpc::TaskSpec &task_proto = task_spec.GetMessage();
+  if (!IsEligibleTask(task_proto) || task_proto.task_id().empty() ||
+      task_spec.NumReturns() == 0) {
+    return std::nullopt;
+  }
+
+  const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
+  absl::MutexLock lock(&mutex_);
+  return RegisterOwnerTaskWithRecoveryFrontierLocked(task_spec, task_id);
+}
+
+std::optional<RecoveryFrontierMembership>
 RecoverySuccessionManager::GetRecoveryFrontierMembership(
     const TaskID &task_id) const {
+  if (!recovery_frontier_enabled_config_) {
+    return std::nullopt;
+  }
   absl::MutexLock lock(&mutex_);
   if (recovery_frontier_planner_ == nullptr) {
     return std::nullopt;
@@ -529,8 +556,7 @@ bool RecoverySuccessionManager::CommitAdaptiveRecoveryFrontierAppend(
   }
 
   absl::MutexLock lock(&mutex_);
-  if (!recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-          recovery_frontier_planner_.get())) {
+  if (!AdaptiveRecoveryFrontierEnabledCached()) {
     return false;
   }
 
@@ -578,8 +604,7 @@ bool RecoverySuccessionManager::ApplyAdaptiveRecoveryFrontierAppend(
 
   const TaskID group_id = TaskID::FromBinary(append.group_id());
   absl::MutexLock lock(&mutex_);
-  if (!recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-          recovery_frontier_planner_.get()) ||
+  if (!AdaptiveRecoveryFrontierEnabledCached() ||
       !recovery_frontier_planner_->ApplyCommittedAppend(append)) {
     return false;
   }
@@ -668,7 +693,7 @@ rpc::RecoveryManifest RecoverySuccessionManager::BuildInitialManifest(
   manifest.set_task_id(task_id.Binary());
   manifest.set_job_id(job_id.Binary());
   const uint32_t target_holder_count =
-      RayConfig::instance().recovery_succession_target_holder_count();
+      recovery_succession_target_holder_count_config_;
 
   RAY_CHECK_GT(target_holder_count, 0U);
 
@@ -784,29 +809,35 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
     bool task_manager_owns_recipe) {
   const rpc::TaskSpec &task_proto = task_spec.GetMessage();
 
-  if (task_proto.task_id().empty() ||
-      task_proto.has_recovery_manifest() ||
-      !IsEligibleTask(task_proto)) {
+  // Production CoreWorker calls this only after the eligibility gate in
+  // SubmitTask. Keep the full validation for direct-manager/test callers, but
+  // do not repeat it on every production task.
+  if (task_proto.task_id().empty() || task_proto.has_recovery_manifest() ||
+      (!task_manager_owns_recipe && !IsEligibleTask(task_proto))) {
     return;
   }
 
   const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
 
   const bool baseline_enabled =
-      RayConfig::instance().enable_recovery_witness_holder_baseline();
+      recovery_witness_holder_baseline_enabled_config_;
   const bool production_adaptive =
-      task_manager_owns_recipe && !baseline_enabled;
+      task_manager_owns_recipe && recovery_succession_enabled_config_ &&
+      !baseline_enabled;
+  const bool frontier_enabled = recovery_frontier_enabled_config_;
 
-  // Register every eligible live owner task with the shared frontier planner
-  // before any backend-specific activation/filtering. For production adaptive
-  // Succession the RayConfig bit is immutable and avoids an extra manager-lock
-  // probe just to discover whether the planner exists.
-  const bool frontier_enabled =
-      production_adaptive
-          ? RayConfig::instance().enable_recovery_frontier()
-          : RecoveryFrontierEnabled();
+  // Production adaptive Succession reaches this function already validated and
+  // with task_id parsed. Register directly under the manager's single planner
+  // lock instead of re-entering the defensive public wrapper and rechecking the
+  // same TaskSpec/configuration state.
   if (frontier_enabled && !returned_refs.empty()) {
-    static_cast<void>(RegisterOwnerTaskWithRecoveryFrontier(task_spec));
+    if (production_adaptive) {
+      absl::MutexLock lock(&mutex_);
+      static_cast<void>(
+          RegisterOwnerTaskWithRecoveryFrontierLocked(task_spec, task_id));
+    } else {
+      static_cast<void>(RegisterOwnerTaskWithRecoveryFrontier(task_spec));
+    }
   }
 
   // PERF-ONLY frontier-density owner-state selector.
@@ -842,8 +873,7 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
   }
 
   const bool task_manager_pin =
-      baseline_enabled ||
-      RayConfig::instance().enable_recovery_succession_task_manager_pin();
+      baseline_enabled || recovery_succession_task_manager_pin_enabled_config_;
 
   // Legacy/direct-manager and Fixed-R paths use the exact ObjectID set.
   const bool succession_counter_lifetime = false;
@@ -976,14 +1006,13 @@ bool RecoverySuccessionManager::OwnerTaskHasLiveReturns(
 bool RecoverySuccessionManager::HandleOwnerTaskLineageReleased(
     const TaskID &task_id) {
   if (task_id.IsNil() ||
-      RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+      recovery_witness_holder_baseline_enabled_config_) {
     return false;
   }
 
   absl::MutexLock lock(&mutex_);
 
-  if (recovery_frontier_planner_ != nullptr &&
-      recovery_frontier_planner_->GroupSize() > 1) {
+  if (AdaptiveRecoveryFrontierEnabledCached()) {
     const auto membership = recovery_frontier_planner_->FindTask(task_id);
     if (membership.has_value()) {
       RecoveryFrontierGroup *group =
@@ -1188,8 +1217,7 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
   for (const auto &[object_id, metadata] : received_metadata) {
     TaskID frontier_group_id;
     const bool frontier_member =
-        recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-            recovery_frontier_planner_.get()) &&
+        AdaptiveRecoveryFrontierEnabledCached() &&
         recovery_succession_internal::ParseFrontierSuccessionMemberMarker(
             metadata.first_holder_task_spec(), &frontier_group_id);
 
@@ -1402,8 +1430,7 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   }
 
   const bool frontier_group_admission =
-      recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-          recovery_frontier_planner_.get()) &&
+      AdaptiveRecoveryFrontierEnabledCached() &&
       recovery_frontier_planner_->GetGroup(task_id) != nullptr;
 
   std::optional<RecoveryFrontierAppendBatch> frontier_install_batch;
@@ -1656,9 +1683,7 @@ bool RecoverySuccessionManager::InstallRecoveryHolder(
 
   absl::MutexLock lock(&mutex_);
 
-  if (carries_frontier_snapshot &&
-      recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-          recovery_frontier_planner_.get())) {
+  if (carries_frontier_snapshot && AdaptiveRecoveryFrontierEnabledCached()) {
     if (frontier_snapshot.group_id() != request.task_id() ||
         recovery_frontier_planner_ == nullptr ||
         !recovery_frontier_planner_->ApplyCommittedAppend(frontier_snapshot)) {
@@ -1775,8 +1800,7 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
   auto update_committed_topology =
       [this, &task_id, &committed_frontier_member_limit](
           const rpc::RecoveryManifest &group_manifest) {
-        if (!recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-                recovery_frontier_planner_.get())) {
+        if (!AdaptiveRecoveryFrontierEnabledCached()) {
           UpdateManifestForTaskLocked(task_id, group_manifest, true);
           return;
         }
@@ -1804,16 +1828,14 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
 
   auto commit_initial_frontier_prefix_if_ready =
       [this, &task_id](const rpc::RecoveryManifest &group_manifest) {
-        if (!recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-                recovery_frontier_planner_.get()) ||
+        if (!AdaptiveRecoveryFrontierEnabledCached() ||
             !group_manifest.frozen()) {
           return true;
         }
 
         const auto initial_it =
             adaptive_frontier_initial_append_batches_.find(task_id);
-        if (initial_it ==
-            adaptive_frontier_initial_append_batches_.end()) {
+        if (initial_it == adaptive_frontier_initial_append_batches_.end()) {
           return true;
         }
 
@@ -1831,8 +1853,8 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
   // Patch 4M-CERT independent commit.  Witness ACK authorizes exactly this
   // reservation's candidate; it does not require lower admission slots to have
   // committed first.  Materialized ranks are derived deterministically.
-  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
-      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+  if (recovery_succession_certificate_admission_enabled_config_ &&
+      !recovery_witness_holder_baseline_enabled_config_) {
     const rpc::RecoveryHolder *candidate =
         FindHolderByRank(proposed, reservation.proposed_rank);
     if (candidate == nullptr ||
@@ -1941,8 +1963,8 @@ void RecoverySuccessionManager::AbortHolderAdmission(
 
   // Patch 4M-CERT independent abort: another certificate does not depend on
   // this reservation's prefix, so do not invalidate higher slots.
-  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
-      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+  if (recovery_succession_certificate_admission_enabled_config_ &&
+      !recovery_witness_holder_baseline_enabled_config_) {
     EraseHolderReservationLocked(reservation_id);
     return;
   }
@@ -2013,8 +2035,7 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
   absl::MutexLock lock(&mutex_);
 
   const bool frontier_group_manifest =
-      recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-          recovery_frontier_planner_.get()) &&
+      AdaptiveRecoveryFrontierEnabledCached() &&
       recovery_frontier_planner_->GetGroup(task_id) != nullptr;
 
   auto apply_topology =
@@ -2039,8 +2060,8 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
         }
       };
 
-  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
-      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+  if (recovery_succession_certificate_admission_enabled_config_ &&
+      !recovery_witness_holder_baseline_enabled_config_) {
     // Patch 4M-CERT set merge: equal-generation different subsets are valid
     // partial views and must converge by union, not fail byte-equality checks.
     auto it = task_states_.find(task_id);
@@ -2139,7 +2160,7 @@ bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
     // to reach the first borrower before any non-owner holder can be admitted.
     // Keep this visibility gate strictly scoped to the frozen Fixed-R backend.
     if (require_frontier_commit &&
-        RayConfig::instance().enable_recovery_witness_holder_baseline() &&
+        recovery_witness_holder_baseline_enabled_config_ &&
         recovery_frontier_planner_ != nullptr &&
         recovery_frontier_planner_->GroupSize() > 1) {
       const auto membership = recovery_frontier_planner_->FindTask(task_id);
@@ -2152,8 +2173,7 @@ bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
       }
     }
 
-    if (recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-            recovery_frontier_planner_.get())) {
+    if (AdaptiveRecoveryFrontierEnabledCached()) {
       const auto membership = recovery_frontier_planner_->FindTask(task_id);
       if (membership.has_value()) {
         const RecoveryFrontierGroup *group =
@@ -2166,11 +2186,9 @@ bool RecoverySuccessionManager::BuildRecoveryMetadataLocked(
               recovery_frontier_protection_manifests_.find(
                   membership->group_id);
           const bool adaptive_topology_established =
-              protection_it !=
-                  recovery_frontier_protection_manifests_.end() &&
+              protection_it != recovery_frontier_protection_manifests_.end() &&
               protection_it->second.frozen();
-          if (require_frontier_commit &&
-              adaptive_topology_established &&
+          if (require_frontier_commit && adaptive_topology_established &&
               !group->IsTaskCommitted(task_id)) {
             return false;
           }
@@ -2409,8 +2427,8 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
     }
   };
 
-  if (RayConfig::instance().enable_recovery_succession() &&
-      RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+  if (recovery_succession_enabled_config_ &&
+      recovery_witness_holder_baseline_enabled_config_) {
     return;
   }
 
@@ -2603,8 +2621,8 @@ RecoverySuccessionManager::PrepareTaskReplay(
     return ReplayPreparationResult::WITNESS_CONFIRMATION_REQUIRED;
   }
 
-  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
-      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+  if (recovery_succession_certificate_admission_enabled_config_ &&
+      !recovery_witness_holder_baseline_enabled_config_) {
     rpc::RecoveryManifest merged;
     merged.CopyFrom(state.manifest);
     if (!MergeRecoveryHolderSets(request.requester_manifest(), &merged)) {
@@ -2707,8 +2725,7 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
   rpc::RecoveryManifest task_witness_manifest;
   task_witness_manifest.CopyFrom(witness_manifest);
 
-  if (recovery_succession_internal::AdaptiveFrontierSuccessionEnabled(
-          recovery_frontier_planner_.get())) {
+  if (AdaptiveRecoveryFrontierEnabledCached()) {
     const auto membership = recovery_frontier_planner_->FindTask(task_id);
     if (membership.has_value()) {
       if (witness_manifest.task_id() != membership->group_id.Binary()) {
@@ -2755,8 +2772,8 @@ bool RecoverySuccessionManager::ConfirmProvisionalHolderFromWitness(
   }
 
 
-  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
-      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+  if (recovery_succession_certificate_admission_enabled_config_ &&
+      !recovery_witness_holder_baseline_enabled_config_) {
     // Patch 4M-CERT witness set promotion. Presence in a directly queried
     // witness's merged set is the durability proof; rank/prefix is irrelevant.
     const bool installed_provisional =
@@ -2845,8 +2862,8 @@ void RecoverySuccessionManager::UpdateBorrowedObjectManifest(
   }
 
 
-  if (RayConfig::instance().enable_recovery_succession_certificate_admission() &&
-      !RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+  if (recovery_succession_certificate_admission_enabled_config_ &&
+      !recovery_witness_holder_baseline_enabled_config_) {
     // Patch 4M-CERT borrowed-view merge.
     const TaskID task_id = borrowed_it->second.task_id;
     auto task_it = task_states_.find(task_id);

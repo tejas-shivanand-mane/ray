@@ -254,7 +254,8 @@ class RecoverySuccessionManager {
   static bool IsEligibleTask(const rpc::TaskSpec &task_spec);
 
   /// Returns whether owner-side correctness-capable Recovery Frontier
-  /// grouping is enabled for this manager.
+  /// grouping is enabled for this manager. Configuration is immutable after
+  /// construction, so this check is lock-free.
   bool RecoveryFrontierEnabled() const;
 
   /// Assign an eligible owner task to its append-only frontier group. The
@@ -495,6 +496,22 @@ class RecoverySuccessionManager {
   void EraseTaskObjectMetadataLocked(const TaskID &task_id)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
+  /// Prevalidated production owner-registration path. The caller has already
+  /// checked eligibility and parsed task_id; exactly one manager lock protects
+  /// the planner mutation.
+  std::optional<RecoveryFrontierMembership>
+  RegisterOwnerTaskWithRecoveryFrontierLocked(
+      const TaskSpecification &task_spec, const TaskID &task_id)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  /// Cached immutable configuration predicate used by the adaptive hot path.
+  bool AdaptiveRecoveryFrontierEnabledCached() const {
+    return recovery_succession_enabled_config_ &&
+           !recovery_witness_holder_baseline_enabled_config_ &&
+           recovery_frontier_enabled_config_ &&
+           recovery_frontier_group_size_config_ > 1;
+  }
+
   /// If object_id is a member appended after the adaptive H1..HR topology was
   /// established, synchronously publish the next contiguous recipe suffix and
   /// advance the owner prefix. Returns true when the requested member is
@@ -604,11 +621,22 @@ class RecoverySuccessionManager {
 
   const bool profiling_enabled_;
 
+  // Ray system_config is fixed for the CoreWorker lifetime. Cache the flags
+  // touched by per-task Recovery Succession paths instead of repeatedly
+  // traversing RayConfig/string-backed configuration state.
+  const bool recovery_succession_enabled_config_;
+  const bool recovery_frontier_enabled_config_;
+  const uint32_t recovery_frontier_group_size_config_;
+  const bool recovery_witness_holder_baseline_enabled_config_;
+  const bool recovery_succession_certificate_admission_enabled_config_;
+  const bool recovery_succession_task_manager_pin_enabled_config_;
+  const uint32_t recovery_succession_target_holder_count_config_;
+
   mutable absl::Mutex mutex_;
 
   /// Backend-neutral owner-side grouping state. Null when Recovery Frontiers
-  /// are disabled. All access is serialized by the manager mutex so the
-  /// planner itself remains deliberately lock-free.
+  /// are disabled. All mutable planner access is serialized by the manager
+  /// mutex; immutable enable/group-size decisions use the cached fields above.
   std::unique_ptr<RecoveryFrontierPlanner> recovery_frontier_planner_
       ABSL_GUARDED_BY(mutex_);
 
