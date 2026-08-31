@@ -50,14 +50,11 @@ GET_TIMEOUT_S = 120.0
 INITIAL_BLOCK_TIMEOUT_S = 240.0
 MAX_SELECTION_ATTEMPTS = 20
 
-# Benchmark 65 intentionally SIGSTOPs a live witness. Give the health detector
-# a very large miss budget so the synthetic stall cannot silently turn into an
-# authoritative node failure while we establish the partial-replication state.
-HEALTH_CHECK_FAILURE_THRESHOLD = 100
-
 # This includes owner-death propagation, OWNER_DIED interception, claim creation,
-# and the W1 -> W2 RPC. It is not a protocol timeout. W3 remains GCS-ALIVE due
-# to the benchmark-only health-check miss budget above.
+# and the W1 -> W2 RPC. It is not a protocol timeout. The loop below continuously
+# verifies that stopped W3 is still GCS-ALIVE; if GCS marks W3 dead before the
+# W1 -> W2 reservation appears, the experiment fails instead of silently changing
+# the protocol's authoritative-failure assumptions.
 PARTIAL_WINDOW_TIMEOUT_S = 10.0
 
 PROTECTION_LOG = "Installed full TaskSpec on all witness-holder baseline nodes"
@@ -68,14 +65,12 @@ FIRST_REPLICA_LOG = (
 
 
 def fixed_r_config() -> dict:
-    config = system_config(
+    return system_config(
         witness_baseline(R),
         witness_count=R,
         object_timeout_ms=OBJECT_TIMEOUT_MS,
         profiling_enabled=True,
     )
-    config["health_check_failure_threshold"] = HEALTH_CHECK_FAILURE_THRESHOLD
-    return config
 
 
 def count_starts(marker: Path, token: str, *, after_ns: int = 0) -> int:
@@ -260,10 +255,10 @@ def main() -> None:
         # borrower exports are complete before the fault is injected as well.
         assert len(find_log_lines(logs, PROTECTION_LOG)) >= 1
 
-        # Force a deterministic partial-replication window:
-        # W1 -> W2 may complete, but W1 -> W3 cannot complete while W3 is
-        # SIGSTOP'ed. The benchmark-only health-check threshold keeps W3
-        # authoritative/GCS-ALIVE throughout this window.
+        # Force a partial-replication window. W3 is stopped before recovery, so
+        # W1 can obtain W2's ACK but cannot obtain W3's ACK. We do not alter the
+        # health detector: if W3 ceases to be authoritatively alive before the
+        # W2 reservation is observed, the benchmark fails as an invalid window.
         stop_raylet(w3)
         stopped_node = w3
         assert_node_alive(ray, node_id_hex(w3))
@@ -284,25 +279,22 @@ def main() -> None:
             logs, "Fixed-R recovery claim replicated at witness index"
         )
 
-        # W2 has durably stored the attempt-1 reservation. Give the ACK a short
-        # opportunity to reach W1; W1's next step is blocked on the stopped W3.
-        time.sleep(0.1)
+        # W2 has durably stored attempt 1. Because W3 is still stopped and still
+        # GCS-ALIVE, W1 cannot finish the ACK-before-grant barrier.
         assert_node_alive(ray, node_id_hex(w3))
-
-        # Because W3 is still live-but-stopped, W1 cannot have completed the
-        # ACK-before-grant barrier.
         assert count_starts(marker, token, after_ns=failure_wall_ns) == 0, read_marker(marker)
         pre_kill_grants = find_log_lines(
             logs, "Fixed-R recovery claim granted after witness replication"
         )
         assert not pre_kill_grants, pre_kill_grants
 
-        # Kill the original coordinator after W2 has the reservation but before
-        # W3 has acknowledged it.
+        # Kill W1 while W3 remains stopped, so the exact partial state is:
+        # W1: claim attempt 1, W2: claim attempt 1, W3: no claim.
         cluster.remove_node(w1, allow_graceful=False)
 
-        # Resume W3 immediately. W2 must stabilize the existing attempt-1
-        # reservation after W1 is authoritatively removed.
+        # Resume W3 immediately so its short synthetic stall cannot itself turn
+        # into an authoritative witness failure. With the normal health detector,
+        # W1's real process death can now be learned promptly by GCS/raylets.
         continue_raylet(w3)
         stopped_node = None
         assert_node_alive(ray, node_id_hex(w3))
