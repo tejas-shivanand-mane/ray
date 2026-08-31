@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -389,16 +390,29 @@ class NodeManager : public rpc::NodeManagerServiceHandler,
         recovery_witness_task_specs_
             ABSL_GUARDED_BY(recovery_witness_mutex_);
 
-    /// Atomic replay-claim state for the preassigned full-lineage
-    /// witness-holder baseline.
+    /// Replay-claim state for the preassigned full-lineage baseline.
+    /// The local mutex serializes this witness; cross-witness safety comes from
+    /// ordered coordination plus replication before grant.
     struct RecoveryWitnessClaimState {
-    rpc::Address acting_owner;
-    uint32_t recovery_attempt = 0;
+      rpc::Address acting_owner;
+      uint32_t recovery_attempt = 0;
+      uint32_t coordinator_witness_index = 0;
     };
 
     absl::flat_hash_map<TaskID, RecoveryWitnessClaimState>
         recovery_witness_claims_
             ABSL_GUARDED_BY(recovery_witness_mutex_);
+
+  /// Sequentially replicate a Fixed-R replay reservation to every later live
+  /// witness. RPC failure retries the same witness and never authorizes skip.
+  void ReplicateFixedRRecoveryClaim(
+      const TaskID &task_id,
+      const rpc::RecoveryWitnessClaim &claim,
+      size_t next_witness_index,
+      const rpc::Address &requester,
+      rpc::GetRecoveryWitnessReply *reply,
+      rpc::SendReplyCallback send_reply_callback,
+      std::function<void()> on_replicated = nullptr);
 
   /// Release pinned bookkeeping and delete plasma copies for `object_ids`.
   void FreeLocalObjects(const std::vector<ObjectID> &object_ids);

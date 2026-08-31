@@ -461,6 +461,16 @@ message FreeLocalObjectsRequest {
 message FreeLocalObjectsReply {}
 
 
+// A Fixed-R replay reservation replicated across the ordered live witness set.
+// Replay may begin only after every later witness not authoritatively known dead
+// has stored this exact reservation.
+message RecoveryWitnessClaim {
+  bytes task_id = 1;
+  uint32 recovery_attempt = 2;
+  uint32 coordinator_witness_index = 3;
+  Address acting_owner = 4;
+}
+
 // Stores the latest compact recovery manifest on a witness raylet.
 //
 // This operation is idempotent. The raylet retains whichever manifest has the
@@ -472,24 +482,24 @@ message UpdateRecoveryWitnessRequest {
   // Baseline witnesses retain the complete replayable lineage.
   optional TaskSpec task_spec = 2;
 
-  // Patch 4M-CERT: delta update for normal Succession.  The witness unions
-  // independently confirmed holder certificates into its materialized
-  // RecoveryManifest instead of replacing the whole manifest per holder.
+  // Patch 4M-CERT: delta update for normal Succession.
   optional RecoveryHolderCertificate holder_certificate = 3;
 
-  // Optimized fixed-R transport. This contains the exact same complete
-  // replayable TaskSpec lineage as task_spec, serialized once by the owner.
-  // task_spec and serialized_task_spec are mutually exclusive.
+  // Optimized fixed-R transport. task_spec and serialized_task_spec are
+  // mutually exclusive.
   bytes serialized_task_spec = 4;
+
+  // Fixed-R failure-path reservation. Mutually exclusive with the normal
+  // manifest/TaskSpec/certificate publication payloads above.
+  optional RecoveryWitnessClaim recovery_claim = 5;
 }
 
 message UpdateRecoveryWitnessReply {
-  // True when this request's manifest is now stored, or the same manifest was
-  // already stored.
   bool stored = 1;
-
-  // Returned when the witness already has a newer manifest.
   optional RecoveryManifest latest_manifest = 2;
+  // Returned on a conflicting Fixed-R claim so the coordinator can fail
+  // closed or retry while authoritative failure information converges.
+  optional RecoveryWitnessClaim latest_recovery_claim = 3;
 }
 
 // Batches independent logical witness updates that target the same raylet.
