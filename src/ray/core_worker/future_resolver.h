@@ -18,6 +18,9 @@
 #include <memory>
 #include <utility>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/synchronization/mutex.h"
 #include "ray/common/id.h"
 #include "ray/core_worker/reference_counter_interface.h"
 #include "ray/core_worker/store_provider/memory_store/memory_store.h"
@@ -77,6 +80,18 @@ class FutureResolver {
                              const rpc::GetObjectStatusReply &object_status);
 
  private:
+  /// Record the first owner contacted for an unresolved ObjectID. If a later
+  /// ResolveFutureAsync call uses a different owner, that owner is a recovery
+  /// successor. This lets an already-blocked ray.get distinguish failure of the
+  /// original owner from failure of an acting recovery owner without changing
+  /// the ordinary owner-failure path.
+  bool RecordAndIsRecoverySuccessor(const ObjectID &object_id,
+                                    const rpc::Address &owner_address);
+
+  /// Forget owner-transition state once resolution is terminal or this worker
+  /// itself becomes the acting recovery owner.
+  void ClearRecoveryOwnerTracking(const ObjectID &object_id);
+
   /// Used to store values of resolved futures.
   std::shared_ptr<CoreWorkerMemoryStore> in_memory_store_;
 
@@ -96,6 +111,18 @@ class FutureResolver {
 
   /// Called when GetObjectStatus returns recovery metadata.
   RecoveryMetadataCallback recovery_metadata_callback_;
+
+  /// Original owner observed by FutureResolver for each unresolved object.
+  /// Entries intentionally survive an original OWNER_DIED result so that a
+  /// subsequent Fixed-R acting owner is recognized as a successor.
+  absl::Mutex recovery_owner_mutex_;
+  absl::flat_hash_map<ObjectID, WorkerID> initial_owner_by_object_
+      ABSL_GUARDED_BY(recovery_owner_mutex_);
+
+  /// Suppresses duplicate re-entry while one acting-owner recovery attempt is
+  /// already in flight for this ObjectID.
+  absl::flat_hash_set<ObjectID> recovery_reentry_in_flight_
+      ABSL_GUARDED_BY(recovery_owner_mutex_);
 };
 
 }  // namespace core
