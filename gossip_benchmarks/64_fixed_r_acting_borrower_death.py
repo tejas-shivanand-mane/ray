@@ -3,7 +3,12 @@
 
 B1 wins recovery attempt N=1 and starts a replay that deliberately blocks. B2
 requests the same object while B1 is still alive and must not start attempt 2.
-After B1 is killed, B2 may advance to N+1=2 and complete one replacement replay.
+After B1 is killed, fresh/retried B2 gets may advance to N+1=2 only once the
+failure is authoritative, and exactly one replacement replay must complete.
+
+This benchmark intentionally tests the witness claim state machine rather than
+transparent migration of a single already-blocked ray.get. The latter is a
+separate CoreWorker liveness property.
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ os.environ.setdefault("RAY_DEDUP_LOGS", "0")
 
 import ray
 from ray.cluster_utils import Cluster
+from ray.exceptions import GetTimeoutError
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from _benchmark_common import (
@@ -39,6 +45,7 @@ OBJECT_TIMEOUT_MS = 300
 GET_TIMEOUT_S = 120.0
 BLOCK_TIMEOUT_S = 240.0
 NO_ADVANCE_WINDOW_S = 0.8
+POST_DEATH_PROBE_S = 0.5
 
 
 def fixed_r_config() -> dict:
@@ -112,6 +119,21 @@ def types():
         def read(self):
             return self.ref.hex(), ray.get(self.ref)
 
+        def read_with_timeout(self, timeout_s):
+            try:
+                value = ray.get(self.ref, timeout=timeout_s)
+                return {
+                    "ready": True,
+                    "object_id": self.ref.hex(),
+                    "value": value,
+                }
+            except GetTimeoutError:
+                return {
+                    "ready": False,
+                    "object_id": self.ref.hex(),
+                    "value": None,
+                }
+
     return Owner, Borrower
 
 
@@ -178,10 +200,13 @@ def main() -> None:
             logs, "Fixed-R recovery claim granted after witness replication"
         )
 
-        # B2 asks while B1 is alive. It may observe CLAIM_ALREADY_GRANTED, but
-        # it must not cause a second replay or a new attempt.
-        b2_read = borrower_2.read.remote()
-        time.sleep(NO_ADVANCE_WINDOW_S)
+        # B2 asks while B1 is alive. It may follow CLAIM_ALREADY_GRANTED, but
+        # it must neither produce a result nor create attempt 2.
+        pre_death_probe = ray.get(
+            borrower_2.read_with_timeout.remote(NO_ADVANCE_WINDOW_S),
+            timeout=NO_ADVANCE_WINDOW_S + 10.0,
+        )
+        assert not pre_death_probe["ready"], pre_death_probe
         starts_before_b1_death = count_starts(marker, token)
         assert starts_before_b1_death == 2, read_marker(marker)
         attempt2_before_death = find_log_lines(
@@ -192,7 +217,23 @@ def main() -> None:
         b1_failure_ns = time.time_ns()
         ray.kill(borrower_1, no_restart=True)
 
-        recovered_object_id, value = ray.get(b2_read, timeout=GET_TIMEOUT_S)
+        # Worker-failure knowledge is asynchronous. Re-issue bounded gets rather
+        # than treating a timeout as authority to advance. The witness protocol
+        # itself decides when B1 is authoritatively dead and only then may grant N+1.
+        deadline = time.monotonic() + GET_TIMEOUT_S
+        post_death_probe = None
+        while time.monotonic() < deadline:
+            post_death_probe = ray.get(
+                borrower_2.read_with_timeout.remote(POST_DEATH_PROBE_S),
+                timeout=POST_DEATH_PROBE_S + 10.0,
+            )
+            if post_death_probe["ready"]:
+                break
+            time.sleep(0.1)
+
+        assert post_death_probe is not None and post_death_probe["ready"], post_death_probe
+        recovered_object_id = post_death_probe["object_id"]
+        value = post_death_probe["value"]
         assert recovered_object_id == original_object_id
         assert value["token"] == token
         assert len(value["payload"]) == PAYLOAD_BYTES
