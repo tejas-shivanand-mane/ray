@@ -2298,9 +2298,129 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
   task_spec->clear_recovery_argument_metadata();
   absl::flat_hash_set<ObjectID> attached_object_ids;
 
-  auto populate_one = [this, task_spec, &attached_object_ids, require_frontier_commit](
-                          const ObjectID &object_id,
-                          rpc::ObjectReference *object_ref) {
+  // Fast path for the common adaptive-Frontier owner export. The old path first
+  // materializes a full per-member RecoveryManifest inside RecoveryObjectMetadata
+  // and then immediately compacts it for transport. Here we write the exact same
+  // compact wire representation directly from the shared group topology. Keep
+  // profiling on the legacy path so existing profile counters/byte accounting
+  // retain their historical meaning.
+  auto try_build_direct_adaptive_frontier_compact =
+      [this, require_frontier_commit](const ObjectID &object_id,
+                                      const rpc::Address &object_owner,
+                                      rpc::RecoveryObjectMetadata *out) {
+        if (profiling_enabled_ || !AdaptiveRecoveryFrontierEnabledCached() ||
+            out == nullptr || object_id.IsNil() ||
+            object_owner.worker_id().empty()) {
+          return false;
+        }
+
+        const TaskID task_id = object_id.TaskId();
+        uint32_t return_index = 0;
+        bool known_object = false;
+
+        const auto borrowed_it = borrowed_objects_.find(object_id);
+        if (borrowed_it != borrowed_objects_.end() &&
+            borrowed_it->second.task_id == task_id) {
+          return_index = borrowed_it->second.return_index;
+          known_object = true;
+        }
+
+        const auto task_it = task_states_.find(task_id);
+        if (!known_object && task_it != task_states_.end() &&
+            task_it->second.owned_num_returns > 0) {
+          const auto object_index = object_id.ObjectIndex();
+          if (object_index > 0 &&
+              static_cast<uint64_t>(object_index) <=
+                  static_cast<uint64_t>(task_it->second.owned_num_returns)) {
+            return_index = static_cast<uint32_t>(object_index - 1);
+            known_object = true;
+          }
+        }
+
+        if (!known_object || task_it == task_states_.end() ||
+            task_it->second.manifest.task_id().empty()) {
+          return false;
+        }
+
+        const auto membership = recovery_frontier_planner_->FindTask(task_id);
+        if (!membership.has_value()) {
+          return false;
+        }
+
+        const RecoveryFrontierGroup *group =
+            recovery_frontier_planner_->GetGroup(membership->group_id);
+        const auto leader_it = task_states_.find(membership->group_id);
+        if (group == nullptr || leader_it == task_states_.end() ||
+            leader_it->second.manifest.task_id().empty() ||
+            membership->member_index >= group->Members().size()) {
+          return false;
+        }
+
+        const auto protection_it =
+            recovery_frontier_protection_manifests_.find(membership->group_id);
+        const bool adaptive_topology_established =
+            protection_it != recovery_frontier_protection_manifests_.end() &&
+            protection_it->second.frozen();
+        if (require_frontier_commit && adaptive_topology_established &&
+            !group->IsTaskCommitted(task_id)) {
+          return false;
+        }
+
+        const RecoveryFrontierMember &member =
+            group->Members()[membership->member_index];
+        if (member.task_id != task_id || member.task_spec == nullptr) {
+          return false;
+        }
+
+        const rpc::RecoveryManifest &group_manifest = leader_it->second.manifest;
+        if (!group_manifest.has_version()) {
+          return false;
+        }
+        const rpc::RecoveryHolder *owner = FindHolderByRank(group_manifest, 0);
+        if (owner == nullptr || !SameWorker(owner->address(), object_owner)) {
+          return false;
+        }
+
+        out->Clear();
+        out->set_return_index(return_index);
+        out->set_first_holder_task_spec(
+            recovery_succession_internal::EncodeFrontierSuccessionMemberMarker(
+                membership->group_id));
+
+        rpc::RecoveryObjectTransportManifest *compact =
+            out->mutable_compact_manifest();
+        compact->set_target_holder_count(group_manifest.target_holder_count());
+        compact->set_witness_count(group_manifest.witness_count());
+        compact->set_generation(group_manifest.version().generation());
+        compact->set_frozen(group_manifest.frozen());
+        compact->set_tombstoned(group_manifest.tombstoned());
+        compact->set_recovery_attempt(group_manifest.recovery_attempt());
+        compact->set_max_recovery_attempts(member.task_spec->max_retries());
+
+        for (const rpc::Address &witness : group_manifest.witness_raylets()) {
+          compact->add_witness_raylets()->CopyFrom(witness);
+        }
+        for (const rpc::RecoveryHolder &holder : group_manifest.succession()) {
+          if (holder.rank() == 0) {
+            continue;
+          }
+          if (holder.rank() !=
+              static_cast<uint32_t>(compact->non_owner_holders_size() + 1)) {
+            out->Clear();
+            return false;
+          }
+          compact->add_non_owner_holders()->CopyFrom(holder.address());
+        }
+        return true;
+      };
+
+  auto populate_one =
+      [this,
+       task_spec,
+       &attached_object_ids,
+       &try_build_direct_adaptive_frontier_compact,
+       require_frontier_commit](const ObjectID &object_id,
+                                rpc::ObjectReference *object_ref) {
     if (object_ref == nullptr || object_id.IsNil()) {
       return;
     }
@@ -2319,6 +2439,25 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
     if (attached_object_ids.contains(object_id)) {
       object_ref->clear_recovery_metadata();
       return;
+    }
+
+    // Adaptive Frontier fast path: build the compact transport protobuf
+    // directly and swap it into the TaskSpec sidecar. No per-member full
+    // RecoveryManifest or intermediate RecoveryObjectMetadata is materialized.
+    if (!profiling_enabled_ && AdaptiveRecoveryFrontierEnabledCached() &&
+        object_ref->has_owner_address()) {
+      rpc::RecoveryObjectMetadata direct_compact;
+      if (try_build_direct_adaptive_frontier_compact(
+              object_id, object_ref->owner_address(), &direct_compact)) {
+        rpc::RecoveryTaskArgumentMetadata *entry =
+            task_spec->add_recovery_argument_metadata();
+        entry->set_object_id(object_id.Binary());
+        entry->mutable_owner_address()->CopyFrom(object_ref->owner_address());
+        entry->mutable_recovery_metadata()->Swap(&direct_compact);
+        object_ref->clear_recovery_metadata();
+        attached_object_ids.insert(object_id);
+        return;
+      }
     }
 
     rpc::RecoveryObjectMetadata source_storage;
