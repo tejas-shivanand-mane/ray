@@ -6,6 +6,11 @@ finish replication to W3. W1 is then killed before any grant is possible.
 After W3 resumes, W2 must stabilize the already-reserved attempt 1 rather than
 create a competing attempt/winner. Two concurrent borrowers must still produce
 exactly one replay.
+
+The selected W1/W2/W3 are required to be dedicated witness-only nodes. This is
+important because the replay TaskSpec intentionally retains the original hard
+NodeAffinity to the executor node; killing that executor would test scheduling
+failure rather than witness-coordinator failover.
 """
 from __future__ import annotations
 
@@ -48,7 +53,8 @@ PAYLOAD_BYTES = 64 * 1024
 OBJECT_TIMEOUT_MS = 300
 GET_TIMEOUT_S = 120.0
 INITIAL_BLOCK_TIMEOUT_S = 240.0
-MAX_SELECTION_ATTEMPTS = 20
+MAX_SELECTION_ATTEMPTS = 60
+WITNESS_POOL_SIZE = 8
 
 # This includes owner-death propagation, OWNER_DIED interception, claim creation,
 # and the W1 -> W2 RPC. It is not a protocol timeout. The loop below continuously
@@ -165,7 +171,7 @@ def main() -> None:
         )
         spare_nodes = [
             cluster.add_node(num_cpus=0, resources={f"witness_pool_{i}": 1})
-            for i in range(4)
+            for i in range(WITNESS_POOL_SIZE)
         ]
         borrower_candidates = [
             (
@@ -219,17 +225,33 @@ def main() -> None:
             )
 
             order = fixed_r_witness_order(ref, all_nodes, R)
-            w1, _w2, w3 = order
-            if not same_node(w1, head_node) and not same_node(w3, head_node):
+            w1, w2, w3 = order
+
+            # Keep witness faults orthogonal to scheduling/borrower faults. All
+            # three witnesses must be dedicated zero-CPU witness-pool nodes.
+            dedicated_witnesses = all(
+                any(same_node(witness, spare) for spare in spare_nodes)
+                for witness in (w1, w2, w3)
+            )
+            if dedicated_witnesses:
                 selected = (token, ref, order)
                 break
+
             Path(str(marker) + f".release.{token}").touch()
             ray.get(ref, timeout=15.0)
 
-        assert selected is not None, "Could not select non-head W1/W3"
+        assert selected is not None, (
+            "Could not select a task whose W1/W2/W3 are all dedicated witness nodes"
+        )
         token, ref, order = selected
         w1, w2, w3 = order
         original_object_id = ref.hex()
+
+        # Defensive invariants: the hard-affinity executor must survive the W1
+        # failure, and no borrower process is placed on a witness raylet.
+        assert not same_node(w1, executor_node)
+        assert not same_node(w2, executor_node)
+        assert not same_node(w3, executor_node)
 
         non_witness_borrower_nodes = [
             (node, label)
@@ -333,6 +355,7 @@ def main() -> None:
         print(f"  dead coordinator W1       = {node_id_hex(w1)}")
         print(f"  reservation holder W2     = {node_id_hex(w2)}")
         print(f"  stalled/resumed W3        = {node_id_hex(w3)}")
+        print(f"  executor (kept alive)     = {node_id_hex(executor_node)}")
         print(f"  original ObjectID         = {original_object_id}")
         print(f"  borrower A ObjectID       = {id_a}")
         print(f"  borrower B ObjectID       = {id_b}")
