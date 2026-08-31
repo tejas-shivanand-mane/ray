@@ -792,16 +792,22 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
 
   const TaskID task_id = TaskID::FromBinary(task_proto.task_id());
 
+  const bool baseline_enabled =
+      RayConfig::instance().enable_recovery_witness_holder_baseline();
+  const bool production_adaptive =
+      task_manager_owns_recipe && !baseline_enabled;
+
   // Register every eligible live owner task with the shared frontier planner
-  // before any backend-specific activation/filtering. This is owner-local only:
-  // no holder, witness, manifest, or candidate RPC is emitted here.
-  const bool frontier_enabled = RecoveryFrontierEnabled();
+  // before any backend-specific activation/filtering. For production adaptive
+  // Succession the RayConfig bit is immutable and avoids an extra manager-lock
+  // probe just to discover whether the planner exists.
+  const bool frontier_enabled =
+      production_adaptive
+          ? RayConfig::instance().enable_recovery_frontier()
+          : RecoveryFrontierEnabled();
   if (frontier_enabled && !returned_refs.empty()) {
     static_cast<void>(RegisterOwnerTaskWithRecoveryFrontier(task_spec));
   }
-
-  const bool baseline_enabled =
-      RayConfig::instance().enable_recovery_witness_holder_baseline();
 
   // PERF-ONLY frontier-density owner-state selector.
   //
@@ -827,17 +833,20 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
     }
   }
 
-  // Production CoreWorker Recovery Succession always pins the existing
-  // TaskManager entry. Keep the config/baseline checks for compatibility with
-  // direct manager callers and older experiments.
+  // Production adaptive Succession owns neither a duplicate TaskSpec nor
+  // duplicate return-lifetime state here. TaskManager already owns both the
+  // immutable recipe and reconstructable_return_ids_. Fixed-R/direct-manager
+  // paths deliberately retain the old manager state for baseline isolation.
+  if (production_adaptive) {
+    return;
+  }
+
   const bool task_manager_pin =
-      task_manager_owns_recipe || baseline_enabled ||
+      baseline_enabled ||
       RayConfig::instance().enable_recovery_succession_task_manager_pin();
 
-  // Deliberately keep Fixed-R on its old ObjectID-set lifetime path. The first
-  // optimization pass is scoped to adaptive Succession only.
-  const bool succession_counter_lifetime =
-      task_manager_owns_recipe && !baseline_enabled;
+  // Legacy/direct-manager and Fixed-R paths use the exact ObjectID set.
+  const bool succession_counter_lifetime = false;
 
   OwnerRetainedTaskState retained;
   uint64_t retained_copy_ns = 0;
@@ -962,6 +971,47 @@ bool RecoverySuccessionManager::OwnerTaskHasLiveReturns(
   const auto it = owner_retained_tasks_.find(task_id);
   return it != owner_retained_tasks_.end() &&
          it->second.HasLiveReturns();
+}
+
+bool RecoverySuccessionManager::HandleOwnerTaskLineageReleased(
+    const TaskID &task_id) {
+  if (task_id.IsNil() ||
+      RayConfig::instance().enable_recovery_witness_holder_baseline()) {
+    return false;
+  }
+
+  absl::MutexLock lock(&mutex_);
+
+  if (recovery_frontier_planner_ != nullptr &&
+      recovery_frontier_planner_->GroupSize() > 1) {
+    const auto membership = recovery_frontier_planner_->FindTask(task_id);
+    if (membership.has_value()) {
+      RecoveryFrontierGroup *group =
+          recovery_frontier_planner_->GetMutableGroup(membership->group_id);
+      RAY_CHECK(group != nullptr);
+
+      if (!group->MarkOwnerTaskReleased(task_id)) {
+        return false;
+      }
+
+      // The final live member released its native TaskManager lineage. Close a
+      // partial group before a future task can append to a terminal capsule.
+      RAY_CHECK(recovery_frontier_planner_->SealGroup(membership->group_id));
+
+      if (recovery_frontier_protection_manifests_.contains(
+              membership->group_id)) {
+        return true;
+      }
+
+      // Never activated/exported: there is no remote state to tombstone.
+      RAY_CHECK(recovery_frontier_planner_->EraseGroup(membership->group_id));
+      return false;
+    }
+  }
+
+  const auto task_it = task_states_.find(task_id);
+  return task_it != task_states_.end() &&
+         !task_it->second.manifest.tombstoned();
 }
 
 bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(

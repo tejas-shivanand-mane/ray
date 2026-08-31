@@ -354,8 +354,14 @@ class RecoverySuccessionManager {
   bool GetRetainedOwnerTaskSpec(const TaskID &task_id,
                                 rpc::TaskSpec *task_spec) const;
 
-  /// True while this owner task still has at least one live returned ObjectRef.
+  /// True while a legacy/Fixed-R owner-retained task still has at least
+  /// one live returned ObjectRef.
   bool OwnerTaskHasLiveReturns(const TaskID &task_id) const;
+
+  /// Adaptive-Succession owner cleanup driven by TaskManager's existing
+  /// reconstructable-return lifetime. Returns true iff remote recovery state
+  /// for this task/frontier group should now be tombstoned.
+  bool HandleOwnerTaskLineageReleased(const TaskID &task_id);
 
   /// Records actual ObjectRef deletion. Returns true iff this was the final
   /// owner return and an activated recovery task should now be tombstoned.

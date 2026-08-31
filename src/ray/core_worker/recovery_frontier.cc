@@ -123,6 +123,7 @@ std::optional<RecoveryFrontierMembership> RecoveryFrontierGroup::AddTask(
 
   task_to_member_index_.emplace(task_id, member_index);
   members_.push_back(std::move(member));
+  ++live_owner_members_;
 
   return RecoveryFrontierMembership{
       group_id_,
@@ -321,6 +322,23 @@ bool RecoveryFrontierGroup::ApplyCommittedAppend(
 bool RecoveryFrontierGroup::IsTaskCommitted(const TaskID &task_id) const {
   const auto it = task_to_member_index_.find(task_id);
   return it != task_to_member_index_.end() && it->second < committed_member_count_;
+}
+
+bool RecoveryFrontierGroup::MarkOwnerTaskReleased(const TaskID &task_id) {
+  const auto it = task_to_member_index_.find(task_id);
+  if (it == task_to_member_index_.end()) {
+    return false;
+  }
+
+  RecoveryFrontierMember &member = members_[it->second];
+  if (!member.owner_returns_live) {
+    return live_owner_members_ == 0;
+  }
+
+  RAY_CHECK_GT(live_owner_members_, 0U);
+  member.owner_returns_live = false;
+  --live_owner_members_;
+  return live_owner_members_ == 0;
 }
 
 std::optional<RecoveryFrontierMembership> RecoveryFrontierGroup::FindTask(

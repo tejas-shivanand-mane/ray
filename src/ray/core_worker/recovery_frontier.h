@@ -42,6 +42,10 @@ struct RecoveryFrontierMember {
   uint32_t member_index = 0;
   uint32_t first_group_return_index = 0;
   uint32_t num_returns = 0;
+
+  // Owner-local lifetime bit. It is intentionally not serialized: holders
+  // store replay recipes, while only the producer owner decides group cleanup.
+  bool owner_returns_live = true;
 };
 
 struct RecoveryFrontierMembership {
@@ -129,6 +133,10 @@ class RecoveryFrontierGroup {
 
   bool IsTaskCommitted(const TaskID &task_id) const;
 
+  /// Mark this owner's TaskManager lineage for one member as released.
+  /// Idempotent. Returns true iff no registered owner member remains live.
+  bool MarkOwnerTaskReleased(const TaskID &task_id);
+
   /// Look up a member by its producer TaskID.
   std::optional<RecoveryFrontierMembership> FindTask(const TaskID &task_id) const;
 
@@ -147,6 +155,7 @@ class RecoveryFrontierGroup {
   uint32_t max_members_;
   uint32_t next_group_return_index_ = 0;
   uint32_t committed_member_count_ = 0;
+  uint32_t live_owner_members_ = 0;
   uint64_t generation_ = 0;
   bool append_in_flight_ = false;
   uint64_t in_flight_generation_ = 0;

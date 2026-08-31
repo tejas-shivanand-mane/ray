@@ -588,10 +588,22 @@ CoreWorker::CoreWorker(
               return;
             }
 
-            // Patch 4L: TaskManager lineage can be released after producer
-            // completion even while a returned ObjectRef is still in scope.
-            // Actual owner-return lifetime is authoritative for recovery cleanup.
-            if (recovery_succession_manager_->OwnerTaskHasLiveReturns(task_id)) {
+            // Adaptive Succession reuses TaskManager's native
+            // reconstructable_return_ids_ lifetime. This callback fires only
+            // after the language frontend and all dependent tasks release every
+            // reconstructable return, so no second owner-return tracker is needed.
+            if (!recovery_witness_holder_baseline_enabled_) {
+              const bool should_tombstone =
+                  recovery_succession_manager_->HandleOwnerTaskLineageReleased(
+                      task_id);
+              task_manager_->ReleaseTaskForRecoverySuccession(task_id);
+              if (!should_tombstone) {
+                return;
+              }
+            } else if (
+                recovery_succession_manager_->OwnerTaskHasLiveReturns(task_id)) {
+              // Fixed-R deliberately keeps its existing exact ObjectID callback
+              // lifetime path for an uncontaminated baseline comparison.
               return;
             }
 
@@ -3527,70 +3539,74 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     recovery_succession_manager_->RetainOwnerTaskSpecForLazyRecovery(
         task_spec, returned_refs, /*task_manager_owns_recipe=*/true);
 
-    auto on_owner_return_deleted = [this](const ObjectID &deleted_object_id) {
-      if (!recovery_succession_enabled_ ||
-          recovery_succession_manager_ == nullptr) {
-        return;
-      }
+    // Fixed-R retains the old per-return callback lifetime path. Adaptive
+    // Succession relies on TaskManager's existing lineage-release signal instead.
+    if (recovery_witness_holder_baseline_enabled_) {
+      auto on_owner_return_deleted = [this](const ObjectID &deleted_object_id) {
+        if (!recovery_succession_enabled_ ||
+            recovery_succession_manager_ == nullptr) {
+          return;
+        }
 
-      const TaskID deleted_task_id = deleted_object_id.TaskId();
+        const TaskID deleted_task_id = deleted_object_id.TaskId();
 
-      bool final_return_deleted = false;
-      const bool should_tombstone =
-          recovery_succession_manager_->HandleOwnerReturnRefDeleted(
-              deleted_object_id, &final_return_deleted);
+        bool final_return_deleted = false;
+        const bool should_tombstone =
+            recovery_succession_manager_->HandleOwnerReturnRefDeleted(
+                deleted_object_id, &final_return_deleted);
 
-      if (final_return_deleted) {
-        task_manager_->ReleaseTaskForRecoverySuccession(deleted_task_id);
-      }
+        if (final_return_deleted) {
+          task_manager_->ReleaseTaskForRecoverySuccession(deleted_task_id);
+        }
 
-      if (!should_tombstone) {
-        return;
-      }
+        if (!should_tombstone) {
+          return;
+        }
 
-      io_service_.post(
-          [this, deleted_task_id] {
-            if (!recovery_succession_enabled_ ||
-                recovery_succession_manager_ == nullptr) {
-              return;
-            }
+        io_service_.post(
+            [this, deleted_task_id] {
+              if (!recovery_succession_enabled_ ||
+                  recovery_succession_manager_ == nullptr) {
+                return;
+              }
 
-            auto tombstone =
-                recovery_succession_manager_->BuildTombstoneForTask(deleted_task_id);
-            if (!tombstone.has_value()) {
-              return;
-            }
+              auto tombstone =
+                  recovery_succession_manager_->BuildTombstoneForTask(deleted_task_id);
+              if (!tombstone.has_value()) {
+                return;
+              }
 
-            const TaskID tombstone_task_id =
-                TaskID::FromBinary(tombstone->task_id());
-            if (!recovery_tombstones_in_flight_.insert(tombstone_task_id).second) {
-              return;
-            }
+              const TaskID tombstone_task_id =
+                  TaskID::FromBinary(tombstone->task_id());
+              if (!recovery_tombstones_in_flight_.insert(tombstone_task_id).second) {
+                return;
+              }
 
-            RAY_LOG(INFO).WithField(tombstone_task_id)
-                << "Owner return refs released; publishing recovery tombstone";
+              RAY_LOG(INFO).WithField(tombstone_task_id)
+                  << "Owner return refs released; publishing recovery tombstone";
 
-            PublishRecoveryTombstone(std::move(tombstone.value()));
-          },
-          "CoreWorker.PublishRecoveryTombstone");
-    };
+              PublishRecoveryTombstone(std::move(tombstone.value()));
+            },
+            "CoreWorker.PublishRecoveryTombstone");
+      };
 
-    for (const rpc::ObjectReference &returned_ref : returned_refs) {
-      if (returned_ref.object_id().size() != ObjectID::Size()) {
-        continue;
-      }
+      for (const rpc::ObjectReference &returned_ref : returned_refs) {
+        if (returned_ref.object_id().size() != ObjectID::Size()) {
+          continue;
+        }
 
-      const ObjectID object_id =
-          ObjectID::FromBinary(returned_ref.object_id());
+        const ObjectID object_id =
+            ObjectID::FromBinary(returned_ref.object_id());
 
-      const bool callback_added =
-          reference_counter_->AddObjectRefDeletedCallback(
-              object_id, on_owner_return_deleted);
+        const bool callback_added =
+            reference_counter_->AddObjectRefDeletedCallback(
+                object_id, on_owner_return_deleted);
 
-      if (!callback_added) {
-        on_owner_return_deleted(object_id);
-      }
-    }
+        if (!callback_added) {
+          on_owner_return_deleted(object_id);
+        }
+      }    }
+
   }
 
   if (recovery_succession_enabled_ &&
