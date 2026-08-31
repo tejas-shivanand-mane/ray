@@ -50,6 +50,10 @@ OBJECT_TIMEOUT_MS = 300
 GET_TIMEOUT_S = 120.0
 INITIAL_BLOCK_TIMEOUT_S = 240.0
 MAX_SELECTION_ATTEMPTS = 20
+# W3 must remain GCS-ALIVE. W1->W2 is a local-cluster RPC and should be visible
+# almost immediately; fail the test rather than accidentally waiting long
+# enough for the heartbeat detector to turn a stall into a legitimate failure.
+PARTIAL_WINDOW_TIMEOUT_S = 0.6
 
 
 def fixed_r_config() -> dict:
@@ -220,14 +224,15 @@ def main() -> None:
         first_replica = wait_for_log(
             logs,
             "Fixed-R recovery claim replicated at witness index 1 attempt 1 coordinator index 0",
-            timeout_s=GET_TIMEOUT_S,
+            timeout_s=PARTIAL_WINDOW_TIMEOUT_S,
         )
         assert first_replica, find_log_lines(
             logs, "Fixed-R recovery claim replicated at witness index"
         )
 
         # Because W3 is still live-but-stopped, W1 cannot have completed the
-        # ACK-before-grant barrier.
+        # ACK-before-grant barrier. If W3 became GCS-dead, the experiment is
+        # invalid rather than evidence of safe partial-replication handling.
         assert_node_alive(ray, node_id_hex(w3))
         assert count_starts(marker, token, after_ns=failure_wall_ns) == 0, read_marker(marker)
         pre_kill_grants = find_log_lines(
@@ -239,10 +244,11 @@ def main() -> None:
         # W3 has acknowledged it.
         cluster.remove_node(w1, allow_graceful=False)
 
-        # Resume W3 promptly so it remains an authoritative live witness and W2
-        # can finish stabilizing the existing attempt-1 reservation.
+        # Resume W3 immediately so the stall itself cannot become a legitimate
+        # authoritative witness failure.
         continue_raylet(w3)
         stopped_node = None
+        assert_node_alive(ray, node_id_hex(w3))
         wait_for_node_state(ray, node_id_hex(w1), alive=False, timeout_s=30.0)
 
         result_a, result_b = ray.get([read_a, read_b], timeout=GET_TIMEOUT_S)
