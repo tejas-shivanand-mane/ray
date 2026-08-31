@@ -17,6 +17,7 @@
 #include <memory>
 #include <utility>
 
+#include "ray/common/ray_config.h"
 #include "ray/core_worker/core_worker.h"
 #include "ray/core_worker/core_worker_process.h"
 
@@ -56,7 +57,7 @@ void FutureResolver::ResolveFutureAsync(const ObjectID &object_id,
   // a different owner means recovery has already handed ownership to an acting
   // successor, which is the only case where FutureResolver itself should
   // transparently re-enter recovery after an owner RPC failure.
-  RAY_UNUSED(RecordAndIsRecoverySuccessor(object_id, owner_address));
+  static_cast<void>(RecordAndIsRecoverySuccessor(object_id, owner_address));
 
   auto conn = owner_clients_->GetOrConnect(owner_address);
 
@@ -96,10 +97,13 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     RAY_LOG(WARNING).WithField(object_id)
         << "Failed to retrieve deserialized object value: " << status;
 
+    const bool fixed_r_enabled =
+        RayConfig::instance().enable_recovery_succession() &&
+        RayConfig::instance().enable_recovery_witness_holder_baseline();
     const bool recovery_successor =
         RecordAndIsRecoverySuccessor(object_id, owner_address);
 
-    if (recovery_successor && CoreWorkerProcess::IsInitialized()) {
+    if (fixed_r_enabled && recovery_successor && CoreWorkerProcess::IsInitialized()) {
       bool start_reentry = false;
       {
         absl::MutexLock lock(&recovery_owner_mutex_);
