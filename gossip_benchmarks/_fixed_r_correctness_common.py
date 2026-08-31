@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from ray._raylet import compute_task_id
 from ray._private import ray_constants
+from ray.core.generated.common_pb2 import Address
 
 
 def _node_id_hex(node: Any) -> str:
@@ -16,6 +17,18 @@ def _node_id_hex(node: Any) -> str:
     if isinstance(node_id, bytes):
         return node_id.hex()
     return str(node_id)
+
+
+def _object_owner_node_id_hex(object_ref: Any) -> str | None:
+    """Return the original ObjectRef owner's node id, if carried by the ref."""
+    serialized = object_ref.owner_address()
+    if not serialized:
+        return None
+    address = Address()
+    address.ParseFromString(serialized)
+    if not address.node_id:
+        return None
+    return bytes(address.node_id).hex()
 
 
 def stable_witness_score(task_id_binary: bytes, node_id_binary: bytes) -> int:
@@ -32,15 +45,22 @@ def stable_witness_score(task_id_binary: bytes, node_id_binary: bytes) -> int:
 def fixed_r_witness_order(object_ref: Any, nodes: Iterable[Any], count: int) -> list[Any]:
     """Reconstruct the ordered Fixed-R witness selection for one task.
 
-    CoreWorker's ``better_witness`` comparator orders candidates by *larger*
-    FNV-1a score first, with node-id bytes ascending only as the tie-breaker.
-    Keep that direction exact: choosing the smallest scores would identify the
-    wrong W1/W2/W3 and invalidate failover fault injection.
+    Match CoreWorker exactly on the two details that matter to these fault tests:
+      * the submitting/owning CoreWorker's node is not a witness candidate;
+      * larger FNV-1a scores rank first, with node-id bytes ascending only as
+        the tie-breaker.
+
+    The caller should still pass nodes that were ALIVE when the task was
+    protected, matching the owner's GCS-backed witness cache snapshot.
     """
     task_id_binary = compute_task_id(object_ref).binary()
+    owner_node_id = _object_owner_node_id_hex(object_ref)
     scored: list[tuple[int, bytes, Any]] = []
     for node in nodes:
-        node_binary = bytes.fromhex(_node_id_hex(node))
+        node_hex = _node_id_hex(node)
+        if owner_node_id is not None and node_hex == owner_node_id:
+            continue
+        node_binary = bytes.fromhex(node_hex)
         scored.append(
             (stable_witness_score(task_id_binary, node_binary), node_binary, node)
         )
