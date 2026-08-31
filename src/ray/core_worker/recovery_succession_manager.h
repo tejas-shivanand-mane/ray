@@ -340,12 +340,15 @@ class RecoverySuccessionManager {
   bool RegisterOwnedTaskLazy(const TaskSpecification &task_spec,
                              const rpc::RecoveryManifest &manifest);
 
-  /// Patch 4L: retain one dormant owner TaskSpec copy while at least one static
-  /// return ObjectRef is truly in scope. This does not activate recovery or
-  /// construct a manifest.
+  /// Retain owner-side lifetime state while at least one static return ObjectRef
+  /// is truly in scope. Production CoreWorker callers set
+  /// task_manager_owns_recipe=true and use TaskManager as the sole dormant
+  /// TaskSpec owner; the manager-owned TaskSpec remains only as a compatibility
+  /// fallback for direct manager tests/non-CoreWorker callers.
   void RetainOwnerTaskSpecForLazyRecovery(
       const TaskSpecification &task_spec,
-      const std::vector<rpc::ObjectReference> &returned_refs);
+      const std::vector<rpc::ObjectReference> &returned_refs,
+      bool task_manager_owns_recipe = false);
 
   /// Copies the retained owner TaskSpec if one is still live.
   bool GetRetainedOwnerTaskSpec(const TaskID &task_id,
@@ -532,11 +535,21 @@ class RecoverySuccessionManager {
   };
 
   struct OwnerRetainedTaskState {
-    // Legacy Patch-4L mode stores the duplicate TaskSpec here. In 4N-PIN mode
-    // this remains empty because TaskManager owns the sole dormant recipe.
+    // Production adaptive Succession leaves this empty because TaskManager owns
+    // the sole dormant recipe. Direct manager tests/non-CoreWorker callers may
+    // use this compatibility fallback.
     rpc::TaskSpec task_spec;
     uint64_t task_spec_bytes = 0;
+
+    // Keep the original set for Fixed-R and legacy/direct-manager paths so this
+    // optimization does not change the baseline. Adaptive Succession uses only
+    // remaining_live_returns and avoids allocating/hashing the set.
     absl::flat_hash_set<ObjectID> live_return_ids;
+    uint32_t remaining_live_returns = 0;
+
+    bool HasLiveReturns() const {
+      return remaining_live_returns > 0 || !live_return_ids.empty();
+    }
   };
 
   struct BorrowedObjectRecoveryState {

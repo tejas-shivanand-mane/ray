@@ -780,7 +780,8 @@ bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
 
 void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
     const TaskSpecification &task_spec,
-    const std::vector<rpc::ObjectReference> &returned_refs) {
+    const std::vector<rpc::ObjectReference> &returned_refs,
+    bool task_manager_owns_recipe) {
   const rpc::TaskSpec &task_proto = task_spec.GetMessage();
 
   if (task_proto.task_id().empty() ||
@@ -826,9 +827,17 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
     }
   }
 
+  // Production CoreWorker Recovery Succession always pins the existing
+  // TaskManager entry. Keep the config/baseline checks for compatibility with
+  // direct manager callers and older experiments.
   const bool task_manager_pin =
-      baseline_enabled ||
+      task_manager_owns_recipe || baseline_enabled ||
       RayConfig::instance().enable_recovery_succession_task_manager_pin();
+
+  // Deliberately keep Fixed-R on its old ObjectID-set lifetime path. The first
+  // optimization pass is scoped to adaptive Succession only.
+  const bool succession_counter_lifetime =
+      task_manager_owns_recipe && !baseline_enabled;
 
   OwnerRetainedTaskState retained;
   uint64_t retained_copy_ns = 0;
@@ -866,10 +875,14 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
       continue;
     }
 
-    retained.live_return_ids.insert(object_id);
+    if (succession_counter_lifetime) {
+      ++retained.remaining_live_returns;
+    } else {
+      retained.live_return_ids.insert(object_id);
+    }
   }
 
-  if (retained.live_return_ids.empty()) {
+  if (!retained.HasLiveReturns()) {
     return;
   }
 
@@ -905,6 +918,14 @@ void RecoverySuccessionManager::RetainOwnerTaskSpecForLazyRecovery(
     return;
   }
 
+  if (succession_counter_lifetime) {
+    // Static return registration is complete on the first CoreWorker call. A
+    // repeated registration must not re-inflate the count after callbacks may
+    // already have fired.
+    return;
+  }
+
+  // Preserve the existing Fixed-R/legacy merge behavior exactly.
   for (const ObjectID &object_id : retained.live_return_ids) {
     existing->second.live_return_ids.insert(object_id);
   }
@@ -921,7 +942,7 @@ bool RecoverySuccessionManager::GetRetainedOwnerTaskSpec(
 
   const auto it = owner_retained_tasks_.find(task_id);
   if (it == owner_retained_tasks_.end() ||
-      it->second.live_return_ids.empty() ||
+      !it->second.HasLiveReturns() ||
       it->second.task_spec.task_id().empty()) {
     // In 4N-PIN mode the dormant TaskSpec lives in TaskManager.
     return false;
@@ -940,7 +961,7 @@ bool RecoverySuccessionManager::OwnerTaskHasLiveReturns(
   absl::MutexLock lock(&mutex_);
   const auto it = owner_retained_tasks_.find(task_id);
   return it != owner_retained_tasks_.end() &&
-         !it->second.live_return_ids.empty();
+         it->second.HasLiveReturns();
 }
 
 bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
@@ -963,12 +984,22 @@ bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
     return false;
   }
 
-  if (retained_it->second.live_return_ids.erase(object_id) == 0) {
-    return false;
-  }
-
-  if (!retained_it->second.live_return_ids.empty()) {
-    return false;
+  if (retained_it->second.remaining_live_returns > 0) {
+    // Adaptive Succession registers exactly one deletion callback for each
+    // static returned ObjectRef counted at owner completion.
+    --retained_it->second.remaining_live_returns;
+    if (retained_it->second.remaining_live_returns > 0) {
+      return false;
+    }
+  } else {
+    // Fixed-R and direct/legacy manager callers retain the original exact
+    // ObjectID-set behavior.
+    if (retained_it->second.live_return_ids.erase(object_id) == 0) {
+      return false;
+    }
+    if (!retained_it->second.live_return_ids.empty()) {
+      return false;
+    }
   }
 
   if (final_return_deleted != nullptr) {
@@ -1004,7 +1035,7 @@ bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
       for (const RecoveryFrontierMember &member : group->Members()) {
         const auto live_it = owner_retained_tasks_.find(member.task_id);
         if (live_it != owner_retained_tasks_.end() &&
-            !live_it->second.live_return_ids.empty()) {
+            live_it->second.HasLiveReturns()) {
           return false;
         }
       }
@@ -1491,7 +1522,7 @@ RecoverySuccessionManager::PrepareHolderAdmission(
       // while the application still owns a return ObjectRef.
       const auto retained_it = owner_retained_tasks_.find(task_id);
       if (retained_it != owner_retained_tasks_.end() &&
-          !retained_it->second.live_return_ids.empty() &&
+          retained_it->second.HasLiveReturns() &&
           !retained_it->second.task_spec.task_id().empty()) {
         lineage_task_spec = &retained_it->second.task_spec;
       }
@@ -2494,7 +2525,7 @@ RecoverySuccessionManager::PrepareTaskReplay(
     // Patch 4L: owner replay may outlive TaskManager's ordinary lineage entry.
     const auto retained_it = owner_retained_tasks_.find(task_id);
     if (retained_it != owner_retained_tasks_.end() &&
-        !retained_it->second.live_return_ids.empty() &&
+        retained_it->second.HasLiveReturns() &&
         !retained_it->second.task_spec.task_id().empty()) {
       lineage_task_spec = &retained_it->second.task_spec;
     }
@@ -2811,7 +2842,7 @@ std::optional<rpc::RecoveryManifest> RecoverySuccessionManager::BuildTombstoneFo
       for (const RecoveryFrontierMember &member : group->Members()) {
         const auto live_it = owner_retained_tasks_.find(member.task_id);
         if (live_it != owner_retained_tasks_.end() &&
-            !live_it->second.live_return_ids.empty()) {
+            live_it->second.HasLiveReturns()) {
           return std::nullopt;
         }
       }

@@ -3517,15 +3517,15 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
       recovery_succession_manager_ != nullptr &&
       !task_spec.GetMessage().has_recovery_manifest() &&
       RecoverySuccessionManager::IsEligibleTask(task_spec.GetMessage())) {
-    if (recovery_witness_holder_baseline_enabled_ ||
-        RayConfig::instance().enable_recovery_succession_task_manager_pin()) {
-      RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
-          << "Eligible recovery task disappeared before TaskManager pin: "
-          << task_spec.TaskId();
-    }
+    // TaskManager already owns this immutable TaskSpec. Pin that existing
+    // entry rather than maintaining a second dormant protobuf in adaptive
+    // Recovery Succession. Fixed-R already used this same TaskManager pin.
+    RAY_CHECK(task_manager_->PinTaskForRecoverySuccession(task_spec.TaskId()))
+        << "Eligible recovery task disappeared before TaskManager pin: "
+        << task_spec.TaskId();
 
     recovery_succession_manager_->RetainOwnerTaskSpecForLazyRecovery(
-        task_spec, returned_refs);
+        task_spec, returned_refs, /*task_manager_owns_recipe=*/true);
 
     auto on_owner_return_deleted = [this](const ObjectID &deleted_object_id) {
       if (!recovery_succession_enabled_ ||
@@ -3540,9 +3540,7 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
           recovery_succession_manager_->HandleOwnerReturnRefDeleted(
               deleted_object_id, &final_return_deleted);
 
-      if (final_return_deleted &&
-          (recovery_witness_holder_baseline_enabled_ ||
-           RayConfig::instance().enable_recovery_succession_task_manager_pin())) {
+      if (final_return_deleted) {
         task_manager_->ReleaseTaskForRecoverySuccession(deleted_task_id);
       }
 
