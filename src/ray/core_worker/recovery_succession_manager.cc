@@ -1145,6 +1145,19 @@ bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
 std::vector<RecoverySuccessionManager::CandidateReport>
 RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) {
   const auto patch4g_start = std::chrono::steady_clock::now();
+
+  // Adaptive Frontier compact sidecars are the common Benchmark-58 receiver
+  // path. Keep pointers into the immutable incoming TaskSpec so we can defer
+  // expansion until after taking the manager lock without copying the compact
+  // protobuf through a synthetic ObjectReference/RecoveryObjectMetadata first.
+  struct DirectFrontierDependency {
+    ObjectID object_id;
+    TaskID task_id;
+    TaskID group_id;
+    const rpc::RecoveryTaskArgumentMetadata *entry = nullptr;
+  };
+
+  std::vector<DirectFrontierDependency> direct_frontier_metadata;
   std::vector<std::pair<ObjectID, rpc::RecoveryObjectMetadata>> received_metadata;
   absl::flat_hash_set<ObjectID> received_object_ids;
 
@@ -1158,18 +1171,56 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
   };
 
   // Patch 4I primary path: one TaskSpec-level sidecar per unique dependency.
+  // Adaptive Frontier compact entries remain compact here; ordinary Succession,
+  // Fixed-R, full/fallback metadata, and malformed entries retain the old path.
   for (const rpc::RecoveryTaskArgumentMetadata &entry :
        task_spec.recovery_argument_metadata()) {
     if (entry.object_id().size() != ObjectID::Size()) {
       continue;
     }
 
+    const ObjectID object_id = ObjectID::FromBinary(entry.object_id());
+    if (received_object_ids.contains(object_id)) {
+      continue;
+    }
+
+    if (AdaptiveRecoveryFrontierEnabledCached() &&
+        entry.has_owner_address() &&
+        !entry.owner_address().worker_id().empty() &&
+        entry.has_recovery_metadata() &&
+        entry.recovery_metadata().has_compact_manifest()) {
+      TaskID group_id;
+      const rpc::RecoveryObjectMetadata &transport = entry.recovery_metadata();
+      const rpc::RecoveryObjectTransportManifest &compact =
+          transport.compact_manifest();
+      bool valid_compact = compact.generation() != 0 &&
+          recovery_succession_internal::ParseFrontierSuccessionMemberMarker(
+              transport.first_holder_task_spec(), &group_id);
+      if (valid_compact) {
+        for (const rpc::Address &holder : compact.non_owner_holders()) {
+          if (holder.worker_id().empty()) {
+            valid_compact = false;
+            break;
+          }
+        }
+      }
+
+      if (valid_compact && received_object_ids.insert(object_id).second) {
+        DirectFrontierDependency dependency;
+        dependency.object_id = object_id;
+        dependency.task_id = object_id.TaskId();
+        dependency.group_id = group_id;
+        dependency.entry = &entry;
+        direct_frontier_metadata.push_back(std::move(dependency));
+        continue;
+      }
+    }
+
     rpc::RecoveryObjectMetadata metadata;
     if (!ExpandTaskSidecarRecoveryMetadata(entry, &metadata)) {
       continue;
     }
-
-    append_metadata(ObjectID::FromBinary(entry.object_id()), std::move(metadata));
+    append_metadata(object_id, std::move(metadata));
   }
 
   // Backward-compatible path for pre-4I TaskSpecs. A TaskSpec-level entry wins
@@ -1214,6 +1265,93 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
 
   absl::MutexLock lock(&mutex_);
 
+  // Direct adaptive-Frontier receiver path. Construct exactly the task-local
+  // manifest that the compatibility expansion would have produced, but avoid:
+  //   compact -> synthetic ObjectReference -> RecoveryObjectMetadata,
+  // the received_metadata full-protobuf vector copy, and the second candidate
+  // manifest copy for every member after this group has already reported.
+  for (const DirectFrontierDependency &dependency : direct_frontier_metadata) {
+    RAY_CHECK(dependency.entry != nullptr);
+    const rpc::RecoveryTaskArgumentMetadata &entry = *dependency.entry;
+    const rpc::RecoveryObjectMetadata &transport = entry.recovery_metadata();
+    const rpc::RecoveryObjectTransportManifest &compact =
+        transport.compact_manifest();
+
+    rpc::RecoveryManifest incoming_manifest;
+    incoming_manifest.set_task_id(dependency.task_id.Binary());
+    incoming_manifest.set_job_id(dependency.task_id.JobId().Binary());
+    incoming_manifest.set_target_holder_count(compact.target_holder_count());
+    incoming_manifest.set_witness_count(compact.witness_count());
+    incoming_manifest.mutable_version()->set_generation(compact.generation());
+    incoming_manifest.set_frozen(compact.frozen());
+    incoming_manifest.set_tombstoned(compact.tombstoned());
+    incoming_manifest.set_recovery_attempt(compact.recovery_attempt());
+    incoming_manifest.set_max_recovery_attempts(compact.max_recovery_attempts());
+
+    for (const rpc::Address &witness : compact.witness_raylets()) {
+      incoming_manifest.add_witness_raylets()->CopyFrom(witness);
+    }
+
+    rpc::RecoveryHolder *owner = incoming_manifest.add_succession();
+    owner->mutable_address()->CopyFrom(entry.owner_address());
+    owner->set_rank(0);
+    owner->set_failure_domain_id(entry.owner_address().node_id());
+
+    for (int i = 0; i < compact.non_owner_holders_size(); ++i) {
+      const rpc::Address &address = compact.non_owner_holders(i);
+      rpc::RecoveryHolder *holder = incoming_manifest.add_succession();
+      holder->mutable_address()->CopyFrom(address);
+      holder->set_rank(static_cast<uint32_t>(i + 1));
+      holder->set_failure_domain_id(address.node_id());
+    }
+
+    const rpc::RecoveryManifest *effective_manifest = &incoming_manifest;
+    uint32_t effective_return_index = transport.return_index();
+    const auto existing_metadata =
+        object_recovery_metadata_.find(dependency.object_id);
+    if (existing_metadata != object_recovery_metadata_.end() &&
+        existing_metadata->second.has_manifest() &&
+        CompareManifestVersions(existing_metadata->second.manifest(),
+                                incoming_manifest) > 0) {
+      effective_manifest = &existing_metadata->second.manifest();
+      effective_return_index = existing_metadata->second.return_index();
+    }
+
+    const auto tombstone_it = task_states_.find(dependency.task_id);
+    if (tombstone_it != task_states_.end() &&
+        tombstone_it->second.manifest.tombstoned() &&
+        CompareManifestVersions(tombstone_it->second.manifest,
+                                *effective_manifest) >= 0) {
+      continue;
+    }
+
+    BorrowedObjectRecoveryState borrowed_state;
+    borrowed_state.task_id = dependency.task_id;
+    borrowed_state.return_index = effective_return_index;
+    borrowed_objects_[dependency.object_id] = std::move(borrowed_state);
+
+    TaskRecoveryState &dependency_state = task_states_[dependency.task_id];
+    if (dependency_state.manifest.task_id().empty() ||
+        CompareManifestVersions(*effective_manifest,
+                                dependency_state.manifest) > 0) {
+      dependency_state.manifest.CopyFrom(*effective_manifest);
+    }
+
+    // Candidate admission is group-centric. Once this borrower has reported
+    // the group, later members skip candidate-manifest construction entirely.
+    if (!candidate_reports_sent_.contains(dependency.group_id)) {
+      rpc::RecoveryManifest candidate_manifest;
+      candidate_manifest.CopyFrom(incoming_manifest);
+      candidate_manifest.set_task_id(dependency.group_id.Binary());
+      MaybeAddCandidateReportLocked(
+          candidate_manifest,
+          /*already_stores_task_spec=*/false,
+          &reports);
+    }
+  }
+
+  // Compatibility path for ordinary Succession, Fixed-R, legacy transport,
+  // and any sidecar that could not use the direct adaptive-Frontier path.
   for (const auto &[object_id, metadata] : received_metadata) {
     TaskID frontier_group_id;
     const bool frontier_member =
@@ -1360,7 +1498,8 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
             std::chrono::steady_clock::now() - patch4g_start)
             .count());
     profile_.register_executor_metadata_refs_seen +=
-        static_cast<uint64_t>(received_metadata.size());
+        static_cast<uint64_t>(direct_frontier_metadata.size() +
+                              received_metadata.size());
     profile_.register_executor_candidate_reports_built +=
         static_cast<uint64_t>(reports.size());
   }
@@ -2298,129 +2437,9 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
   task_spec->clear_recovery_argument_metadata();
   absl::flat_hash_set<ObjectID> attached_object_ids;
 
-  // Fast path for the common adaptive-Frontier owner export. The old path first
-  // materializes a full per-member RecoveryManifest inside RecoveryObjectMetadata
-  // and then immediately compacts it for transport. Here we write the exact same
-  // compact wire representation directly from the shared group topology. Keep
-  // profiling on the legacy path so existing profile counters/byte accounting
-  // retain their historical meaning.
-  auto try_build_direct_adaptive_frontier_compact =
-      [this, require_frontier_commit](const ObjectID &object_id,
-                                      const rpc::Address &object_owner,
-                                      rpc::RecoveryObjectMetadata *out) {
-        if (profiling_enabled_ || !AdaptiveRecoveryFrontierEnabledCached() ||
-            out == nullptr || object_id.IsNil() ||
-            object_owner.worker_id().empty()) {
-          return false;
-        }
-
-        const TaskID task_id = object_id.TaskId();
-        uint32_t return_index = 0;
-        bool known_object = false;
-
-        const auto borrowed_it = borrowed_objects_.find(object_id);
-        if (borrowed_it != borrowed_objects_.end() &&
-            borrowed_it->second.task_id == task_id) {
-          return_index = borrowed_it->second.return_index;
-          known_object = true;
-        }
-
-        const auto task_it = task_states_.find(task_id);
-        if (!known_object && task_it != task_states_.end() &&
-            task_it->second.owned_num_returns > 0) {
-          const auto object_index = object_id.ObjectIndex();
-          if (object_index > 0 &&
-              static_cast<uint64_t>(object_index) <=
-                  static_cast<uint64_t>(task_it->second.owned_num_returns)) {
-            return_index = static_cast<uint32_t>(object_index - 1);
-            known_object = true;
-          }
-        }
-
-        if (!known_object || task_it == task_states_.end() ||
-            task_it->second.manifest.task_id().empty()) {
-          return false;
-        }
-
-        const auto membership = recovery_frontier_planner_->FindTask(task_id);
-        if (!membership.has_value()) {
-          return false;
-        }
-
-        const RecoveryFrontierGroup *group =
-            recovery_frontier_planner_->GetGroup(membership->group_id);
-        const auto leader_it = task_states_.find(membership->group_id);
-        if (group == nullptr || leader_it == task_states_.end() ||
-            leader_it->second.manifest.task_id().empty() ||
-            membership->member_index >= group->Members().size()) {
-          return false;
-        }
-
-        const auto protection_it =
-            recovery_frontier_protection_manifests_.find(membership->group_id);
-        const bool adaptive_topology_established =
-            protection_it != recovery_frontier_protection_manifests_.end() &&
-            protection_it->second.frozen();
-        if (require_frontier_commit && adaptive_topology_established &&
-            !group->IsTaskCommitted(task_id)) {
-          return false;
-        }
-
-        const RecoveryFrontierMember &member =
-            group->Members()[membership->member_index];
-        if (member.task_id != task_id || member.task_spec == nullptr) {
-          return false;
-        }
-
-        const rpc::RecoveryManifest &group_manifest = leader_it->second.manifest;
-        if (!group_manifest.has_version()) {
-          return false;
-        }
-        const rpc::RecoveryHolder *owner = FindHolderByRank(group_manifest, 0);
-        if (owner == nullptr || !SameWorker(owner->address(), object_owner)) {
-          return false;
-        }
-
-        out->Clear();
-        out->set_return_index(return_index);
-        out->set_first_holder_task_spec(
-            recovery_succession_internal::EncodeFrontierSuccessionMemberMarker(
-                membership->group_id));
-
-        rpc::RecoveryObjectTransportManifest *compact =
-            out->mutable_compact_manifest();
-        compact->set_target_holder_count(group_manifest.target_holder_count());
-        compact->set_witness_count(group_manifest.witness_count());
-        compact->set_generation(group_manifest.version().generation());
-        compact->set_frozen(group_manifest.frozen());
-        compact->set_tombstoned(group_manifest.tombstoned());
-        compact->set_recovery_attempt(group_manifest.recovery_attempt());
-        compact->set_max_recovery_attempts(member.task_spec->max_retries());
-
-        for (const rpc::Address &witness : group_manifest.witness_raylets()) {
-          compact->add_witness_raylets()->CopyFrom(witness);
-        }
-        for (const rpc::RecoveryHolder &holder : group_manifest.succession()) {
-          if (holder.rank() == 0) {
-            continue;
-          }
-          if (holder.rank() !=
-              static_cast<uint32_t>(compact->non_owner_holders_size() + 1)) {
-            out->Clear();
-            return false;
-          }
-          compact->add_non_owner_holders()->CopyFrom(holder.address());
-        }
-        return true;
-      };
-
-  auto populate_one =
-      [this,
-       task_spec,
-       &attached_object_ids,
-       &try_build_direct_adaptive_frontier_compact,
-       require_frontier_commit](const ObjectID &object_id,
-                                rpc::ObjectReference *object_ref) {
+  auto populate_one = [this, task_spec, &attached_object_ids, require_frontier_commit](
+                          const ObjectID &object_id,
+                          rpc::ObjectReference *object_ref) {
     if (object_ref == nullptr || object_id.IsNil()) {
       return;
     }
@@ -2439,25 +2458,6 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
     if (attached_object_ids.contains(object_id)) {
       object_ref->clear_recovery_metadata();
       return;
-    }
-
-    // Adaptive Frontier fast path: build the compact transport protobuf
-    // directly and swap it into the TaskSpec sidecar. No per-member full
-    // RecoveryManifest or intermediate RecoveryObjectMetadata is materialized.
-    if (!profiling_enabled_ && AdaptiveRecoveryFrontierEnabledCached() &&
-        object_ref->has_owner_address()) {
-      rpc::RecoveryObjectMetadata direct_compact;
-      if (try_build_direct_adaptive_frontier_compact(
-              object_id, object_ref->owner_address(), &direct_compact)) {
-        rpc::RecoveryTaskArgumentMetadata *entry =
-            task_spec->add_recovery_argument_metadata();
-        entry->set_object_id(object_id.Binary());
-        entry->mutable_owner_address()->CopyFrom(object_ref->owner_address());
-        entry->mutable_recovery_metadata()->Swap(&direct_compact);
-        object_ref->clear_recovery_metadata();
-        attached_object_ids.insert(object_id);
-        return;
-      }
     }
 
     rpc::RecoveryObjectMetadata source_storage;
