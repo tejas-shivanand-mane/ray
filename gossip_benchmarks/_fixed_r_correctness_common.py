@@ -30,7 +30,13 @@ def stable_witness_score(task_id_binary: bytes, node_id_binary: bytes) -> int:
 
 
 def fixed_r_witness_order(object_ref: Any, nodes: Iterable[Any], count: int) -> list[Any]:
-    """Reconstruct the ordered Fixed-R witness selection for one task."""
+    """Reconstruct the ordered Fixed-R witness selection for one task.
+
+    CoreWorker's ``better_witness`` comparator orders candidates by *larger*
+    FNV-1a score first, with node-id bytes ascending only as the tie-breaker.
+    Keep that direction exact: choosing the smallest scores would identify the
+    wrong W1/W2/W3 and invalidate failover fault injection.
+    """
     task_id_binary = compute_task_id(object_ref).binary()
     scored: list[tuple[int, bytes, Any]] = []
     for node in nodes:
@@ -38,7 +44,7 @@ def fixed_r_witness_order(object_ref: Any, nodes: Iterable[Any], count: int) -> 
         scored.append(
             (stable_witness_score(task_id_binary, node_binary), node_binary, node)
         )
-    scored.sort(key=lambda item: (item[0], item[1]))
+    scored.sort(key=lambda item: (-item[0], item[1]))
     return [item[2] for item in scored[:count]]
 
 
