@@ -31,7 +31,6 @@ from _benchmark_common import (
     wait_for_cluster,
     wait_for_log,
     wait_for_marker,
-    wait_for_protection,
     witness_baseline,
 )
 from _fixed_r_correctness_common import (
@@ -50,19 +49,33 @@ OBJECT_TIMEOUT_MS = 300
 GET_TIMEOUT_S = 120.0
 INITIAL_BLOCK_TIMEOUT_S = 240.0
 MAX_SELECTION_ATTEMPTS = 20
-# W3 must remain GCS-ALIVE. W1->W2 is a local-cluster RPC and should be visible
-# almost immediately; fail the test rather than accidentally waiting long
-# enough for the heartbeat detector to turn a stall into a legitimate failure.
-PARTIAL_WINDOW_TIMEOUT_S = 0.6
+
+# Benchmark 65 intentionally SIGSTOPs a live witness. Give the health detector
+# a very large miss budget so the synthetic stall cannot silently turn into an
+# authoritative node failure while we establish the partial-replication state.
+HEALTH_CHECK_FAILURE_THRESHOLD = 100
+
+# This includes owner-death propagation, OWNER_DIED interception, claim creation,
+# and the W1 -> W2 RPC. It is not a protocol timeout. W3 remains GCS-ALIVE due
+# to the benchmark-only health-check miss budget above.
+PARTIAL_WINDOW_TIMEOUT_S = 10.0
+
+PROTECTION_LOG = "Installed full TaskSpec on all witness-holder baseline nodes"
+FIRST_REPLICA_LOG = (
+    "Fixed-R recovery claim replicated at witness index 1 "
+    "attempt 1 coordinator index 0"
+)
 
 
 def fixed_r_config() -> dict:
-    return system_config(
+    config = system_config(
         witness_baseline(R),
         witness_count=R,
         object_timeout_ms=OBJECT_TIMEOUT_MS,
         profiling_enabled=True,
     )
+    config["health_check_failure_threshold"] = HEALTH_CHECK_FAILURE_THRESHOLD
+    return config
 
 
 def count_starts(marker: Path, token: str, *, after_ns: int = 0) -> int:
@@ -71,6 +84,25 @@ def count_starts(marker: Path, token: str, *, after_ns: int = 0) -> int:
         for event, wall_ns, _pid, row_token in read_marker(marker)
         if event == "START" and wall_ns >= after_ns and row_token == token
     )
+
+
+def wait_for_live_w3_partial_replica(
+    ray_module,
+    logs: set[Path],
+    w3,
+    timeout_s: float,
+) -> list[str]:
+    """Wait for W2's durable attempt-1 reservation while W3 stays GCS-ALIVE."""
+    deadline = time.monotonic() + timeout_s
+    w3_id = node_id_hex(w3)
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        assert_node_alive(ray_module, w3_id)
+        last = find_log_lines(logs, FIRST_REPLICA_LOG)
+        if last:
+            return last
+        time.sleep(0.05)
+    return last
 
 
 def types():
@@ -167,12 +199,30 @@ def main() -> None:
         for _ in range(MAX_SELECTION_ATTEMPTS):
             token = f"partial-claim-{uuid.uuid4().hex}"
             tokens.append(token)
+
+            # Each rejected candidate is a real protected task too. Record the
+            # current count so this candidate cannot accidentally reuse an older
+            # task's generic protection log as its readiness barrier.
+            protection_before = len(find_log_lines(logs, PROTECTION_LOG))
+
             ref = ray.get(
                 owner.dispatch.remote(
                     executor_node.node_id, token, str(marker), PAYLOAD_BYTES
                 )
             )
             wait_for_marker(marker, "START", timeout_s=10.0, min_count=len(tokens))
+
+            candidate_protection = wait_for_log(
+                logs,
+                PROTECTION_LOG,
+                timeout_s=30.0,
+                min_count=protection_before + 1,
+            )
+            assert len(candidate_protection) >= protection_before + 1, (
+                "Selected candidate never completed its own all-R Fixed-R protection",
+                candidate_protection,
+            )
+
             order = fixed_r_witness_order(ref, all_nodes, R)
             w1, _w2, w3 = order
             if not same_node(w1, head_node) and not same_node(w3, head_node):
@@ -205,12 +255,15 @@ def main() -> None:
         ).remote()
         assert ray.get(borrower_a.hold.remote([ref])) == original_object_id
         assert ray.get(borrower_b.hold.remote([ref])) == original_object_id
-        wait_for_protection(
-            method=witness_baseline(R), session_paths=logs, timeout_s=30.0
-        )
+
+        # The selected task's protection was already established above. The
+        # borrower exports are complete before the fault is injected as well.
+        assert len(find_log_lines(logs, PROTECTION_LOG)) >= 1
 
         # Force a deterministic partial-replication window:
-        # W1 -> W2 succeeds; W1 -> W3 cannot complete while W3 is SIGSTOP'ed.
+        # W1 -> W2 may complete, but W1 -> W3 cannot complete while W3 is
+        # SIGSTOP'ed. The benchmark-only health-check threshold keeps W3
+        # authoritative/GCS-ALIVE throughout this window.
         stop_raylet(w3)
         stopped_node = w3
         assert_node_alive(ray, node_id_hex(w3))
@@ -221,19 +274,23 @@ def main() -> None:
         read_b = borrower_b.read_after.remote(str(barrier))
         barrier.touch()
 
-        first_replica = wait_for_log(
+        first_replica = wait_for_live_w3_partial_replica(
+            ray,
             logs,
-            "Fixed-R recovery claim replicated at witness index 1 attempt 1 coordinator index 0",
-            timeout_s=PARTIAL_WINDOW_TIMEOUT_S,
+            w3,
+            PARTIAL_WINDOW_TIMEOUT_S,
         )
         assert first_replica, find_log_lines(
             logs, "Fixed-R recovery claim replicated at witness index"
         )
 
-        # Because W3 is still live-but-stopped, W1 cannot have completed the
-        # ACK-before-grant barrier. If W3 became GCS-dead, the experiment is
-        # invalid rather than evidence of safe partial-replication handling.
+        # W2 has durably stored the attempt-1 reservation. Give the ACK a short
+        # opportunity to reach W1; W1's next step is blocked on the stopped W3.
+        time.sleep(0.1)
         assert_node_alive(ray, node_id_hex(w3))
+
+        # Because W3 is still live-but-stopped, W1 cannot have completed the
+        # ACK-before-grant barrier.
         assert count_starts(marker, token, after_ns=failure_wall_ns) == 0, read_marker(marker)
         pre_kill_grants = find_log_lines(
             logs, "Fixed-R recovery claim granted after witness replication"
@@ -244,8 +301,8 @@ def main() -> None:
         # W3 has acknowledged it.
         cluster.remove_node(w1, allow_graceful=False)
 
-        # Resume W3 immediately so the stall itself cannot become a legitimate
-        # authoritative witness failure.
+        # Resume W3 immediately. W2 must stabilize the existing attempt-1
+        # reservation after W1 is authoritatively removed.
         continue_raylet(w3)
         stopped_node = None
         assert_node_alive(ray, node_id_hex(w3))
