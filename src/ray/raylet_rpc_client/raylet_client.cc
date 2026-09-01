@@ -581,25 +581,8 @@ void RayletClient::FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request)
 void RayletClient::UpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest &&request,
     const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) {
-  // Fixed-R deliberately remains on the original single serial lane so the
-  // comparison baseline is unchanged. Adaptive Succession hashes the task ID
-  // onto one of a few serial lanes: generations for one task remain ordered,
-  // while unrelated tasks no longer block each other behind one witness RPC.
-  size_t lane_index = 0;
-  if (!RayConfig::instance().enable_recovery_witness_holder_baseline() &&
-      request.has_manifest() && !request.manifest().task_id().empty()) {
-    constexpr uint64_t kOffsetBasis = 1469598103934665603ULL;
-    constexpr uint64_t kPrime = 1099511628211ULL;
-    uint64_t hash = kOffsetBasis;
-    for (const unsigned char byte : request.manifest().task_id()) {
-      hash ^= static_cast<uint64_t>(byte);
-      hash *= kPrime;
-    }
-    lane_index = static_cast<size_t>(hash % kRecoveryWitnessBatchLaneCount);
-  }
-
   PendingRecoveryWitnessUpdate item{std::move(request), callback};
-  auto state = recovery_witness_batch_states_[lane_index];
+  auto state = recovery_witness_batch_state_;
   std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch;
 
   {
