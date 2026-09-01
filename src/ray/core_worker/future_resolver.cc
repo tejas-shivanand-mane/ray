@@ -19,6 +19,45 @@
 
 namespace ray {
 namespace core {
+namespace {
+
+struct RecoveryReentryHooks {
+  std::mutex mutex;
+  RecoveryReentryEnabledCallback enabled_callback;
+  RecoveryReentryCallback reentry_callback;
+};
+
+RecoveryReentryHooks &GetRecoveryReentryHooks() {
+  static RecoveryReentryHooks hooks;
+  return hooks;
+}
+
+bool RecoveryReentryEnabled() {
+  RecoveryReentryEnabledCallback enabled_callback;
+  {
+    auto &hooks = GetRecoveryReentryHooks();
+    std::lock_guard<std::mutex> lock(hooks.mutex);
+    enabled_callback = hooks.enabled_callback;
+  }
+  return enabled_callback && enabled_callback();
+}
+
+RecoveryReentryCallback GetRecoveryReentryCallback() {
+  auto &hooks = GetRecoveryReentryHooks();
+  std::lock_guard<std::mutex> lock(hooks.mutex);
+  return hooks.reentry_callback;
+}
+
+}  // namespace
+
+void RegisterFutureResolverRecoveryReentryHooks(
+    RecoveryReentryEnabledCallback enabled_callback,
+    RecoveryReentryCallback reentry_callback) {
+  auto &hooks = GetRecoveryReentryHooks();
+  std::lock_guard<std::mutex> lock(hooks.mutex);
+  hooks.enabled_callback = std::move(enabled_callback);
+  hooks.reentry_callback = std::move(reentry_callback);
+}
 
 bool FutureResolver::RecordAndIsRecoverySuccessor(
     const ObjectID &object_id, const rpc::Address &owner_address) {
@@ -42,7 +81,7 @@ void FutureResolver::ClearRecoveryOwnerTracking(const ObjectID &object_id) {
 
 void FutureResolver::ResolveFutureAsync(const ObjectID &object_id,
                                         const rpc::Address &owner_address) {
-  const bool fixed_r_handoff = static_cast<bool>(recovery_reentry_callback_);
+  const bool fixed_r_handoff = RecoveryReentryEnabled();
 
   if (rpc_address_.worker_id() == owner_address.worker_id()) {
     // We do not need to resolve objects that we own. This can happen if a task
@@ -100,10 +139,13 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     RAY_LOG(WARNING).WithField(object_id)
         << "Failed to retrieve deserialized object value: " << status;
 
+    const bool fixed_r_handoff = RecoveryReentryEnabled();
     const bool recovery_successor =
-        recovery_reentry_callback_ && RecordAndIsRecoverySuccessor(object_id, owner_address);
+        fixed_r_handoff && RecordAndIsRecoverySuccessor(object_id, owner_address);
+    RecoveryReentryCallback recovery_reentry_callback =
+        fixed_r_handoff ? GetRecoveryReentryCallback() : RecoveryReentryCallback{};
 
-    if (recovery_successor) {
+    if (recovery_successor && recovery_reentry_callback) {
       const std::string object_key = object_id.Binary();
       bool start_reentry = false;
       {
@@ -121,7 +163,7 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
       RAY_LOG(INFO).WithField(object_id)
           << "Acting recovery owner became unreachable; re-entering Fixed-R recovery";
 
-      recovery_reentry_callback_(
+      recovery_reentry_callback(
           object_id,
           [this, object_id, owner_address, object_key](bool started) {
             {
@@ -164,7 +206,7 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     // before it can notify the owner of another borrower). Store an error so
     // that an exception will be thrown immediately when the worker tries to
     // get the value.
-    if (recovery_reentry_callback_) {
+    if (RecoveryReentryEnabled()) {
       ClearRecoveryOwnerTracking(object_id);
     }
     in_memory_store_->Put(RayObject(rpc::ErrorType::OBJECT_DELETED),
@@ -177,7 +219,7 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     // If the owner later fails or the object is released, the raylet
     // will eventually store an error in Plasma on our behalf.
 
-    if (recovery_reentry_callback_) {
+    if (RecoveryReentryEnabled()) {
       ClearRecoveryOwnerTracking(object_id);
     }
 
