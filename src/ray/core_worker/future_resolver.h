@@ -16,11 +16,12 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
-#include "absl/container/flat_hash_map.h"
-#include "absl/container/flat_hash_set.h"
-#include "absl/synchronization/mutex.h"
 #include "ray/common/id.h"
 #include "ray/core_worker/reference_counter_interface.h"
 #include "ray/core_worker/store_provider/memory_store/memory_store.h"
@@ -35,6 +36,9 @@ using ReportLocalityDataCallback =
 
 using RecoveryMetadataCallback =
     std::function<void(const ObjectID &, const rpc::RecoveryObjectMetadata &)>;
+
+using RecoveryReentryCallback =
+    std::function<void(const ObjectID &, std::function<void(bool)>)>;
 
 // Resolve values for futures that were given to us before the value
 // was available. This class is thread-safe.
@@ -56,6 +60,15 @@ class FutureResolver {
   /// This is configured once during CoreWorker initialization.
   void SetRecoveryMetadataCallback(RecoveryMetadataCallback callback) {
     recovery_metadata_callback_ = std::move(callback);
+  }
+
+  /// Installs the Fixed-R recovery re-entry hook.
+  ///
+  /// FutureResolver intentionally does not depend on CoreWorker. The owning
+  /// CoreWorkerProcess installs this callback only for the witness-holder
+  /// baseline, keeping the dependency direction CoreWorker -> FutureResolver.
+  void SetRecoveryReentryCallback(RecoveryReentryCallback callback) {
+    recovery_reentry_callback_ = std::move(callback);
   }
 
   /// Resolve the value for a future. This will periodically contact the given
@@ -112,17 +125,19 @@ class FutureResolver {
   /// Called when GetObjectStatus returns recovery metadata.
   RecoveryMetadataCallback recovery_metadata_callback_;
 
+  /// Installed only for Fixed-R. Its presence also gates all owner-transition
+  /// bookkeeping, so disabled and adaptive Succession modes pay no map/mutex cost.
+  RecoveryReentryCallback recovery_reentry_callback_;
+
   /// Original owner observed by FutureResolver for each unresolved object.
-  /// Entries intentionally survive an original OWNER_DIED result so that a
-  /// subsequent Fixed-R acting owner is recognized as a successor.
-  absl::Mutex recovery_owner_mutex_;
-  absl::flat_hash_map<ObjectID, WorkerID> initial_owner_by_object_
-      ABSL_GUARDED_BY(recovery_owner_mutex_);
+  /// Binary strings keep this cold-path state independent of extra hash/Bazel
+  /// dependencies in the standalone future_resolver target.
+  std::mutex recovery_owner_mutex_;
+  std::unordered_map<std::string, std::string> initial_owner_by_object_;
 
   /// Suppresses duplicate re-entry while one acting-owner recovery attempt is
   /// already in flight for this ObjectID.
-  absl::flat_hash_set<ObjectID> recovery_reentry_in_flight_
-      ABSL_GUARDED_BY(recovery_owner_mutex_);
+  std::unordered_set<std::string> recovery_reentry_in_flight_;
 };
 
 }  // namespace core
