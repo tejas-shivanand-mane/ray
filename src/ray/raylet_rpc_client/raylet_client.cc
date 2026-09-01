@@ -64,7 +64,7 @@ void RayletClient::RequestWorkerLease(
 }
 
 void RayletClient::PrestartWorkers(
-    const rpc::PrestartWorkersRequest &request,
+    const ray::rpc::PrestartWorkersRequest &request,
     const rpc::ClientCallback<ray::rpc::PrestartWorkersReply> &callback) {
   INVOKE_RPC_CALL(NodeManagerService,
                   PrestartWorkers,
@@ -154,7 +154,8 @@ void RayletClient::PushMutableObject(
     uint64_t metadata_size,
     void *data,
     void *metadata,
-    const ray::rpc::ClientCallback<ray::rpc::PushMutableObjectReply> &callback) {
+    const ray::rpc::ClientCallback<ray::rpc::PushMutableObjectReply>
+        &callback) {
   // Ray sets the gRPC max payload size to ~512 MiB. We set the max chunk size to a
   // slightly lower value to allow extra padding just in case.
   uint64_t kMaxGrpcPayloadSize = RayConfig::instance().max_grpc_message_size() * 0.98;
@@ -326,7 +327,7 @@ void RayletClient::PinObjectIDs(
     const rpc::Address &caller_address,
     const std::vector<ObjectID> &object_ids,
     const ObjectID &generator_id,
-    const rpc::ClientCallback<rpc::PinObjectIDsReply> &callback) {
+    const ray::rpc::ClientCallback<ray::rpc::PinObjectIDsReply> &callback) {
   rpc::PinObjectIDsRequest request;
   request.mutable_owner_address()->CopyFrom(caller_address);
   for (const ObjectID &object_id : object_ids) {
@@ -610,11 +611,10 @@ void RayletClient::DispatchRecoveryWitnessBatch(
   rpc::UpdateRecoveryWitnessBatchRequest request;
   for (auto &item : *batch) {
     rpc::UpdateRecoveryWitnessRequest *update = request.add_updates();
-    if (RayConfig::instance().enable_recovery_witness_holder_baseline()) {
-      update->Swap(&item.request);
-    } else {
-      update->CopyFrom(item.request);
-    }
+    // The pending request is dead after envelope construction. Move its protobuf
+    // storage directly into the physical batch for both Fixed-R and adaptive
+    // Succession instead of deep-copying every adaptive witness update.
+    update->Swap(&item.request);
   }
 
   auto batch_callback =
