@@ -17,20 +17,8 @@
 #include <memory>
 #include <utility>
 
-#include "ray/common/ray_config.h"
-#include "ray/core_worker/core_worker.h"
-#include "ray/core_worker/core_worker_process.h"
-
 namespace ray {
 namespace core {
-namespace {
-
-bool FixedRTransparentHandoffEnabled() {
-  return RayConfig::instance().enable_recovery_succession() &&
-         RayConfig::instance().enable_recovery_witness_holder_baseline();
-}
-
-}  // namespace
 
 bool FutureResolver::RecordAndIsRecoverySuccessor(
     const ObjectID &object_id, const rpc::Address &owner_address) {
@@ -38,21 +26,23 @@ bool FutureResolver::RecordAndIsRecoverySuccessor(
     return false;
   }
 
-  const WorkerID owner_id = WorkerID::FromBinary(owner_address.worker_id());
-  absl::MutexLock lock(&recovery_owner_mutex_);
-  auto [it, inserted] = initial_owner_by_object_.try_emplace(object_id, owner_id);
-  return !inserted && it->second != owner_id;
+  const std::string object_key = object_id.Binary();
+  const std::string owner_key = owner_address.worker_id();
+  std::lock_guard<std::mutex> lock(recovery_owner_mutex_);
+  auto [it, inserted] = initial_owner_by_object_.try_emplace(object_key, owner_key);
+  return !inserted && it->second != owner_key;
 }
 
 void FutureResolver::ClearRecoveryOwnerTracking(const ObjectID &object_id) {
-  absl::MutexLock lock(&recovery_owner_mutex_);
-  initial_owner_by_object_.erase(object_id);
-  recovery_reentry_in_flight_.erase(object_id);
+  const std::string object_key = object_id.Binary();
+  std::lock_guard<std::mutex> lock(recovery_owner_mutex_);
+  initial_owner_by_object_.erase(object_key);
+  recovery_reentry_in_flight_.erase(object_key);
 }
 
 void FutureResolver::ResolveFutureAsync(const ObjectID &object_id,
                                         const rpc::Address &owner_address) {
-  const bool fixed_r_handoff = FixedRTransparentHandoffEnabled();
+  const bool fixed_r_handoff = static_cast<bool>(recovery_reentry_callback_);
 
   if (rpc_address_.worker_id() == owner_address.worker_id()) {
     // We do not need to resolve objects that we own. This can happen if a task
@@ -90,7 +80,6 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
                                            const rpc::Address &owner_address,
                                            const Status &status,
                                            const rpc::GetObjectStatusReply &reply) {
-
   // A recovery successor may have taken ownership while an older
   // GetObjectStatus RPC was still in flight. Ignore responses from
   // an owner that is no longer the current owner of this ObjectID.
@@ -111,15 +100,15 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     RAY_LOG(WARNING).WithField(object_id)
         << "Failed to retrieve deserialized object value: " << status;
 
-    const bool fixed_r_handoff = FixedRTransparentHandoffEnabled();
     const bool recovery_successor =
-        fixed_r_handoff && RecordAndIsRecoverySuccessor(object_id, owner_address);
+        recovery_reentry_callback_ && RecordAndIsRecoverySuccessor(object_id, owner_address);
 
-    if (recovery_successor && CoreWorkerProcess::IsInitialized()) {
+    if (recovery_successor) {
+      const std::string object_key = object_id.Binary();
       bool start_reentry = false;
       {
-        absl::MutexLock lock(&recovery_owner_mutex_);
-        start_reentry = recovery_reentry_in_flight_.insert(object_id).second;
+        std::lock_guard<std::mutex> lock(recovery_owner_mutex_);
+        start_reentry = recovery_reentry_in_flight_.insert(object_key).second;
       }
 
       if (!start_reentry) {
@@ -132,12 +121,12 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
       RAY_LOG(INFO).WithField(object_id)
           << "Acting recovery owner became unreachable; re-entering Fixed-R recovery";
 
-      CoreWorkerProcess::GetCoreWorker().TryRecoverTaskDependency(
+      recovery_reentry_callback_(
           object_id,
-          [this, object_id, owner_address](bool started) {
+          [this, object_id, owner_address, object_key](bool started) {
             {
-              absl::MutexLock lock(&recovery_owner_mutex_);
-              recovery_reentry_in_flight_.erase(object_id);
+              std::lock_guard<std::mutex> lock(recovery_owner_mutex_);
+              recovery_reentry_in_flight_.erase(object_key);
             }
 
             rpc::Address latest_owner;
@@ -175,7 +164,7 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     // before it can notify the owner of another borrower). Store an error so
     // that an exception will be thrown immediately when the worker tries to
     // get the value.
-    if (FixedRTransparentHandoffEnabled()) {
+    if (recovery_reentry_callback_) {
       ClearRecoveryOwnerTracking(object_id);
     }
     in_memory_store_->Put(RayObject(rpc::ErrorType::OBJECT_DELETED),
@@ -188,7 +177,7 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
     // If the owner later fails or the object is released, the raylet
     // will eventually store an error in Plasma on our behalf.
 
-    if (FixedRTransparentHandoffEnabled()) {
+    if (recovery_reentry_callback_) {
       ClearRecoveryOwnerTracking(object_id);
     }
 
