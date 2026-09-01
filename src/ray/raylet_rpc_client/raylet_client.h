@@ -16,6 +16,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <array>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -203,16 +204,30 @@ class RayletClient : public RayletClientInterface {
 
   // At inflight=64 this cap is large enough to collapse queue pressure while
   // keeping individual batch messages modest. There is intentionally no
-  // timer: an idle connection sends its first update immediately.
+  // timer: an idle lane sends its first update immediately.
   static constexpr size_t kRecoveryWitnessBatchMaxSize = 32;
+
+  // Adaptive Succession hashes each task onto one serial lane. This preserves
+  // per-task witness-update order while allowing unrelated tasks to make
+  // progress concurrently. Fixed-R deliberately remains on lane 0.
+  static constexpr size_t kRecoveryWitnessBatchLaneCount = 4;
 
   static void DispatchRecoveryWitnessBatch(
       std::shared_ptr<RecoveryWitnessBatchState> state,
       std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client,
       std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch);
 
-  std::shared_ptr<RecoveryWitnessBatchState> recovery_witness_batch_state_ =
-      std::make_shared<RecoveryWitnessBatchState>();
+  std::array<std::shared_ptr<RecoveryWitnessBatchState>,
+             kRecoveryWitnessBatchLaneCount>
+      recovery_witness_batch_states_ = [] {
+        std::array<std::shared_ptr<RecoveryWitnessBatchState>,
+                   kRecoveryWitnessBatchLaneCount>
+            states{};
+        for (auto &state : states) {
+          state = std::make_shared<RecoveryWitnessBatchState>();
+        }
+        return states;
+      }();
 
  protected:
   /// gRPC client to the NodeManagerService.
