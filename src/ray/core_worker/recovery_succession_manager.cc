@@ -794,10 +794,27 @@ bool RecoverySuccessionManager::RegisterOwnedTaskLazy(
       static_cast<uint32_t>(task_spec.NumReturns());
   task_state.manifest_committed = true;
 
+  // Ordinary adaptive K=1 only: retain one short-lived producer recipe so the
+  // first downstream borrower can receive H1 lineage on its existing PushTask.
+  // TaskManager remains the authoritative owner recipe. Frontier keeps its
+  // typed membership sidecar and Fixed-R/certificate modes are unchanged.
+  if (recovery_succession_enabled_config_ &&
+      !recovery_witness_holder_baseline_enabled_config_ &&
+      !recovery_frontier_enabled_config_ &&
+      !recovery_succession_certificate_admission_enabled_config_ &&
+      !manifest.tombstoned() && !manifest.frozen() &&
+      manifest.succession_size() == 1) {
+    rpc::TaskSpec transient_task_spec;
+    transient_task_spec.CopyFrom(task_proto);
+    ClearFirstHolderTaskSpecPiggybacks(&transient_task_spec);
+    transient_task_spec.mutable_recovery_manifest()->CopyFrom(manifest);
+    task_state.task_spec = std::move(transient_task_spec);
+  }
+
   task_states_[task_id] = std::move(task_state);
 
-  // Patch 4L deliberately retains one dormant owner TaskSpec copy, so the
-  // legacy Patch-4J "copy avoided" counter must remain zero.
+  // Production adaptive owner lineage continues to live in TaskManager after
+  // the one-shot H1 transport copy is released.
 
   return true;
 }
@@ -2535,6 +2552,57 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
       recovery_succession_internal::ClearFirstHolderPayloadUnlessFrontierMembership(
           out);
       out->clear_compact_manifest();
+    }
+
+    // Ordinary adaptive K=1 H1 fast path. Lazy activation staged one sanitized
+    // producer TaskSpec in the existing task state. Exactly one downstream
+    // metadata build claims it under mutex_, transports it in the already
+    // supported Patch-4F field, then releases the owner-side duplicate. The
+    // receiver remains provisional and must still verify witness durability.
+    if (!recovery_witness_holder_baseline_enabled_config_ &&
+        !recovery_frontier_enabled_config_ &&
+        !recovery_succession_certificate_admission_enabled_config_) {
+      const TaskID producer_task_id = object_id.TaskId();
+      const auto producer_it = task_states_.find(producer_task_id);
+      if (producer_it != task_states_.end()) {
+        TaskRecoveryState &state = producer_it->second;
+        if (!state.first_holder_piggyback_sent &&
+            state.manifest_committed &&
+            !state.manifest.tombstoned() &&
+            !state.manifest.frozen() &&
+            state.manifest.succession_size() == 1 &&
+            state.manifest.task_id() == source->task_id() &&
+            state.task_spec.has_value() &&
+            state.task_spec->task_id() == source->task_id()) {
+          const auto piggyback_start = std::chrono::steady_clock::now();
+
+          rpc::TaskSpec piggyback_task_spec;
+          piggyback_task_spec.CopyFrom(state.task_spec.value());
+          ClearFirstHolderTaskSpecPiggybacks(&piggyback_task_spec);
+          piggyback_task_spec.mutable_recovery_manifest()->CopyFrom(state.manifest);
+
+          std::string serialized_task_spec;
+          if (piggyback_task_spec.SerializeToString(&serialized_task_spec) &&
+              !serialized_task_spec.empty()) {
+            out->set_first_holder_task_spec(serialized_task_spec);
+            state.first_holder_piggyback_sent = true;
+            state.task_spec.reset();
+
+            if (profiling_enabled_) {
+              const uint64_t piggyback_ns = static_cast<uint64_t>(
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now() - piggyback_start)
+                      .count());
+              const uint64_t piggyback_bytes =
+                  static_cast<uint64_t>(serialized_task_spec.size());
+              ++profile_.first_holder_piggyback_copies_sent;
+              profile_.first_holder_piggyback_bytes_sent += piggyback_bytes;
+              profile_.first_holder_piggyback_serialize_time_ns += piggyback_ns;
+              profile_.task_spec_bytes_sent += piggyback_bytes;
+            }
+          }
+        }
+      }
     }
 
     attached_object_ids.insert(object_id);
