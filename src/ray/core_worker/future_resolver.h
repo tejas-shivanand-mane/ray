@@ -37,8 +37,16 @@ using ReportLocalityDataCallback =
 using RecoveryMetadataCallback =
     std::function<void(const ObjectID &, const rpc::RecoveryObjectMetadata &)>;
 
+using RecoveryReentryEnabledCallback = std::function<bool()>;
 using RecoveryReentryCallback =
     std::function<void(const ObjectID &, std::function<void(bool)>)>;
+
+/// Register process-level hooks used only for transparent Fixed-R recovery-owner
+/// handoff. The implementation lives in future_resolver.cc so the standalone
+/// future_resolver target never depends back on CoreWorker.
+void RegisterFutureResolverRecoveryReentryHooks(
+    RecoveryReentryEnabledCallback enabled_callback,
+    RecoveryReentryCallback reentry_callback);
 
 // Resolve values for futures that were given to us before the value
 // was available. This class is thread-safe.
@@ -60,15 +68,6 @@ class FutureResolver {
   /// This is configured once during CoreWorker initialization.
   void SetRecoveryMetadataCallback(RecoveryMetadataCallback callback) {
     recovery_metadata_callback_ = std::move(callback);
-  }
-
-  /// Installs the Fixed-R recovery re-entry hook.
-  ///
-  /// FutureResolver intentionally does not depend on CoreWorker. The owning
-  /// CoreWorkerProcess installs this callback only for the witness-holder
-  /// baseline, keeping the dependency direction CoreWorker -> FutureResolver.
-  void SetRecoveryReentryCallback(RecoveryReentryCallback callback) {
-    recovery_reentry_callback_ = std::move(callback);
   }
 
   /// Resolve the value for a future. This will periodically contact the given
@@ -124,10 +123,6 @@ class FutureResolver {
 
   /// Called when GetObjectStatus returns recovery metadata.
   RecoveryMetadataCallback recovery_metadata_callback_;
-
-  /// Installed only for Fixed-R. Its presence also gates all owner-transition
-  /// bookkeeping, so disabled and adaptive Succession modes pay no map/mutex cost.
-  RecoveryReentryCallback recovery_reentry_callback_;
 
   /// Original owner observed by FutureResolver for each unresolved object.
   /// Binary strings keep this cold-path state independent of extra hash/Bazel
