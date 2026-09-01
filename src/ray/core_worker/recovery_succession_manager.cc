@@ -2554,10 +2554,10 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
       out->clear_compact_manifest();
     }
 
-    // Ordinary adaptive K=1 H1 fast path. Lazy activation staged one sanitized
-    // producer TaskSpec in the existing task state. Exactly one downstream
-    // metadata build claims it under mutex_, transports it in the already
-    // supported Patch-4F field, then releases the owner-side duplicate. The
+    // Ordinary adaptive K=1 holder fast path. Lazy activation staged one
+    // sanitized producer TaskSpec in the existing task state. The first two
+    // downstream metadata builds may transport it in the already-supported
+    // Patch-4F field; the duplicate is released after the second send. Every
     // receiver remains provisional and must still verify witness durability.
     if (!recovery_witness_holder_baseline_enabled_config_ &&
         !recovery_frontier_enabled_config_ &&
@@ -2566,11 +2566,9 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
       const auto producer_it = task_states_.find(producer_task_id);
       if (producer_it != task_states_.end()) {
         TaskRecoveryState &state = producer_it->second;
-        if (!state.first_holder_piggyback_sent &&
-            state.manifest_committed &&
+        if (state.manifest_committed &&
             !state.manifest.tombstoned() &&
             !state.manifest.frozen() &&
-            state.manifest.succession_size() == 1 &&
             state.manifest.task_id() == source->task_id() &&
             state.task_spec.has_value() &&
             state.task_spec->task_id() == source->task_id()) {
@@ -2585,8 +2583,15 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
           if (piggyback_task_spec.SerializeToString(&serialized_task_spec) &&
               !serialized_task_spec.empty()) {
             out->set_first_holder_task_spec(serialized_task_spec);
-            state.first_holder_piggyback_sent = true;
-            state.task_spec.reset();
+
+            // first_holder_piggyback_sent is reused as a one-bit two-shot
+            // counter. Keep the transient recipe after the first piggyback so
+            // one more borrower can receive it; release it after the second.
+            if (state.first_holder_piggyback_sent) {
+              state.task_spec.reset();
+            } else {
+              state.first_holder_piggyback_sent = true;
+            }
 
             if (profiling_enabled_) {
               const uint64_t piggyback_ns = static_cast<uint64_t>(
