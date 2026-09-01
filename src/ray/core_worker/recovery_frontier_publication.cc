@@ -19,6 +19,8 @@
 #include <grpcpp/grpcpp.h>
 
 #include "ray/common/ray_config.h"
+#include "ray/core_worker/core_worker_process.h"
+#include "ray/core_worker/future_resolver.h"
 #include "ray/core_worker/recovery_frontier_wire/recovery_frontier_wire.h"
 #include "ray/core_worker/recovery_succession_manager.h"
 #include "ray/util/logging.h"
@@ -33,6 +35,43 @@ uint64_t RecoveryFrontierProfileNowNs() {
           std::chrono::steady_clock::now().time_since_epoch())
           .count());
 }
+
+bool FixedRFutureRecoveryReentryEnabled() {
+  return RayConfig::instance().enable_recovery_succession() &&
+         RayConfig::instance().enable_recovery_witness_holder_baseline();
+}
+
+void ReenterFixedRRecoveryFromFutureResolver(
+    const ObjectID &object_id, std::function<void(bool)> callback) {
+  if (!FixedRFutureRecoveryReentryEnabled() ||
+      !CoreWorkerProcess::IsInitialized()) {
+    if (callback) {
+      callback(false);
+    }
+    return;
+  }
+
+  auto core_worker = CoreWorkerProcess::TryGetWorker();
+  if (core_worker == nullptr) {
+    if (callback) {
+      callback(false);
+    }
+    return;
+  }
+
+  core_worker->TryRecoverTaskDependency(object_id, std::move(callback));
+}
+
+struct FixedRFutureRecoveryReentryRegistration {
+  FixedRFutureRecoveryReentryRegistration() {
+    RegisterFutureResolverRecoveryReentryHooks(
+        FixedRFutureRecoveryReentryEnabled,
+        ReenterFixedRRecoveryFromFutureResolver);
+  }
+};
+
+const FixedRFutureRecoveryReentryRegistration
+    kFixedRFutureRecoveryReentryRegistration;
 
 bool PublishAdaptiveFrontierAppendToExistingHolders(
     const rpc::RecoveryManifest &protection_manifest,
