@@ -70,7 +70,6 @@ namespace ray::core {
 // Patch 4J: task-centric recovery state.
 // Patch 4K: batched H1 candidate/install path.
 // Patch 4L: correctness-preserving retained owner TaskSpec for late borrow.
-// Patch 4N-DELTA: ordered K=1 rank-2 witness delta.
 
 namespace {
 // Default capacity for serialization caches.
@@ -8973,37 +8972,35 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
 
   auto state = std::make_shared<PublishState>();
 
-  const size_t witness_count = static_cast<size_t>(manifest.witness_raylets_size());
+  const size_t configured_witness_count =
+      static_cast<size_t>(manifest.witness_raylets_size());
 
-  // Patch 4N-DELTA: ordinary adaptive K=1 keeps both ordered durability
-  // generations, but generation 2's holder append does not need to retransmit
-  // the complete [owner,H1,H2] manifest.  The witness already retained the
-  // generation-1 prefix [owner,H1].  Send only H2 plus the target generation;
-  // the raylet validates that the exact predecessor generation/prefix exists
-  // before materializing the full final manifest.
-  const bool use_ordered_k1_rank2_delta =
+  // Patch 4N-WCHAIN: move ordinary K=1 W=2 fan-out off the owner hot path.
+  // The owner sends one update to the deterministic primary witness. That
+  // witness stores locally, launches the same generation to the secondary
+  // witness, and only then returns its ordinary local-store ACK. This preserves
+  // the existing Succession durability boundary (one compact-witness ACK) while
+  // keeping the second real witness write in flight before the owner can commit.
+  // Fixed-R, Frontier, certificates, tombstones, and non-R=2 configurations
+  // retain their existing direct fan-out paths.
+  const bool use_k1_witness_coordinator =
       !require_all_witnesses &&
       !recovery_witness_holder_baseline_enabled_ &&
       recovery_succession_manager_ != nullptr &&
       !recovery_succession_manager_->RecoveryFrontierEnabled() &&
       !RayConfig::instance().enable_recovery_succession_certificate_admission() &&
       !manifest.tombstoned() && manifest.target_holder_count() == 2 &&
-      manifest.succession_size() == 3 && manifest.frozen() &&
-      manifest.has_version() && manifest.version().generation() > 1 &&
-      manifest.succession(0).rank() == 0 && manifest.succession(1).rank() == 1 &&
-      manifest.succession(2).rank() == 2;
+      manifest.witness_count() == 2 && configured_witness_count == 2 &&
+      manifest.succession_size() >= 2;
 
-  for (const rpc::Address &witness : manifest.witness_raylets()) {
+  const size_t witness_count =
+      use_k1_witness_coordinator ? 1 : configured_witness_count;
+
+  for (size_t witness_index = 0; witness_index < witness_count; ++witness_index) {
+    const rpc::Address &witness =
+        manifest.witness_raylets(static_cast<int>(witness_index));
     rpc::UpdateRecoveryWitnessRequest request;
-    if (use_ordered_k1_rank2_delta) {
-      rpc::RecoveryHolderCertificate *delta = request.mutable_holder_certificate();
-      delta->set_task_id(manifest.task_id());
-      delta->set_generation(manifest.version().generation());
-      delta->set_slot(2);
-      delta->mutable_holder()->CopyFrom(manifest.succession(2));
-    } else {
-      request.mutable_manifest()->CopyFrom(manifest);
-    }
+    request.mutable_manifest()->CopyFrom(manifest);
 
     if (serialized_task_spec != nullptr) {
       request.set_serialized_task_spec(*serialized_task_spec);
@@ -9033,13 +9030,11 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
                      ? static_cast<uint64_t>(request.task_spec().ByteSizeLong())
                      : 0);
 
-      const uint64_t manifest_or_delta_bytes =
-          use_ordered_k1_rank2_delta
-              ? static_cast<uint64_t>(request.holder_certificate().ByteSizeLong())
-              : static_cast<uint64_t>(manifest.ByteSizeLong());
-
-      recovery_succession_manager_->RecordWitnessUpdateRpcSent(
-          task_spec_bytes, manifest_or_delta_bytes);
+      recovery_succession_manager_
+          ->RecordWitnessUpdateRpcSent(
+              task_spec_bytes,
+              static_cast<uint64_t>(
+                  manifest.ByteSizeLong()));
 
       witness_start_ns = RecoveryProfileNowNs();
     }

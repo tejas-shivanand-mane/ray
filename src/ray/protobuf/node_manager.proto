@@ -492,6 +492,10 @@ message UpdateRecoveryWitnessRequest {
   // Fixed-R failure-path reservation. Mutually exclusive with the normal
   // manifest/TaskSpec/certificate publication payloads above.
   optional RecoveryWitnessClaim recovery_claim = 5;
+
+  // Patch 4N-WCHAIN: marks the raylet-to-raylet secondary copy so a forwarded
+  // witness update is stored normally and never recursively forwarded again.
+  bool witness_forwarded = 6;
 }
 
 message UpdateRecoveryWitnessReply {
