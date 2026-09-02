@@ -328,6 +328,62 @@ bool MergeRecoveryHolderCertificate(
   return true;
 }
 
+// Ordinary adaptive K=1 still has an ordered succession chain.  This delta is
+// therefore intentionally stricter than Patch 4M-CERT's grow-only set merge:
+// it may append exactly rank 2 only when the witness already stores the exact
+// predecessor generation [owner,H1].  No rank reordering or generation skip is
+// allowed.
+bool ApplyOrderedK1RecoveryHolderDelta(
+    const rpc::RecoveryHolderCertificate &delta,
+    rpc::RecoveryManifest *manifest) {
+  if (manifest == nullptr || !ValidRecoveryManifest(*manifest) ||
+      !ValidRecoveryHolderCertificate(delta) ||
+      manifest->task_id() != delta.task_id() || manifest->tombstoned() ||
+      manifest->target_holder_count() != 2 || delta.slot() != 2 ||
+      delta.holder().rank() != 2 ||
+      delta.holder().failure_domain_id().empty() ||
+      delta.holder().failure_domain_id() != delta.holder().address().node_id()) {
+    return false;
+  }
+
+  const uint64_t current_generation = manifest->version().generation();
+
+  // Idempotent retry after this witness already materialized the final prefix.
+  if (current_generation == delta.generation()) {
+    if (!manifest->frozen() || manifest->succession_size() != 3) {
+      return false;
+    }
+    const rpc::RecoveryHolder &stored = manifest->succession(2);
+    return stored.rank() == 2 &&
+           SameRecoveryAddress(stored.address(), delta.holder().address()) &&
+           stored.failure_domain_id() == delta.holder().failure_domain_id();
+  }
+
+  // The compact append may advance exactly one generation and only from
+  // [owner,H1].  A missing H1, a stale witness, or a generation gap is rejected.
+  if (delta.generation() != current_generation + 1 || manifest->frozen() ||
+      manifest->succession_size() != 2 || manifest->succession(0).rank() != 0 ||
+      manifest->succession(1).rank() != 1) {
+    return false;
+  }
+
+  const rpc::RecoveryHolder &owner = manifest->succession(0);
+  const rpc::RecoveryHolder &h1 = manifest->succession(1);
+  if (SameRecoveryWorker(owner.address(), delta.holder().address()) ||
+      SameRecoveryWorker(h1.address(), delta.holder().address()) ||
+      owner.failure_domain_id() == delta.holder().failure_domain_id() ||
+      h1.failure_domain_id() == delta.holder().failure_domain_id()) {
+    return false;
+  }
+
+  rpc::RecoveryHolder *h2 = manifest->add_succession();
+  h2->CopyFrom(delta.holder());
+  h2->set_rank(2);
+  manifest->mutable_version()->set_generation(delta.generation());
+  manifest->set_frozen(true);
+  return true;
+}
+
 }  // namespace
 
 NodeManager::NodeManager(
@@ -491,6 +547,10 @@ void NodeManager::HandleUpdateRecoveryWitness(
   const bool certificate_mode =
       RayConfig::instance().enable_recovery_succession_certificate_admission() &&
       !baseline_enabled;
+  const bool ordered_k1_delta_mode =
+      !baseline_enabled && !certificate_mode &&
+      !RayConfig::instance().enable_recovery_frontier() &&
+      RayConfig::instance().recovery_succession_target_holder_count() == 2;
 
   // Fixed-R cold-path claim replication. This branch is disjoint from normal
   // manifest/TaskSpec publication, so healthy execution performs no extra RPC.
@@ -623,17 +683,25 @@ void NodeManager::HandleUpdateRecoveryWitness(
     return;
   }
 
-  // Patch 4M-CERT delta path.  A certificate is accepted only when this
-  // witness already has the task's base manifest.  This preserves lazy
-  // activation and keeps tombstones as absorbing state.
+  // Holder-delta transport has two disjoint semantics. Patch 4M-CERT keeps
+  // its unordered certificate merge when certificate mode is explicitly on.
+  // Ordinary adaptive K=1 uses the same compact wire message only for the
+  // strictly ordered rank-2 append; that path never bootstraps a missing base.
   if (request.has_holder_certificate()) {
-    if (!certificate_mode || request.has_task_spec() ||
-        !request.serialized_task_spec().empty() ||
-        !ValidRecoveryHolderCertificate(request.holder_certificate()) ||
-        (request.has_manifest() &&
-         (!ValidRecoveryManifest(request.manifest()) ||
-          request.manifest().task_id() != request.holder_certificate().task_id() ||
-          request.manifest().tombstoned()))) {
+    const bool valid_common_delta =
+        !request.has_task_spec() && request.serialized_task_spec().empty() &&
+        ValidRecoveryHolderCertificate(request.holder_certificate());
+    const bool valid_certificate_bootstrap =
+        certificate_mode &&
+        (!request.has_manifest() ||
+         (ValidRecoveryManifest(request.manifest()) &&
+          request.manifest().task_id() == request.holder_certificate().task_id() &&
+          !request.manifest().tombstoned()));
+    const bool valid_ordered_k1_delta =
+        ordered_k1_delta_mode && !request.has_manifest();
+
+    if (!valid_common_delta ||
+        (!valid_certificate_bootstrap && !valid_ordered_k1_delta)) {
       reply->set_stored(false);
       send_reply_callback(Status::OK(), nullptr, nullptr);
       return;
@@ -646,7 +714,8 @@ void NodeManager::HandleUpdateRecoveryWitness(
     {
       absl::MutexLock lock(&recovery_witness_mutex_);
       auto it = recovery_witness_manifests_.find(task_id);
-      if (it == recovery_witness_manifests_.end() && request.has_manifest()) {
+      if (certificate_mode && it == recovery_witness_manifests_.end() &&
+          request.has_manifest()) {
         recovery_witness_manifests_[task_id].CopyFrom(request.manifest());
         it = recovery_witness_manifests_.find(task_id);
       }
@@ -658,12 +727,23 @@ void NodeManager::HandleUpdateRecoveryWitness(
       } else {
         rpc::RecoveryManifest merged;
         merged.CopyFrom(it->second);
-        if (MergeRecoveryHolderCertificate(certificate, &merged)) {
+        const bool merged_ok =
+            certificate_mode
+                ? MergeRecoveryHolderCertificate(certificate, &merged)
+                : ApplyOrderedK1RecoveryHolderDelta(certificate, &merged);
+        if (merged_ok) {
           it->second.CopyFrom(merged);
           reply->set_stored(true);
-          // Useful for diagnostics and for callers that want the witness's
-          // materialized set.  Success does not require consuming this field.
+          // Return the materialized full manifest for diagnostics/retries even
+          // though the request carried only the compact rank-2 append.
           reply->mutable_latest_manifest()->CopyFrom(it->second);
+
+          if (!baseline_enabled) {
+            auto task_spec_it = recovery_witness_task_specs_.find(task_id);
+            if (task_spec_it != recovery_witness_task_specs_.end()) {
+              task_spec_it->second.mutable_recovery_manifest()->CopyFrom(it->second);
+            }
+          }
         } else {
           reply->set_stored(false);
           reply->mutable_latest_manifest()->CopyFrom(it->second);
