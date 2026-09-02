@@ -33,7 +33,6 @@
 
 #include <google/protobuf/util/message_differencer.h>
 
-#include "absl/cleanup/cleanup.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_replace.h"
 #include "ray/asio/asio_util.h"
@@ -491,14 +490,6 @@ void NodeManager::HandleUpdateRecoveryWitness(
     rpc::SendReplyCallback send_reply_callback) {
   const bool profile_witness =
       RayConfig::instance().enable_recovery_succession_profiling();
-  const uint64_t handler_start_ns =
-      profile_witness ? RecoveryWitnessProfileNowNs() : 0;
-  absl::Cleanup record_handler_time = [reply, handler_start_ns]() {
-    if (handler_start_ns != 0) {
-      reply->set_witness_handler_time_ns(
-          RecoveryWitnessProfileNowNs() - handler_start_ns);
-    }
-  };
 
   if (!RayConfig::instance().enable_recovery_succession()) {
     reply->set_stored(false);
@@ -856,6 +847,8 @@ void NodeManager::HandleUpdateRecoveryWitnessBatch(
         item_reply,
         [](Status, std::function<void()>, std::function<void()>) {});
     if (item_start_ns != 0) {
+      const uint64_t item_end_ns = RecoveryWitnessProfileNowNs();
+      item_reply->set_witness_handler_time_ns(item_end_ns - item_start_ns);
       item_reply->set_witness_batch_queue_time_ns(
           item_start_ns - batch_start_ns);
     }
