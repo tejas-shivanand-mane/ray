@@ -1,0 +1,33 @@
+name: Temporary witness handler profiling fix
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    if: github.repository == 'tejas-shivanand-mane/ray'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fix handler timing placement
+        run: python tools/_fix_k1_witness_handler_profile.py
+      - name: Validate
+        run: |
+          python -m py_compile gossip_benchmarks/70_recovery_succession_k1_quick_control_profile.py
+          git diff --check
+      - name: Commit fix and remove applicator
+        run: |
+          rm tools/_fix_k1_witness_handler_profile.py
+          rm .github/workflows/temp_fix_k1_witness_handler_profile.yml
+          git config user.name "tejas-shivanand-mane"
+          git config user.email "38262749+tejas-shivanand-mane@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Fix K1 witness handler profiling [skip ci]"
+          git push origin HEAD:main
