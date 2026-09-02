@@ -70,6 +70,7 @@ namespace ray::core {
 // Patch 4J: task-centric recovery state.
 // Patch 4K: batched H1 candidate/install path.
 // Patch 4L: correctness-preserving retained owner TaskSpec for late borrow.
+// Patch 4N: zero-wait K=1 rank-2 witness handoff after rank-1 local commit.
 
 namespace {
 // Default capacity for serialization caches.
@@ -5954,6 +5955,82 @@ void CoreWorker::FinishRecoveryHolderAdmission(
           return;
         }
 
+        // Patch 4N: ordinary K=1 already prepares H2 speculatively while H1 is
+        // waiting on witnesses. The old path nevertheless left a small serial
+        // bubble after H1's local commit: H1's reply/logging/core bookkeeping
+        // completed before TryAdvance could launch H2's witness publication.
+        //
+        // Close only that bubble. H2 is still forbidden from publishing until
+        // H1 has a witness ACK AND CommitHolderAdmission has advanced the local
+        // ordered prefix. No timer, no weaker durability boundary, and no
+        // generation coalescing are introduced.
+        const bool allow_rank2_handoff =
+            !recovery_witness_holder_baseline_enabled_ &&
+            !manager->RecoveryFrontierEnabled() &&
+            !RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+            state->rank == 1 &&
+            committed_manifest.target_holder_count() == 2 &&
+            committed_manifest.succession_size() == 2 &&
+            !committed_manifest.frozen() &&
+            !committed_manifest.tombstoned();
+
+        std::shared_ptr<PendingRecoveryHolderAdmission> ready_successor;
+        {
+          absl::MutexLock lock(&recovery_holder_admission_mutex_);
+          const auto task_it = recovery_holder_admission_states_.find(state->task_id);
+          if (task_it != recovery_holder_admission_states_.end()) {
+            auto &task_state = task_it->second;
+
+            // Retire H1 from the CoreWorker admission queue immediately after
+            // its ordered manager commit. If the owner dies before the report
+            // reply, H1 remains recoverable through the witness-backed
+            // provisional-holder confirmation path exactly as before.
+            const auto rank_it = task_state.pending_by_rank.find(state->rank);
+            if (rank_it != task_state.pending_by_rank.end() &&
+                rank_it->second->reservation_id == state->reservation_id) {
+              task_state.pending_by_rank.erase(rank_it);
+            }
+
+            if (allow_rank2_handoff &&
+                task_state.witness_publish_rank == state->rank) {
+              const auto next_it = task_state.pending_by_rank.find(2);
+              if (next_it != task_state.pending_by_rank.end()) {
+                const auto &successor = next_it->second;
+                const rpc::RecoveryManifest &next_manifest =
+                    successor->proposed_manifest;
+                if (successor->installed && !successor->aborted &&
+                    successor->rank == 2 &&
+                    next_manifest.target_holder_count() == 2 &&
+                    next_manifest.succession_size() == 3 &&
+                    next_manifest.frozen() && !next_manifest.tombstoned() &&
+                    next_manifest.version().generation() ==
+                        committed_manifest.version().generation() + 1) {
+                  task_state.witness_publish_rank = 2;
+                  ready_successor = successor;
+                }
+              }
+            }
+
+            if (ready_successor == nullptr &&
+                task_state.witness_publish_rank == state->rank) {
+              task_state.witness_publish_rank = 0;
+            }
+
+            if (task_state.pending_by_rank.empty()) {
+              recovery_holder_admission_states_.erase(task_it);
+            }
+          }
+        }
+
+        // Start the already-prepared H2 witness RPCs before H1's report reply
+        // and logging. Per-witness RayletClient serialization preserves
+        // generation order for a witness whose H1 update is still completing.
+        if (ready_successor != nullptr) {
+          RAY_LOG(DEBUG).WithField(state->task_id)
+              << "Patch 4N: handing witness publication directly from rank 1 to rank 2";
+          FinishRecoveryHolderAdmission(std::move(ready_successor));
+        }
+
         if (state->admission_start_ns != 0) {
           manager->RecordHolderAdmissionLatency(
               RecoveryProfileNowNs() - state->admission_start_ns);
@@ -5972,25 +6049,9 @@ void CoreWorker::FinishRecoveryHolderAdmission(
         // the committed manifest to this candidate.
         state->send_reply_callback(Status::OK(), nullptr, nullptr);
 
-        {
-          absl::MutexLock lock(&recovery_holder_admission_mutex_);
-          const auto task_it = recovery_holder_admission_states_.find(state->task_id);
-          if (task_it != recovery_holder_admission_states_.end()) {
-            auto &task_state = task_it->second;
-            const auto rank_it = task_state.pending_by_rank.find(state->rank);
-            if (rank_it != task_state.pending_by_rank.end() &&
-                rank_it->second->reservation_id == state->reservation_id) {
-              task_state.pending_by_rank.erase(rank_it);
-            }
-            if (task_state.witness_publish_rank == state->rank) {
-              task_state.witness_publish_rank = 0;
-            }
-            if (task_state.pending_by_rank.empty()) {
-              recovery_holder_admission_states_.erase(task_it);
-            }
-          }
-        }
-
+        // If H2 was not installed yet, or this is any non-K1 path, the ordinary
+        // rank gate remains responsible for the next transition. When Patch 4N
+        // handed off H2 above, witness_publish_rank==2 makes this a cheap no-op.
         TryAdvanceRecoveryHolderAdmissions(state->task_id);
       });
 }

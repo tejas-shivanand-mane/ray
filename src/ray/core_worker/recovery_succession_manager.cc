@@ -1172,11 +1172,6 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     TaskID task_id;
     TaskID group_id;
     bool frontier_member = false;
-    // Ordinary adaptive K=1 may carry a Patch-4F producer recipe alongside
-    // the compact manifest. Parse it before taking the manager mutex so the
-    // common two-holder piggyback path does not fall back through a full
-    // RecoveryObjectMetadata expansion merely because this payload is present.
-    std::optional<rpc::TaskSpec> piggyback_task_spec;
     const rpc::RecoveryTaskArgumentMetadata *entry = nullptr;
   };
 
@@ -1219,36 +1214,17 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
           transport.compact_manifest();
       bool valid_compact = compact.generation() != 0;
       bool frontier_member = false;
-      std::optional<rpc::TaskSpec> piggyback_task_spec;
 
-      // Frontier keeps its typed membership marker. Ordinary adaptive K=1
-      // additionally accepts the already-supported Patch-4F producer recipe
-      // directly with compact metadata. Parse/validate the transport-only
-      // TaskSpec here, before the manager mutex; malformed or legacy payloads
-      // retain the exact compatibility fallback below.
+      // The only non-empty first-holder payload accepted on the direct path is
+      // the typed Frontier membership marker. Any legacy/malformed payload
+      // falls back to the compatibility path so Patch-4F semantics are unchanged.
       if (valid_compact && !transport.first_holder_task_spec().empty()) {
         frontier_member =
             AdaptiveRecoveryFrontierEnabledCached() &&
             recovery_succession_internal::ParseFrontierSuccessionMemberMarker(
                 transport.first_holder_task_spec(), &group_id);
         if (!frontier_member) {
-          const bool ordinary_k1_piggyback =
-              recovery_succession_enabled_config_ &&
-              !recovery_witness_holder_baseline_enabled_config_ &&
-              !recovery_frontier_enabled_config_ &&
-              !recovery_succession_certificate_admission_enabled_config_;
-          rpc::TaskSpec parsed_piggyback;
-          if (ordinary_k1_piggyback &&
-              parsed_piggyback.ParseFromString(
-                  transport.first_holder_task_spec()) &&
-              !parsed_piggyback.task_id().empty() &&
-              parsed_piggyback.task_id() == object_id.TaskId().Binary() &&
-              IsEligibleTask(parsed_piggyback)) {
-            ClearFirstHolderTaskSpecPiggybacks(&parsed_piggyback);
-            piggyback_task_spec.emplace(std::move(parsed_piggyback));
-          } else {
-            valid_compact = false;
-          }
+          valid_compact = false;
         }
       }
 
@@ -1267,7 +1243,6 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
         dependency.task_id = object_id.TaskId();
         dependency.group_id = group_id;
         dependency.frontier_member = frontier_member;
-        dependency.piggyback_task_spec = std::move(piggyback_task_spec);
         dependency.entry = &entry;
         direct_compact_metadata.push_back(std::move(dependency));
         continue;
@@ -1328,7 +1303,7 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
   //   compact -> synthetic ObjectReference -> RecoveryObjectMetadata,
   // the received_metadata full-protobuf vector copy, and for ordinary K=1 the
   // later candidate-manifest copy as well. Frontier keeps its group-ID rewrite.
-  for (DirectCompactDependency &dependency : direct_compact_metadata) {
+  for (const DirectCompactDependency &dependency : direct_compact_metadata) {
     RAY_CHECK(dependency.entry != nullptr);
     const rpc::RecoveryTaskArgumentMetadata &entry = *dependency.entry;
     const rpc::RecoveryObjectMetadata &transport = entry.recovery_metadata();
@@ -1395,26 +1370,6 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
       dependency_state.manifest.CopyFrom(*effective_manifest);
     }
 
-    bool already_stores_task_spec = false;
-    if (dependency.piggyback_task_spec.has_value()) {
-      // Match the legacy Patch-4F path exactly: the transported recipe is
-      // provisional, and the compact sidecar's selected effective manifest is
-      // authoritative. The holder remains non-replayable until witness-backed
-      // confirmation promotes this state.
-      if (!dependency_state.task_spec.has_value()) {
-        rpc::TaskSpec parsed_piggyback =
-            std::move(dependency.piggyback_task_spec.value());
-        parsed_piggyback.mutable_recovery_manifest()->CopyFrom(
-            dependency_state.manifest);
-        dependency_state.task_spec = std::move(parsed_piggyback);
-        dependency_state.manifest_committed = false;
-        dependency_state.provisional_piggyback_task_spec = true;
-        already_stores_task_spec = true;
-      } else if (dependency_state.provisional_piggyback_task_spec) {
-        already_stores_task_spec = true;
-      }
-    }
-
     if (dependency.frontier_member) {
       // Candidate admission is group-centric. Once this borrower has reported
       // the group, later members skip candidate-manifest construction entirely.
@@ -1428,12 +1383,12 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
             &reports);
       }
     } else {
-      // Ordinary K=1 Succession now keeps valid Patch-4F piggybacks on this
-      // compact path too, avoiding the compatibility expansion/copy chain while
-      // preserving the same candidate already-stores-lineage signal.
+      // Ordinary K=1 Succession preserves the exact task-local admission
+      // semantics but no longer deep-copies the compact manifest through the
+      // compatibility vector and a second candidate_manifest temporary.
       MaybeAddCandidateReportLocked(
           incoming_manifest,
-          already_stores_task_spec,
+          /*already_stores_task_spec=*/false,
           &reports);
     }
   }
