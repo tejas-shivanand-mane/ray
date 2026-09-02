@@ -193,6 +193,9 @@ class RayletClient : public RayletClientInterface {
   struct PendingRecoveryWitnessUpdate {
     rpc::UpdateRecoveryWitnessRequest request;
     rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> callback;
+    bool profiling = false;
+    uint64_t enqueue_time_ns = 0;
+    uint64_t client_queue_time_ns = 0;
   };
 
   struct RecoveryWitnessBatchState {

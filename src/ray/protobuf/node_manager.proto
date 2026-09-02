@@ -492,10 +492,6 @@ message UpdateRecoveryWitnessRequest {
   // Fixed-R failure-path reservation. Mutually exclusive with the normal
   // manifest/TaskSpec/certificate publication payloads above.
   optional RecoveryWitnessClaim recovery_claim = 5;
-
-  // Patch 4N-WCHAIN: marks the raylet-to-raylet secondary copy so a forwarded
-  // witness update is stored normally and never recursively forwarded again.
-  bool witness_forwarded = 6;
 }
 
 message UpdateRecoveryWitnessReply {
@@ -504,6 +500,16 @@ message UpdateRecoveryWitnessReply {
   // Returned on a conflicting Fixed-R claim so the coordinator can fail
   // closed or retry while authoritative failure information converges.
   optional RecoveryWitnessClaim latest_recovery_claim = 3;
+
+  // Profiling-only timing metadata for Benchmark 70. These fields do not
+  // participate in recovery correctness and remain zero when profiling is off.
+  uint64 client_queue_time_ns = 4;
+  uint64 witness_handler_time_ns = 5;
+  uint64 witness_mutex_wait_time_ns = 6;
+  uint64 witness_mutex_hold_time_ns = 7;
+  uint32 client_batch_size = 8;
+  bool client_batch_leader = 9;
+  uint64 witness_batch_queue_time_ns = 10;
 }
 
 // Batches independent logical witness updates that target the same raylet.

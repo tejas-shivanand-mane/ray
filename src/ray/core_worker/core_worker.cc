@@ -1354,6 +1354,26 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.witness_update_rpcs_sent;
   result["witness_update_rpcs_completed"] =
       profile.witness_update_rpcs_completed;
+  result["witness_update_client_queue_time_ns"] =
+      profile.witness_update_client_queue_time_ns;
+  result["witness_update_server_batch_queue_time_ns"] =
+      profile.witness_update_server_batch_queue_time_ns;
+  result["witness_update_handler_time_ns"] =
+      profile.witness_update_handler_time_ns;
+  result["witness_update_mutex_wait_time_ns"] =
+      profile.witness_update_mutex_wait_time_ns;
+  result["witness_update_mutex_hold_time_ns"] =
+      profile.witness_update_mutex_hold_time_ns;
+  result["witness_update_physical_batches_completed"] =
+      profile.witness_update_physical_batches_completed;
+  result["witness_update_physical_batch_items"] =
+      profile.witness_update_physical_batch_items;
+  result["h1_publish_readiness_samples"] =
+      profile.h1_publish_readiness_samples;
+  result["h2_reserved_at_h1_publish"] =
+      profile.h2_reserved_at_h1_publish;
+  result["h2_installed_at_h1_publish"] =
+      profile.h2_installed_at_h1_publish;
 
   result["task_spec_bytes_sent"] =
       profile.task_spec_bytes_sent;
@@ -5898,6 +5918,29 @@ void CoreWorker::FinishRecoveryHolderAdmission(
   uint64_t witness_publish_start_ns = 0;
   if (recovery_succession_profiling_enabled_) {
     witness_publish_start_ns = RecoveryProfileNowNs();
+
+    // Benchmark 70: sample whether H2 is already prepared exactly when H1
+    // starts publication. This is observation only: H1 is never delayed.
+    if (!recovery_witness_holder_baseline_enabled_ &&
+        !manager->RecoveryFrontierEnabled() &&
+        !RayConfig::instance().enable_recovery_succession_certificate_admission() &&
+        state->rank == 1 && state->proposed_manifest.target_holder_count() == 2) {
+      bool h2_reserved = false;
+      bool h2_installed = false;
+      {
+        absl::MutexLock lock(&recovery_holder_admission_mutex_);
+        const auto task_it = recovery_holder_admission_states_.find(state->task_id);
+        if (task_it != recovery_holder_admission_states_.end()) {
+          const auto h2_it = task_it->second.pending_by_rank.find(2);
+          if (h2_it != task_it->second.pending_by_rank.end() &&
+              !h2_it->second->aborted) {
+            h2_reserved = true;
+            h2_installed = h2_it->second->installed;
+          }
+        }
+      }
+      manager->RecordH2ReadinessAtH1Publish(h2_reserved, h2_installed);
+    }
   }
 
   PublishRecoveryManifestToWitnesses(
@@ -8972,33 +9015,9 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
 
   auto state = std::make_shared<PublishState>();
 
-  const size_t configured_witness_count =
-      static_cast<size_t>(manifest.witness_raylets_size());
+  const size_t witness_count = static_cast<size_t>(manifest.witness_raylets_size());
 
-  // Patch 4N-WCHAIN: move ordinary K=1 W=2 fan-out off the owner hot path.
-  // The owner sends one update to the deterministic primary witness. That
-  // witness stores locally, launches the same generation to the secondary
-  // witness, and only then returns its ordinary local-store ACK. This preserves
-  // the existing Succession durability boundary (one compact-witness ACK) while
-  // keeping the second real witness write in flight before the owner can commit.
-  // Fixed-R, Frontier, certificates, tombstones, and non-R=2 configurations
-  // retain their existing direct fan-out paths.
-  const bool use_k1_witness_coordinator =
-      !require_all_witnesses &&
-      !recovery_witness_holder_baseline_enabled_ &&
-      recovery_succession_manager_ != nullptr &&
-      !recovery_succession_manager_->RecoveryFrontierEnabled() &&
-      !RayConfig::instance().enable_recovery_succession_certificate_admission() &&
-      !manifest.tombstoned() && manifest.target_holder_count() == 2 &&
-      manifest.witness_count() == 2 && configured_witness_count == 2 &&
-      manifest.succession_size() >= 2;
-
-  const size_t witness_count =
-      use_k1_witness_coordinator ? 1 : configured_witness_count;
-
-  for (size_t witness_index = 0; witness_index < witness_count; ++witness_index) {
-    const rpc::Address &witness =
-        manifest.witness_raylets(static_cast<int>(witness_index));
+  for (const rpc::Address &witness : manifest.witness_raylets()) {
     rpc::UpdateRecoveryWitnessRequest request;
     request.mutable_manifest()->CopyFrom(manifest);
 
@@ -9054,6 +9073,14 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
       if (witness_start_ns != 0) {
         manager->RecordWitnessUpdateRpcLatency(
             RecoveryProfileNowNs() - witness_start_ns);
+        manager->RecordWitnessUpdateRpcBreakdown(
+            reply.client_queue_time_ns(),
+            reply.witness_batch_queue_time_ns(),
+            reply.witness_handler_time_ns(),
+            reply.witness_mutex_wait_time_ns(),
+            reply.witness_mutex_hold_time_ns(),
+            reply.client_batch_leader(),
+            reply.client_batch_size());
       }
 
       bool report_success = false;
@@ -9171,6 +9198,14 @@ void CoreWorker::PublishRecoveryHolderCertificateToWitnesses(
           if (witness_start_ns != 0) {
             manager->RecordWitnessUpdateRpcLatency(
                 RecoveryProfileNowNs() - witness_start_ns);
+            manager->RecordWitnessUpdateRpcBreakdown(
+                reply.client_queue_time_ns(),
+                reply.witness_batch_queue_time_ns(),
+                reply.witness_handler_time_ns(),
+                reply.witness_mutex_wait_time_ns(),
+                reply.witness_mutex_hold_time_ns(),
+                reply.client_batch_leader(),
+                reply.client_batch_size());
           }
 
           bool success = false;

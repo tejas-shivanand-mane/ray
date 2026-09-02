@@ -243,6 +243,77 @@ def run(args: argparse.Namespace) -> None:
         )
         print()
 
+        witness_completed = owner.get("witness_update_rpcs_completed", 0)
+        client_queue_ns = owner.get("witness_update_client_queue_time_ns", 0)
+        server_batch_queue_ns = owner.get("witness_update_server_batch_queue_time_ns", 0)
+        handler_ns = owner.get("witness_update_handler_time_ns", 0)
+        mutex_wait_ns = owner.get("witness_update_mutex_wait_time_ns", 0)
+        mutex_hold_ns = owner.get("witness_update_mutex_hold_time_ns", 0)
+        rtt_ns = owner.get("witness_update_rpc_time_ns", 0)
+        handler_outside_mutex_ns = max(0, handler_ns - mutex_wait_ns - mutex_hold_ns)
+        residual_ns = max(
+            0,
+            rtt_ns - client_queue_ns - server_batch_queue_ns - handler_ns,
+        )
+        physical_batches = owner.get("witness_update_physical_batches_completed", 0)
+        physical_batch_items = owner.get("witness_update_physical_batch_items", 0)
+        h1_samples = owner.get("h1_publish_readiness_samples", 0)
+        h2_reserved = owner.get("h2_reserved_at_h1_publish", 0)
+        h2_installed = owner.get("h2_installed_at_h1_publish", 0)
+
+        def per_completed_us(total_ns: int) -> float:
+            return total_ns / witness_completed / 1e3 if witness_completed else 0.0
+
+        print("Witness publication barrier decomposition:")
+        print(
+            "  client witness-batch queue            = "
+            f"{per_completed_us(client_queue_ns):.1f} us / logical update"
+        )
+        print(
+            "  witness batch serial-position queue   = "
+            f"{per_completed_us(server_batch_queue_ns):.1f} us / logical update"
+        )
+        print(
+            "  witness handler total                 = "
+            f"{per_completed_us(handler_ns):.1f} us / logical update"
+        )
+        print(
+            "    recovery_witness_mutex wait         = "
+            f"{per_completed_us(mutex_wait_ns):.1f} us"
+        )
+        print(
+            "    recovery_witness_mutex hold         = "
+            f"{per_completed_us(mutex_hold_ns):.1f} us"
+        )
+        print(
+            "    handler outside mutex               = "
+            f"{per_completed_us(handler_outside_mutex_ns):.1f} us"
+        )
+        print(
+            "  transport + callback residual         = "
+            f"{per_completed_us(residual_ns):.1f} us / logical update"
+        )
+        print(
+            "  physical witness batches              = "
+            f"{physical_batches} "
+            f"({_per_task(owner, 'witness_update_physical_batches_completed', args.tasks):.3f} / task)"
+        )
+        print(
+            "  logical updates / physical batch      = "
+            f"{physical_batch_items / physical_batches if physical_batches else 0.0:.2f}"
+        )
+        print(
+            "  H2 reserved when H1 publish starts    = "
+            f"{h2_reserved}/{h1_samples} "
+            f"({100.0 * h2_reserved / h1_samples if h1_samples else 0.0:.1f}%)"
+        )
+        print(
+            "  H2 installed when H1 publish starts   = "
+            f"{h2_installed}/{h1_samples} "
+            f"({100.0 * h2_installed / h1_samples if h1_samples else 0.0:.1f}%)"
+        )
+        print()
+
         print("Synchronous CPU/copy work:")
         print(
             "  owner TaskSpec copies                 = "
@@ -271,13 +342,12 @@ def run(args: argparse.Namespace) -> None:
         install_us = _avg_us(owner, "holder_install_rpc_time_ns", "holder_install_rpcs_completed")
         admission_us = _avg_us(owner, "holder_admission_time_ns", "holder_admissions_committed")
         print("Decision signal:")
-        if publish_us >= install_us:
-            print("  witness publication >= holder-install RTT -> prioritize collapsing H1/H2 durable publications")
-        else:
-            print("  holder-install RTT > witness publication -> prioritize reducing second-holder install/lineage transfer")
         print(
             "  admission vs (install + publish)       = "
             f"{admission_us:.1f} us vs {install_us + publish_us:.1f} us"
+        )
+        print(
+            "  use the barrier decomposition + H2 readiness above to choose the next optimization"
         )
         print("  R=2 and W=2 remain unchanged; this is diagnosis only.")
 

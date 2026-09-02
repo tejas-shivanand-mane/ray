@@ -76,6 +76,23 @@ class RecoverySuccessionManager {
     uint64_t witness_update_rpcs_sent = 0;
     uint64_t witness_update_rpcs_completed = 0;
 
+    // Benchmark-70 witness barrier decomposition. All timing sums are per
+    // logical witness update; physical batch counters are derived from the
+    // client-side demultiplexing metadata.
+    uint64_t witness_update_client_queue_time_ns = 0;
+    uint64_t witness_update_server_batch_queue_time_ns = 0;
+    uint64_t witness_update_handler_time_ns = 0;
+    uint64_t witness_update_mutex_wait_time_ns = 0;
+    uint64_t witness_update_mutex_hold_time_ns = 0;
+    uint64_t witness_update_physical_batches_completed = 0;
+    uint64_t witness_update_physical_batch_items = 0;
+
+    // Opportunistic H2 readiness sampled at the instant ordinary K=1 H1
+    // begins witness publication. This does not delay H1.
+    uint64_t h1_publish_readiness_samples = 0;
+    uint64_t h2_reserved_at_h1_publish = 0;
+    uint64_t h2_installed_at_h1_publish = 0;
+
     // Wall-clock latency of the whole witness-publication stage.
     // This is different from witness_update_rpc_time_ns, which sums
     // the RTTs of individual witness RPCs.
@@ -202,6 +219,16 @@ class RecoverySuccessionManager {
                                   uint64_t manifest_bytes);
 
   void RecordWitnessUpdateRpcLatency(uint64_t latency_ns);
+
+  void RecordWitnessUpdateRpcBreakdown(uint64_t client_queue_ns,
+                                       uint64_t server_batch_queue_ns,
+                                       uint64_t handler_ns,
+                                       uint64_t mutex_wait_ns,
+                                       uint64_t mutex_hold_ns,
+                                       bool batch_leader,
+                                       uint32_t batch_size);
+
+  void RecordH2ReadinessAtH1Publish(bool h2_reserved, bool h2_installed);
 
   void RecordWitnessPublishLatency(uint64_t latency_ns);
 

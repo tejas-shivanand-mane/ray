@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <boost/bind/bind.hpp>
+#include <chrono>
 #include <cctype>
 #include <cerrno>
 #include <csignal>
@@ -32,6 +33,7 @@
 
 #include <google/protobuf/util/message_differencer.h>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_replace.h"
 #include "ray/asio/asio_util.h"
@@ -82,6 +84,13 @@ int CompareRecoveryManifestVersions(const rpc::RecoveryManifest &left,
   }
 
   return 0;
+}
+
+uint64_t RecoveryWitnessProfileNowNs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
 }
 
 rpc::ObjectReference FlatbufferToSingleObjectReference(
@@ -480,6 +489,17 @@ void NodeManager::HandleUpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest request,
     rpc::UpdateRecoveryWitnessReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
+  const bool profile_witness =
+      RayConfig::instance().enable_recovery_succession_profiling();
+  const uint64_t handler_start_ns =
+      profile_witness ? RecoveryWitnessProfileNowNs() : 0;
+  absl::Cleanup record_handler_time = [reply, handler_start_ns]() {
+    if (handler_start_ns != 0) {
+      reply->set_witness_handler_time_ns(
+          RecoveryWitnessProfileNowNs() - handler_start_ns);
+    }
+  };
+
   if (!RayConfig::instance().enable_recovery_succession()) {
     reply->set_stored(false);
     send_reply_callback(Status::OK(), nullptr, nullptr);
@@ -686,39 +706,6 @@ void NodeManager::HandleUpdateRecoveryWitness(
   const rpc::RecoveryManifest &incoming = request.manifest();
   const TaskID task_id = TaskID::FromBinary(incoming.task_id());
 
-  // Patch 4N-WCHAIN: ordinary adaptive K=1 uses witness 0 as a tiny fan-out
-  // coordinator. The coordinator must itself be one of the two configured
-  // witnesses and must have exactly one distinct peer to forward to.
-  const bool use_k1_witness_coordinator =
-      !baseline_enabled && !certificate_mode && !request.witness_forwarded() &&
-      !RayConfig::instance().enable_recovery_frontier() && !incoming.tombstoned() &&
-      incoming.target_holder_count() == 2 && incoming.witness_count() == 2 &&
-      incoming.witness_raylets_size() == 2 && incoming.succession_size() >= 2;
-
-  std::optional<rpc::Address> witness_forward_target;
-  if (use_k1_witness_coordinator) {
-    bool self_is_configured_witness = false;
-    for (const rpc::Address &witness : incoming.witness_raylets()) {
-      if (witness.node_id() == self_node_id_.Binary()) {
-        self_is_configured_witness = true;
-      } else if (!witness_forward_target.has_value()) {
-        witness_forward_target = witness;
-      } else {
-        witness_forward_target.reset();
-        break;
-      }
-    }
-
-    if (!self_is_configured_witness || !witness_forward_target.has_value() ||
-        witness_forward_target->node_id().size() != NodeID::Size() ||
-        witness_forward_target->ip_address().empty() ||
-        witness_forward_target->port() <= 0) {
-      reply->set_stored(false);
-      send_reply_callback(Status::OK(), nullptr, nullptr);
-      return;
-    }
-  }
-
   const bool has_serialized_task_spec =
       !request.serialized_task_spec().empty();
 
@@ -771,8 +758,16 @@ void NodeManager::HandleUpdateRecoveryWitness(
     }
   }
 
+  const uint64_t witness_mutex_wait_start_ns =
+      profile_witness ? RecoveryWitnessProfileNowNs() : 0;
+  uint64_t witness_mutex_acquired_ns = 0;
   {
     absl::MutexLock lock(&recovery_witness_mutex_);
+    if (witness_mutex_wait_start_ns != 0) {
+      witness_mutex_acquired_ns = RecoveryWitnessProfileNowNs();
+      reply->set_witness_mutex_wait_time_ns(
+          witness_mutex_acquired_ns - witness_mutex_wait_start_ns);
+    }
 
     auto existing_it = recovery_witness_manifests_.find(task_id);
     if (existing_it == recovery_witness_manifests_.end()) {
@@ -825,26 +820,11 @@ void NodeManager::HandleUpdateRecoveryWitness(
         }
       }
     }
-  }
 
-  if (reply->stored() && witness_forward_target.has_value()) {
-    rpc::UpdateRecoveryWitnessRequest forwarded_request;
-    forwarded_request.mutable_manifest()->CopyFrom(incoming);
-    forwarded_request.set_witness_forwarded(true);
-
-    auto forward_client =
-        raylet_client_pool_.GetOrConnectByAddress(witness_forward_target.value());
-    const uint64_t generation = incoming.version().generation();
-    forward_client->UpdateRecoveryWitness(
-        std::move(forwarded_request),
-        [task_id, generation](const Status &status,
-                              rpc::UpdateRecoveryWitnessReply &&forward_reply) {
-          if (!status.ok() || !forward_reply.stored()) {
-            RAY_LOG(WARNING).WithField(task_id)
-                << "Patch 4N-WCHAIN secondary witness forward failed for generation "
-                << generation << ": " << status;
-          }
-        });
+    if (witness_mutex_acquired_ns != 0) {
+      reply->set_witness_mutex_hold_time_ns(
+          RecoveryWitnessProfileNowNs() - witness_mutex_acquired_ns);
+    }
   }
 
   send_reply_callback(Status::OK(), nullptr, nullptr);
@@ -859,15 +839,26 @@ void NodeManager::HandleUpdateRecoveryWitnessBatch(
   // the existing validation/versioning/baseline semantics. The single-item
   // handler is synchronous; its send callback only marks that logical item
   // complete, so a no-op callback is sufficient inside this outer RPC.
+  const bool profile_witness =
+      RayConfig::instance().enable_recovery_succession_profiling();
+  const uint64_t batch_start_ns =
+      profile_witness ? RecoveryWitnessProfileNowNs() : 0;
+
   for (int i = 0; i < request.updates_size(); ++i) {
     rpc::UpdateRecoveryWitnessRequest item_request;
     item_request.Swap(request.mutable_updates(i));
 
+    const uint64_t item_start_ns =
+        profile_witness ? RecoveryWitnessProfileNowNs() : 0;
     auto *item_reply = reply->add_replies();
     HandleUpdateRecoveryWitness(
         std::move(item_request),
         item_reply,
         [](Status, std::function<void()>, std::function<void()>) {});
+    if (item_start_ns != 0) {
+      item_reply->set_witness_batch_queue_time_ns(
+          item_start_ns - batch_start_ns);
+    }
   }
 
   send_reply_callback(Status::OK(), nullptr, nullptr);

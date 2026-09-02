@@ -3495,6 +3495,46 @@ void RecoverySuccessionManager::RecordWitnessUpdateRpcLatency(
   profile_.witness_update_rpc_time_ns += latency_ns;
 }
 
+void RecoverySuccessionManager::RecordWitnessUpdateRpcBreakdown(
+    uint64_t client_queue_ns,
+    uint64_t server_batch_queue_ns,
+    uint64_t handler_ns,
+    uint64_t mutex_wait_ns,
+    uint64_t mutex_hold_ns,
+    bool batch_leader,
+    uint32_t batch_size) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  profile_.witness_update_client_queue_time_ns += client_queue_ns;
+  profile_.witness_update_server_batch_queue_time_ns += server_batch_queue_ns;
+  profile_.witness_update_handler_time_ns += handler_ns;
+  profile_.witness_update_mutex_wait_time_ns += mutex_wait_ns;
+  profile_.witness_update_mutex_hold_time_ns += mutex_hold_ns;
+  if (batch_leader) {
+    ++profile_.witness_update_physical_batches_completed;
+    profile_.witness_update_physical_batch_items += batch_size;
+  }
+}
+
+void RecoverySuccessionManager::RecordH2ReadinessAtH1Publish(
+    bool h2_reserved, bool h2_installed) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  ++profile_.h1_publish_readiness_samples;
+  if (h2_reserved) {
+    ++profile_.h2_reserved_at_h1_publish;
+  }
+  if (h2_installed) {
+    ++profile_.h2_installed_at_h1_publish;
+  }
+}
+
 
 void RecoverySuccessionManager::RecordWitnessPublishLatency(
     uint64_t latency_ns) {

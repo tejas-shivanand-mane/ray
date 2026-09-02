@@ -15,6 +15,7 @@
 #include "ray/raylet_rpc_client/raylet_client.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <set>
@@ -29,6 +30,15 @@
 
 namespace ray {
 namespace rpc {
+
+namespace {
+uint64_t RecoveryWitnessClientProfileNowNs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+}  // namespace
 
 RayletClient::RayletClient(const rpc::Address &address,
                            rpc::ClientCallManager &client_call_manager,
@@ -582,6 +592,11 @@ void RayletClient::UpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest &&request,
     const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) {
   PendingRecoveryWitnessUpdate item{std::move(request), callback};
+  item.profiling =
+      ::RayConfig::instance().enable_recovery_succession_profiling();
+  if (item.profiling) {
+    item.enqueue_time_ns = RecoveryWitnessClientProfileNowNs();
+  }
   auto state = recovery_witness_batch_state_;
   std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch;
 
@@ -608,7 +623,17 @@ void RayletClient::DispatchRecoveryWitnessBatch(
   RAY_CHECK(batch != nullptr && !batch->empty());
 
   rpc::UpdateRecoveryWitnessBatchRequest request;
+  bool profile_batch = false;
+  for (const auto &item : *batch) {
+    profile_batch = profile_batch || item.profiling;
+  }
+  const uint64_t dispatch_ns =
+      profile_batch ? RecoveryWitnessClientProfileNowNs() : 0;
+
   for (auto &item : *batch) {
+    if (item.profiling && item.enqueue_time_ns != 0) {
+      item.client_queue_time_ns = dispatch_ns - item.enqueue_time_ns;
+    }
     rpc::UpdateRecoveryWitnessRequest *update = request.add_updates();
     // The pending request is dead after envelope construction. Move its protobuf
     // storage directly into the physical batch for both Fixed-R and adaptive
@@ -638,6 +663,12 @@ void RayletClient::DispatchRecoveryWitnessBatch(
           // Transport failures retain their non-OK status. A malformed
           // successful batch reply yields the default stored=false item reply,
           // which safely fails that logical witness update.
+          if ((*batch)[i].profiling) {
+            item_reply.set_client_queue_time_ns((*batch)[i].client_queue_time_ns);
+            item_reply.set_client_batch_size(
+                static_cast<uint32_t>(batch->size()));
+            item_reply.set_client_batch_leader(i == 0);
+          }
           (*batch)[i].callback(status, std::move(item_reply));
         }
 
