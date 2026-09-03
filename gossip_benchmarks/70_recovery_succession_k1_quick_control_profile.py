@@ -274,7 +274,7 @@ def run(args: argparse.Namespace) -> None:
             f"{per_completed_us(server_batch_queue_ns):.1f} us / logical update"
         )
         print(
-            "  witness handler total                 = "
+            "  witness handler total (amortized)     = "
             f"{per_completed_us(handler_ns):.1f} us / logical update"
         )
         print(

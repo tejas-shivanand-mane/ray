@@ -854,6 +854,10 @@ void NodeManager::HandleUpdateRecoveryWitnessBatch(
     }
   }
 
+  if (batch_start_ns != 0) {
+    reply->set_witness_batch_handler_time_ns(
+        RecoveryWitnessProfileNowNs() - batch_start_ns);
+  }
   send_reply_callback(Status::OK(), nullptr, nullptr);
 }
 

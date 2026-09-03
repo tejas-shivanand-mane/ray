@@ -521,6 +521,10 @@ message UpdateRecoveryWitnessBatchRequest {
 // Replies are returned in the same order as UpdateRecoveryWitnessBatchRequest.updates.
 message UpdateRecoveryWitnessBatchReply {
   repeated UpdateRecoveryWitnessReply replies = 1;
+
+  // Profiling-only physical-batch server wall time for Benchmark 70.
+  // Zero when recovery succession profiling is disabled.
+  uint64 witness_batch_handler_time_ns = 2;
 }
 
 message GetRecoveryWitnessRequest {
