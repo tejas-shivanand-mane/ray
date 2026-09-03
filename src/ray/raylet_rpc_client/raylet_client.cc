@@ -628,6 +628,11 @@ void RayletClient::UpdateRecoveryWitness(
       if (!state->in_flight && !state->flush_scheduled) {
         state->flush_scheduled = true;
         schedule_flush = true;
+      } else {
+        // An in-flight batch completion or an already-posted zero-turn flush
+        // owns this queued update. Do not fall through to the legacy immediate
+        // dispatch tail, where no local batch exists.
+        return;
       }
     } else {
       // A legacy/tombstone update must not overtake an already-posted ordinary
