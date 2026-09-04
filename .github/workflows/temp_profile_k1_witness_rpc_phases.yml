@@ -16,6 +16,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fix applicator matching
+        run: python tools/_fix_k1_phase_applicator.py
+
       - name: Apply K1 witness RPC phase profiler
         run: python tools/_profile_k1_witness_rpc_phases.py
 
@@ -30,6 +33,7 @@ jobs:
 
       - name: Commit profiling instrumentation and remove applicator
         run: |
+          rm tools/_fix_k1_phase_applicator.py
           rm tools/_profile_k1_witness_rpc_phases.py
           rm .github/workflows/temp_profile_k1_witness_rpc_phases.yml
           git config user.name "tejas-shivanand-mane"
