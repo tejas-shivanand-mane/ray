@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+from pathlib import Path
+
+p = Path("src/ray/rpc/client_call.h")
+text = p.read_text()
+old = '''          // Post the callback to the main event loop.\n          main_service_.post(\n              [tag]() {\n                tag->GetCall()->MarkRecoveryWitnessMainLoopCallbackStarted();\n                tag->GetCall()->OnReplyReceived();\n                // The call is finished, and we can delete this tag now.\n                delete tag;\n              },\n              stats_handle->event_name + ".OnReplyReceived",\n              // Implement the delay of the rpc client call as the\n              // delay of OnReplyReceived().\n              ray::asio::testing::GetDelayUs(stats_handle->event_name));\n\n          // CQ-driven transport hooks run only after the completed call's\n          // logical callback has been posted. This preserves main-loop callback\n          // ordering while allowing a transport lane to launch its next physical\n          // RPC without waiting for that posted callback to execute.\n          tag->GetCall()->RunCompletionQueueHook();\n          main_service_.stats()->RecordEnd(std::move(stats_handle));\n'''
+new = '''          // Hold the ClientCall independently of `tag` before posting. The posted\n          // main-loop callback owns/deletes `tag`, and may execute concurrently\n          // immediately after boost::asio::post() returns. The CQ thread must\n          // therefore never dereference `tag` after the post.\n          auto call = tag->GetCall();\n\n          // Post the callback to the main event loop.\n          main_service_.post(\n              [tag]() {\n                tag->GetCall()->MarkRecoveryWitnessMainLoopCallbackStarted();\n                tag->GetCall()->OnReplyReceived();\n                // The call is finished, and we can delete this tag now.\n                delete tag;\n              },\n              stats_handle->event_name + ".OnReplyReceived",\n              // Implement the delay of the rpc client call as the\n              // delay of OnReplyReceived().\n              ray::asio::testing::GetDelayUs(stats_handle->event_name));\n\n          // CQ-driven transport hooks run only after the completed call's\n          // logical callback has been posted. Use the retained shared_ptr rather\n          // than `tag`, whose lifetime now belongs to the main-loop callback.\n          call->RunCompletionQueueHook();\n          main_service_.stats()->RecordEnd(std::move(stats_handle));\n'''
+count = text.count(old)
+if count != 1:
+    raise RuntimeError(f"expected exactly one CQ hook block, found {count}")
+text = text.replace(old, new, 1)
+p.write_text(text)
+print("Fixed CQ hook ClientCallTag lifetime race.")
