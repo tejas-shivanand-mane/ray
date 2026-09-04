@@ -209,6 +209,10 @@ class RayletClient : public RayletClientInterface {
   // timer: an idle connection sends its first update immediately.
   static constexpr size_t kRecoveryWitnessBatchMaxSize = 32;
 
+  static void AdvanceRecoveryWitnessBatchTransport(
+      std::shared_ptr<RecoveryWitnessBatchState> state,
+      std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client);
+
   static void DispatchRecoveryWitnessBatch(
       std::shared_ptr<RecoveryWitnessBatchState> state,
       std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client,
