@@ -2,8 +2,9 @@
 """Benchmark 72: differential system CPU profile for Fixed-R vs Succession K=1.
 
 This runs Benchmark 69's exact profiling-OFF workload in fresh local Ray clusters
-and samples Linux /proc during each timed-and-drained window. CPU is normalized
-by every submitted pipeline because run_window drains all submitted work.
+and snapshots Linux /proc immediately before and after each timed-and-drained
+window. CPU is normalized by every submitted pipeline because run_window drains
+all submitted work.
 
 The sampler reports the owner driver/CoreWorker, borrower workers, other Ray
 workers, Raylets, GCS/auxiliary processes, gRPC/CQ thread groups, and context
@@ -25,7 +26,6 @@ import random
 import statistics
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,7 +173,9 @@ def _cluster_service_classes(cluster: Any) -> dict[int, str]:
             for info in infos:
                 process = getattr(info, "process", None)
                 pid = getattr(process, "pid", None)
-                if pid is not None and process.poll() is None:
+                poll = getattr(process, "poll", None)
+                alive = poll is None or poll() is None
+                if pid is not None and alive:
                     out[int(pid)] = _service_process_class(str(process_type))
     return out
 
@@ -213,10 +215,19 @@ def _process_class(
 
 def _thread_group(comm: str, is_main: bool) -> str:
     lower = comm.lower()
-    if "grpc" in lower or "event_engine" in lower or "completion" in lower:
+    if (
+        "grpc" in lower
+        or "event_engine" in lower
+        or "completion" in lower
+        or lower == "nexting_thread"
+        or lower.startswith("client.poll")
+        or lower.startswith("server.poll")
+    ):
         return "grpc_cq"
     if is_main:
         return "main"
+    if lower == "worker.io":
+        return "coreworker_io"
     if "io_service" in lower or "event_loop" in lower or "event-loop" in lower:
         return "io_event_loop"
     if lower.startswith("ray::"):
@@ -229,18 +240,15 @@ class ProcTreeSampler:
         self,
         borrower_pids: set[int],
         service_classes: dict[int, str],
-        interval_s: float,
     ):
         self.root_pid = os.getpid()
         self.borrower_pids = set(borrower_pids)
         self.service_classes = dict(service_classes)
         self.root_pids = {self.root_pid, *self.service_classes}
-        self.interval_s = interval_s
-        self.stop_event = threading.Event()
-        self.thread: threading.Thread | None = None
-        self.sampler_tid: int | None = None
         self.initialized = False
         self.samples = 0
+        self.start_proc_keys: set[tuple[int, int]] = set()
+        self.start_thread_keys: set[tuple[int, int, int]] = set()
         self.proc_first: dict[tuple[int, int], CpuPoint] = {}
         self.proc_last: dict[tuple[int, int], CpuPoint] = {}
         self.proc_class: dict[tuple[int, int], str] = {}
@@ -248,14 +256,17 @@ class ProcTreeSampler:
         self.thread_last: dict[tuple[int, int, int], CpuPoint] = {}
         self.thread_label: dict[tuple[int, int, int], tuple[str, str]] = {}
 
-    def _sample(self) -> None:
+    def _sample(self) -> tuple[set[tuple[int, int]], set[tuple[int, int, int]]]:
         table = _process_table()
         selected = _descendants(table, self.root_pids)
+        current_proc_keys: set[tuple[int, int]] = set()
+        current_thread_keys: set[tuple[int, int, int]] = set()
         for pid in selected:
             info = table.get(pid)
             if info is None:
                 continue
             pkey = (pid, info.start_ticks)
+            current_proc_keys.add(pkey)
             if pkey not in self.proc_first:
                 self.proc_first[pkey] = info.point if not self.initialized else CpuPoint(0, 0)
                 classified = ProcInfo(
@@ -290,6 +301,7 @@ class ProcTreeSampler:
                 voluntary, involuntary = _read_ctx(task / "status")
                 point = CpuPoint(user, system, voluntary, involuntary)
                 tkey = (pid, tid, thread_start)
+                current_thread_keys.add(tkey)
                 if tkey not in self.thread_first:
                     self.thread_first[tkey] = point if not self.initialized else CpuPoint(0, 0)
                     self.thread_label[tkey] = (
@@ -298,17 +310,10 @@ class ProcTreeSampler:
                 self.thread_last[tkey] = point
         self.initialized = True
         self.samples += 1
-
-    def _run(self) -> None:
-        self.sampler_tid = threading.get_native_id()
-        self._sample()
-        while not self.stop_event.wait(self.interval_s):
-            self._sample()
+        return current_proc_keys, current_thread_keys
 
     def start(self) -> None:
-        self._sample()
-        self.thread = threading.Thread(target=self._run, name="b72-proc-sampler", daemon=True)
-        self.thread.start()
+        self.start_proc_keys, self.start_thread_keys = self._sample()
 
     @staticmethod
     def _delta(first: CpuPoint, last: CpuPoint) -> CpuPoint:
@@ -320,12 +325,7 @@ class ProcTreeSampler:
         )
 
     def stop(self) -> dict[str, Any]:
-        self.stop_event.set()
-        if self.thread is not None:
-            self.thread.join(timeout=max(1.0, self.interval_s * 4))
-            if self.thread.is_alive():
-                raise RuntimeError("/proc sampler thread did not stop")
-        self._sample()
+        end_proc_keys, end_thread_keys = self._sample()
 
         proc_ticks: dict[str, list[int]] = {}
         for key, last in self.proc_last.items():
@@ -336,39 +336,30 @@ class ProcTreeSampler:
 
         thread_ticks: dict[str, list[int]] = {}
         total_voluntary = total_involuntary = 0
-        sampler_user = sampler_system = sampler_voluntary = sampler_involuntary = 0
         for key, last in self.thread_last.items():
             delta = self._delta(self.thread_first[key], last)
             process_class, group = self.thread_label[key]
-            if key[0] == self.root_pid and key[1] == self.sampler_tid:
-                sampler_user += delta.user_ticks
-                sampler_system += delta.system_ticks
-                sampler_voluntary += delta.voluntary_ctx
-                sampler_involuntary += delta.involuntary_ctx
-            else:
-                label = f"{process_class}/{group}"
-                row = thread_ticks.setdefault(label, [0, 0, 0, 0])
-                row[0] += delta.user_ticks
-                row[1] += delta.system_ticks
-                row[2] += delta.voluntary_ctx
-                row[3] += delta.involuntary_ctx
-                total_voluntary += delta.voluntary_ctx
-                total_involuntary += delta.involuntary_ctx
-
-        owner = proc_ticks.get("owner_driver_coreworker", [0, 0])
-        owner[0] = max(0, owner[0] - sampler_user)
-        owner[1] = max(0, owner[1] - sampler_system)
+            label = f"{process_class}/{group}"
+            row = thread_ticks.setdefault(label, [0, 0, 0, 0])
+            row[0] += delta.user_ticks
+            row[1] += delta.system_ticks
+            row[2] += delta.voluntary_ctx
+            row[3] += delta.involuntary_ctx
+            total_voluntary += delta.voluntary_ctx
+            total_involuntary += delta.involuntary_ctx
 
         return {
             "process_ticks": proc_ticks,
             "thread_ticks": thread_ticks,
             "voluntary_ctx": total_voluntary,
             "involuntary_ctx": total_involuntary,
-            "sampler_cpu_ticks": sampler_user + sampler_system,
-            "sampler_ctx": sampler_voluntary + sampler_involuntary,
             "samples": self.samples,
             "processes_seen": len(self.proc_first),
             "threads_seen": len(self.thread_first),
+            "processes_started": len(end_proc_keys - self.start_proc_keys),
+            "processes_ended": len(self.start_proc_keys - end_proc_keys),
+            "threads_started": len(end_thread_keys - self.start_thread_keys),
+            "threads_ended": len(self.start_thread_keys - end_thread_keys),
         }
 
 
@@ -408,11 +399,7 @@ def single_profile(args: argparse.Namespace) -> dict[str, Any]:
         service_classes = _cluster_service_classes(cluster)
         if not any(value == "raylet" for value in service_classes.values()):
             raise RuntimeError("Cluster.all_processes did not expose a live Raylet PID")
-        sampler = ProcTreeSampler(
-            borrower_pids,
-            service_classes,
-            args.sample_interval_ms / 1000.0,
-        )
+        sampler = ProcTreeSampler(borrower_pids, service_classes)
         sampler.start()
         started = time.perf_counter()
         perf = b58.run_window(
@@ -455,15 +442,16 @@ def single_profile(args: argparse.Namespace) -> dict[str, Any]:
             "payload_bytes": args.payload_bytes,
             "burst_size": args.burst_size,
             "inflight_tasks": args.inflight_tasks,
-            "sample_interval_ms": args.sample_interval_ms,
             "sample_count": sampled["samples"],
             "processes_seen": sampled["processes_seen"],
             "threads_seen": sampled["threads_seen"],
+            "processes_started": sampled["processes_started"],
+            "processes_ended": sampled["processes_ended"],
+            "threads_started": sampled["threads_started"],
+            "threads_ended": sampled["threads_ended"],
             "measured_elapsed_seconds": elapsed,
             "voluntary_ctx": sampled["voluntary_ctx"],
             "involuntary_ctx": sampled["involuntary_ctx"],
-            "sampler_cpu_seconds": _ticks_seconds(sampled["sampler_cpu_ticks"]),
-            "sampler_ctx": sampled["sampler_ctx"],
             "process_cpu": process_cpu,
             "thread_cpu": thread_cpu,
             **perf,
@@ -521,7 +509,6 @@ def _child_cmd(args: argparse.Namespace, variant: str, rep: int, temp: Path) -> 
         "--cluster-timeout-seconds", str(args.cluster_timeout_seconds),
         "--wait-timeout-seconds", str(args.wait_timeout_seconds),
         "--drain-timeout-seconds", str(args.drain_timeout_seconds),
-        "--sample-interval-ms", str(args.sample_interval_ms),
     ]
 
 
@@ -534,8 +521,6 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("--repetitions must be >= 2")
     if args.inflight_tasks % args.burst_size:
         raise ValueError("--inflight-tasks must be divisible by --burst-size")
-    if args.sample_interval_ms < 20:
-        raise ValueError("--sample-interval-ms must be >= 20")
     if args.holders != 2 or args.witness_count != 2:
         raise ValueError("Benchmark 72 requires R=2 and W=2")
 
@@ -559,13 +544,13 @@ def run(args: argparse.Namespace) -> None:
     print(
         "K=1 system CPU differential: "
         f"reps={args.repetitions} warmup={args.warmup_seconds:.1f}s "
-        f"timed={args.duration_seconds:.1f}s sample={args.sample_interval_ms:.0f}ms"
+        f"timed={args.duration_seconds:.1f}s snapshots=start/end"
     )
     print(
         "  Fixed-R vs ordinary Succession; "
         "R=2 W=2 profiling=OFF; fresh cluster per case"
     )
-    print("  /proc sampler CPU is measured and subtracted; all submitted work is drained")
+    print("  endpoint snapshots do not run during the workload; all submitted work is drained")
 
     for i, (rep, variant, pos) in enumerate(pending, 1):
         print(
@@ -611,6 +596,11 @@ def run(args: argparse.Namespace) -> None:
             for label, values in thread_cpu.items()
             if label.endswith("/grpc_cq")
         )
+        coreworker_io_cpu = sum(
+            float(values["cpu_seconds"])
+            for label, values in thread_cpu.items()
+            if label.endswith("/coreworker_io")
+        )
         for label, values in thread_cpu.items():
             process_class, thread_group = label.split("/", 1)
             thread_rows.append({
@@ -627,6 +617,7 @@ def run(args: argparse.Namespace) -> None:
             "total_cpu_us_per_pipeline": 1e6 * total_cpu / pipelines,
             "cluster_cpu_us_per_pipeline": 1e6 * cluster_cpu / pipelines,
             "grpc_cq_cpu_us_per_pipeline": 1e6 * grpc_cpu / pipelines,
+            "coreworker_io_cpu_us_per_pipeline": 1e6 * coreworker_io_cpu / pipelines,
             "context_switches_per_pipeline": (
                 int(raw["voluntary_ctx"]) + int(raw["involuntary_ctx"])
             ) / pipelines,
@@ -639,7 +630,9 @@ def run(args: argparse.Namespace) -> None:
         print(
             f"  throughput={float(raw['throughput_rps']):.1f} rps "
             f"CPU={float(raw['total_cpu_us_per_pipeline']):.1f} us/pipeline "
-            f"ctx={float(raw['context_switches_per_pipeline']):.2f}/pipeline"
+            f"ctx={float(raw['context_switches_per_pipeline']):.2f}/pipeline "
+            f"churn=proc+{int(raw['processes_started'])}/-{int(raw['processes_ended'])} "
+            f"thread+{int(raw['threads_started'])}/-{int(raw['threads_ended'])}"
         )
 
     print("\nFinal K=1 system CPU profile:")
@@ -649,6 +642,7 @@ def run(args: argparse.Namespace) -> None:
             f"total CPU={_mean(runs, variant, 'total_cpu_us_per_pipeline'):8.1f} us/task  "
             f"Ray children={_mean(runs, variant, 'cluster_cpu_us_per_pipeline'):8.1f} us/task  "
             f"gRPC/CQ={_mean(runs, variant, 'grpc_cq_cpu_us_per_pipeline'):7.1f} us/task  "
+            f"CoreWorker-I/O={_mean(runs, variant, 'coreworker_io_cpu_us_per_pipeline'):7.1f} us/task  "
             f"ctx={_mean(runs, variant, 'context_switches_per_pipeline'):6.2f}/task"
         )
 
@@ -656,6 +650,7 @@ def run(args: argparse.Namespace) -> None:
     paired: dict[str, list[float]] = {
         "throughput_pct": [], "total_cpu_us": [], "total_cpu_pct": [],
         "cluster_cpu_us": [], "grpc_cpu_us": [], "ctx": [],
+        "coreworker_io_us": [],
     }
     for rep in range(1, args.repetitions + 1):
         fixed = by_case.get(("fixed_r", rep))
@@ -673,6 +668,10 @@ def run(args: argparse.Namespace) -> None:
         paired["grpc_cpu_us"].append(
             float(succession["grpc_cq_cpu_us_per_pipeline"]) - float(fixed["grpc_cq_cpu_us_per_pipeline"])
         )
+        paired["coreworker_io_us"].append(
+            float(succession["coreworker_io_cpu_us_per_pipeline"])
+            - float(fixed["coreworker_io_cpu_us_per_pipeline"])
+        )
         paired["ctx"].append(
             float(succession["context_switches_per_pipeline"]) - float(fixed["context_switches_per_pipeline"])
         )
@@ -685,6 +684,10 @@ def run(args: argparse.Namespace) -> None:
     )
     print(f"  Ray child-process CPU             = {statistics.fmean(paired['cluster_cpu_us']):+8.1f} us/task")
     print(f"  gRPC/CQ-thread CPU                = {statistics.fmean(paired['grpc_cpu_us']):+8.1f} us/task")
+    print(
+        "  CoreWorker I/O-thread CPU        = "
+        f"{statistics.fmean(paired['coreworker_io_us']):+8.1f} us/task"
+    )
     print(f"  context switches                  = {statistics.fmean(paired['ctx']):+8.2f} /task")
 
     class_means: dict[tuple[str, str], float] = {}
@@ -732,6 +735,26 @@ def run(args: argparse.Namespace) -> None:
         print(f"  {process_class + '/' + group:47s} {delta:+8.1f} us/task")
 
     print("\nDecision signal:")
+    started_processes = sum(int(r["processes_started"]) for r in runs)
+    ended_processes = sum(int(r["processes_ended"]) for r in runs)
+    started_threads = sum(int(r["threads_started"]) for r in runs)
+    ended_threads = sum(int(r["threads_ended"]) for r in runs)
+    print(
+        "  endpoint churn                   = "
+        f"process+{started_processes}/-{ended_processes} "
+        f"thread+{started_threads}/-{ended_threads}"
+    )
+    print(
+        "  endpoint coverage                = "
+        + (
+            "complete for pre-existing processes/threads"
+            if ended_processes == 0 and ended_threads == 0
+            else (
+                f"LOWER BOUND: {ended_processes} processes and "
+                f"{ended_threads} threads ended between snapshots"
+            )
+        )
+    )
     print("  A material Raylet/gRPC concentration supports a transport redesign.")
     print("  Otherwise stop K=1 micro-optimization and treat the remaining gap as structural.")
     print("  R=2, W=2, ordinary K=1 semantics, and the witness durability boundary are unchanged.")
@@ -757,7 +780,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--cluster-timeout-seconds", type=float, default=30.0)
     p.add_argument("--wait-timeout-seconds", type=float, default=1.0)
     p.add_argument("--drain-timeout-seconds", type=float, default=60.0)
-    p.add_argument("--sample-interval-ms", type=float, default=100.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--holders", type=int, default=2)
