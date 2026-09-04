@@ -430,6 +430,12 @@ class ClientCallManager {
             client_metrics_.req_failed.Record(1.0,
                                               {{"Method", stats_handle->event_name}});
           }
+          // Hold the ClientCall independently of `tag` before posting. The posted
+          // main-loop callback owns/deletes `tag`, and may execute concurrently
+          // immediately after boost::asio::post() returns. The CQ thread must
+          // therefore never dereference `tag` after the post.
+          auto call = tag->GetCall();
+
           // Post the callback to the main event loop.
           main_service_.post(
               [tag]() {
@@ -444,10 +450,9 @@ class ClientCallManager {
               ray::asio::testing::GetDelayUs(stats_handle->event_name));
 
           // CQ-driven transport hooks run only after the completed call's
-          // logical callback has been posted. This preserves main-loop callback
-          // ordering while allowing a transport lane to launch its next physical
-          // RPC without waiting for that posted callback to execute.
-          tag->GetCall()->RunCompletionQueueHook();
+          // logical callback has been posted. Use the retained shared_ptr rather
+          // than `tag`, whose lifetime now belongs to the main-loop callback.
+          call->RunCompletionQueueHook();
           main_service_.stats()->RecordEnd(std::move(stats_handle));
         } else {
           delete tag;
