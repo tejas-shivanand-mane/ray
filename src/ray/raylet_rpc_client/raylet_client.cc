@@ -616,6 +616,32 @@ void RayletClient::UpdateRecoveryWitness(
   DispatchRecoveryWitnessBatch(state, grpc_client_, std::move(batch));
 }
 
+void RayletClient::AdvanceRecoveryWitnessBatchTransport(
+    std::shared_ptr<RecoveryWitnessBatchState> state,
+    std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client) {
+  auto next_batch =
+      std::make_shared<std::vector<PendingRecoveryWitnessUpdate>>();
+  {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    const size_t count = std::min(
+        RayletClient::kRecoveryWitnessBatchMaxSize, state->pending.size());
+
+    if (count == 0) {
+      state->in_flight = false;
+      return;
+    }
+
+    next_batch->reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      next_batch->emplace_back(std::move(state->pending.front()));
+      state->pending.pop_front();
+    }
+  }
+
+  RayletClient::DispatchRecoveryWitnessBatch(
+      std::move(state), std::move(grpc_client), std::move(next_batch));
+}
+
 void RayletClient::DispatchRecoveryWitnessBatch(
     std::shared_ptr<RecoveryWitnessBatchState> state,
     std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client,
@@ -624,8 +650,23 @@ void RayletClient::DispatchRecoveryWitnessBatch(
 
   rpc::UpdateRecoveryWitnessBatchRequest request;
   bool profile_batch = false;
+  bool use_cq_transport_drain =
+      ::RayConfig::instance().enable_recovery_succession() &&
+      !::RayConfig::instance().enable_recovery_witness_holder_baseline() &&
+      !::RayConfig::instance().enable_recovery_frontier() &&
+      !::RayConfig::instance().enable_recovery_succession_certificate_admission();
+
   for (const auto &item : *batch) {
     profile_batch = profile_batch || item.profiling;
+    const auto &update = item.request;
+    use_cq_transport_drain =
+        use_cq_transport_drain && update.has_manifest() &&
+        !update.manifest().tombstoned() &&
+        update.manifest().target_holder_count() == 2 &&
+        update.manifest().witness_count() == 2 &&
+        update.manifest().witness_raylets_size() == 2 &&
+        !update.has_task_spec() && update.serialized_task_spec().empty() &&
+        !update.has_holder_certificate() && !update.has_recovery_claim();
   }
   const uint64_t dispatch_ns =
       profile_batch ? RecoveryWitnessClientProfileNowNs() : 0;
@@ -642,7 +683,7 @@ void RayletClient::DispatchRecoveryWitnessBatch(
   }
 
   auto batch_callback =
-      [state, grpc_client, batch](
+      [state, grpc_client, batch, use_cq_transport_drain](
           const Status &status,
           rpc::UpdateRecoveryWitnessBatchReply &&reply) mutable {
         const bool reply_shape_ok =
@@ -712,36 +753,34 @@ void RayletClient::DispatchRecoveryWitnessBatch(
           (*batch)[i].callback(status, std::move(item_reply));
         }
 
-        auto next_batch =
-            std::make_shared<std::vector<PendingRecoveryWitnessUpdate>>();
-        {
-          std::lock_guard<std::mutex> lock(state->mutex);
-          const size_t count = std::min(
-              RayletClient::kRecoveryWitnessBatchMaxSize,
-              state->pending.size());
-
-          if (count == 0) {
-            state->in_flight = false;
-            return;
-          }
-
-          next_batch->reserve(count);
-          for (size_t i = 0; i < count; ++i) {
-            next_batch->emplace_back(std::move(state->pending.front()));
-            state->pending.pop_front();
-          }
+        if (!use_cq_transport_drain) {
+          // Legacy path: physical transport advances only after logical
+          // callbacks have executed on the CoreWorker main event loop.
+          RayletClient::AdvanceRecoveryWitnessBatchTransport(
+              state, grpc_client);
         }
-
-        RayletClient::DispatchRecoveryWitnessBatch(
-            state, grpc_client, std::move(next_batch));
       };
 
-  INVOKE_RPC_CALL(NodeManagerService,
-                  UpdateRecoveryWitnessBatch,
-                  request,
-                  batch_callback,
-                  grpc_client,
-                  /*method_timeout_ms=*/-1);
+  std::function<void()> completion_queue_hook;
+  if (use_cq_transport_drain) {
+    completion_queue_hook = [state, grpc_client]() {
+      // Ordinary K=1 only: once gRPC has completed the current physical
+      // batch, launch the next queued physical batch directly from the CQ
+      // polling thread. The completed batch's logical callbacks have already
+      // been posted to the main event loop by ClientCallManager and still run
+      // there exactly as before.
+      RayletClient::AdvanceRecoveryWitnessBatchTransport(state, grpc_client);
+    };
+  }
+
+  grpc_client->CallMethod<UpdateRecoveryWitnessBatchRequest,
+                          UpdateRecoveryWitnessBatchReply>(
+      &NodeManagerService::Stub::PrepareAsyncUpdateRecoveryWitnessBatch,
+      request,
+      batch_callback,
+      "NodeManagerService.grpc_client.UpdateRecoveryWitnessBatch",
+      /*method_timeout_ms=*/-1,
+      std::move(completion_queue_hook));
 }
 
 void RayletClient::GetRecoveryWitness(
