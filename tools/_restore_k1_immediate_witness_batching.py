@@ -95,7 +95,7 @@ node = Path("src/ray/raylet/node_manager.cc").read_text()
 if "set_witness_batch_handler_time_ns" not in node:
     raise RuntimeError("missing server batch-handler timing stamp")
 bench = Path("gossip_benchmarks/70_recovery_succession_k1_quick_control_profile.py").read_text()
-if "batch-amortized" not in bench:
+if "witness handler total (amortized)" not in bench:
     raise RuntimeError("missing corrected B70 handler label")
 
 print("Restored immediate-idle K1 witness batching; preserved barrier profiling.")
