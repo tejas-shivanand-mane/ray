@@ -648,6 +648,31 @@ void RayletClient::DispatchRecoveryWitnessBatch(
         const bool reply_shape_ok =
             !status.ok() ||
             static_cast<size_t>(reply.replies_size()) == batch->size();
+        const uint64_t batch_callback_entry_ns =
+            reply.client_main_loop_start_time_ns() != 0
+                ? RecoveryWitnessClientProfileNowNs()
+                : 0;
+        const uint64_t client_submit_to_cq_ns =
+            reply.client_submit_time_ns() != 0 &&
+                    reply.client_cq_receive_time_ns() >=
+                        reply.client_submit_time_ns()
+                ? reply.client_cq_receive_time_ns() -
+                      reply.client_submit_time_ns()
+                : 0;
+        const uint64_t client_cq_to_main_loop_ns =
+            reply.client_cq_receive_time_ns() != 0 &&
+                    reply.client_main_loop_start_time_ns() >=
+                        reply.client_cq_receive_time_ns()
+                ? reply.client_main_loop_start_time_ns() -
+                      reply.client_cq_receive_time_ns()
+                : 0;
+        const uint64_t client_main_loop_to_batch_callback_ns =
+            batch_callback_entry_ns != 0 &&
+                    batch_callback_entry_ns >=
+                        reply.client_main_loop_start_time_ns()
+                ? batch_callback_entry_ns -
+                      reply.client_main_loop_start_time_ns()
+                : 0;
         const uint64_t amortized_witness_handler_ns =
             status.ok() && !batch->empty() &&
                     reply.witness_batch_handler_time_ns() != 0
@@ -677,6 +702,12 @@ void RayletClient::DispatchRecoveryWitnessBatch(
             item_reply.set_client_batch_size(
                 static_cast<uint32_t>(batch->size()));
             item_reply.set_client_batch_leader(i == 0);
+            item_reply.set_client_submit_to_cq_time_ns(
+                client_submit_to_cq_ns);
+            item_reply.set_client_cq_to_main_loop_time_ns(
+                client_cq_to_main_loop_ns);
+            item_reply.set_client_main_loop_to_batch_callback_time_ns(
+                client_main_loop_to_batch_callback_ns);
           }
           (*batch)[i].callback(status, std::move(item_reply));
         }

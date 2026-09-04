@@ -3497,6 +3497,9 @@ void RecoverySuccessionManager::RecordWitnessUpdateRpcLatency(
 
 void RecoverySuccessionManager::RecordWitnessUpdateRpcBreakdown(
     uint64_t client_queue_ns,
+    uint64_t client_submit_to_cq_ns,
+    uint64_t client_cq_to_main_loop_ns,
+    uint64_t client_main_loop_to_batch_callback_ns,
     uint64_t server_batch_queue_ns,
     uint64_t handler_ns,
     uint64_t mutex_wait_ns,
@@ -3509,8 +3512,21 @@ void RecoverySuccessionManager::RecordWitnessUpdateRpcBreakdown(
 
   absl::MutexLock lock(&mutex_);
   profile_.witness_update_client_queue_time_ns += client_queue_ns;
+  profile_.witness_update_client_submit_to_cq_time_ns +=
+      client_submit_to_cq_ns;
+  profile_.witness_update_client_cq_to_main_loop_time_ns +=
+      client_cq_to_main_loop_ns;
+  profile_.witness_update_client_main_loop_to_batch_callback_time_ns +=
+      client_main_loop_to_batch_callback_ns;
+  if (client_submit_to_cq_ns != 0 || client_cq_to_main_loop_ns != 0 ||
+      client_main_loop_to_batch_callback_ns != 0) {
+    ++profile_.witness_update_client_phase_samples;
+  }
   profile_.witness_update_server_batch_queue_time_ns += server_batch_queue_ns;
   profile_.witness_update_handler_time_ns += handler_ns;
+  if (handler_ns != 0) {
+    ++profile_.witness_update_handler_samples;
+  }
   profile_.witness_update_mutex_wait_time_ns += mutex_wait_ns;
   profile_.witness_update_mutex_hold_time_ns += mutex_hold_ns;
   if (batch_leader) {
@@ -3532,6 +3548,22 @@ void RecoverySuccessionManager::RecordH2ReadinessAtH1Publish(
   }
   if (h2_installed) {
     ++profile_.h2_installed_at_h1_publish;
+  }
+}
+
+void RecoverySuccessionManager::RecordH2ReadinessAtH1Ack(
+    bool h2_reserved, bool h2_installed) {
+  if (!profiling_enabled_) {
+    return;
+  }
+
+  absl::MutexLock lock(&mutex_);
+  ++profile_.h1_ack_readiness_samples;
+  if (h2_reserved) {
+    ++profile_.h2_reserved_at_h1_ack;
+  }
+  if (h2_installed) {
+    ++profile_.h2_installed_at_h1_ack;
   }
 }
 

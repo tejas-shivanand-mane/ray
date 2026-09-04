@@ -245,21 +245,35 @@ def run(args: argparse.Namespace) -> None:
 
         witness_completed = owner.get("witness_update_rpcs_completed", 0)
         client_queue_ns = owner.get("witness_update_client_queue_time_ns", 0)
+        submit_to_cq_ns = owner.get("witness_update_client_submit_to_cq_time_ns", 0)
+        cq_to_main_ns = owner.get("witness_update_client_cq_to_main_loop_time_ns", 0)
+        main_to_batch_ns = owner.get(
+            "witness_update_client_main_loop_to_batch_callback_time_ns", 0
+        )
+        client_phase_samples = owner.get("witness_update_client_phase_samples", 0)
         server_batch_queue_ns = owner.get("witness_update_server_batch_queue_time_ns", 0)
         handler_ns = owner.get("witness_update_handler_time_ns", 0)
+        handler_samples = owner.get("witness_update_handler_samples", 0)
         mutex_wait_ns = owner.get("witness_update_mutex_wait_time_ns", 0)
         mutex_hold_ns = owner.get("witness_update_mutex_hold_time_ns", 0)
         rtt_ns = owner.get("witness_update_rpc_time_ns", 0)
         handler_outside_mutex_ns = max(0, handler_ns - mutex_wait_ns - mutex_hold_ns)
         residual_ns = max(
             0,
-            rtt_ns - client_queue_ns - server_batch_queue_ns - handler_ns,
+            rtt_ns
+            - client_queue_ns
+            - submit_to_cq_ns
+            - cq_to_main_ns
+            - main_to_batch_ns,
         )
         physical_batches = owner.get("witness_update_physical_batches_completed", 0)
         physical_batch_items = owner.get("witness_update_physical_batch_items", 0)
         h1_samples = owner.get("h1_publish_readiness_samples", 0)
         h2_reserved = owner.get("h2_reserved_at_h1_publish", 0)
         h2_installed = owner.get("h2_installed_at_h1_publish", 0)
+        h1_ack_samples = owner.get("h1_ack_readiness_samples", 0)
+        h2_reserved_at_ack = owner.get("h2_reserved_at_h1_ack", 0)
+        h2_installed_at_ack = owner.get("h2_installed_at_h1_ack", 0)
 
         def per_completed_us(total_ns: int) -> float:
             return total_ns / witness_completed / 1e3 if witness_completed else 0.0
@@ -270,12 +284,29 @@ def run(args: argparse.Namespace) -> None:
             f"{per_completed_us(client_queue_ns):.1f} us / logical update"
         )
         print(
+            "  client submit -> gRPC CQ              = "
+            f"{per_completed_us(submit_to_cq_ns):.1f} us / logical update"
+        )
+        print(
+            "  gRPC CQ -> main event loop            = "
+            f"{per_completed_us(cq_to_main_ns):.1f} us / logical update"
+        )
+        print(
+            "  main loop -> Raylet batch callback    = "
+            f"{per_completed_us(main_to_batch_ns):.1f} us / logical update"
+        )
+        print(
+            "  client phase timing coverage          = "
+            f"{client_phase_samples}/{witness_completed} logical updates"
+        )
+        print(
             "  witness batch serial-position queue   = "
             f"{per_completed_us(server_batch_queue_ns):.1f} us / logical update"
         )
         print(
             "  witness handler total (amortized)     = "
-            f"{per_completed_us(handler_ns):.1f} us / logical update"
+            f"{per_completed_us(handler_ns):.1f} us / logical update "
+            f"({handler_samples}/{witness_completed} nonzero samples)"
         )
         print(
             "    recovery_witness_mutex wait         = "
@@ -290,7 +321,7 @@ def run(args: argparse.Namespace) -> None:
             f"{per_completed_us(handler_outside_mutex_ns):.1f} us"
         )
         print(
-            "  transport + callback residual         = "
+            "  unaccounted logical callback tail     = "
             f"{per_completed_us(residual_ns):.1f} us / logical update"
         )
         print(
@@ -311,6 +342,16 @@ def run(args: argparse.Namespace) -> None:
             "  H2 installed when H1 publish starts   = "
             f"{h2_installed}/{h1_samples} "
             f"({100.0 * h2_installed / h1_samples if h1_samples else 0.0:.1f}%)"
+        )
+        print(
+            "  H2 reserved when H1 witness ACKs      = "
+            f"{h2_reserved_at_ack}/{h1_ack_samples} "
+            f"({100.0 * h2_reserved_at_ack / h1_ack_samples if h1_ack_samples else 0.0:.1f}%)"
+        )
+        print(
+            "  H2 installed when H1 witness ACKs     = "
+            f"{h2_installed_at_ack}/{h1_ack_samples} "
+            f"({100.0 * h2_installed_at_ack / h1_ack_samples if h1_ack_samples else 0.0:.1f}%)"
         )
         print()
 

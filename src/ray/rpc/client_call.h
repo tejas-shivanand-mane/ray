@@ -19,8 +19,10 @@
 #include <atomic>
 #include <boost/asio.hpp>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,6 +32,7 @@
 #include "ray/common/constants.h"
 #include "ray/common/grpc_util.h"
 #include "ray/common/id.h"
+#include "ray/common/ray_config.h"
 #include "ray/common/status.h"
 #include "ray/rpc/metrics.h"
 #include "ray/rpc/rpc_callback_types.h"
@@ -37,6 +40,25 @@
 
 namespace ray {
 namespace rpc {
+
+inline uint64_t RecoveryWitnessClientCallNowNs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+template <typename Reply, typename = void>
+struct HasRecoveryWitnessClientTimingFields : std::false_type {};
+
+template <typename Reply>
+struct HasRecoveryWitnessClientTimingFields<
+    Reply,
+    std::void_t<
+        decltype(std::declval<Reply &>().set_client_submit_time_ns(uint64_t{})),
+        decltype(std::declval<Reply &>().set_client_cq_receive_time_ns(uint64_t{})),
+        decltype(std::declval<Reply &>().set_client_main_loop_start_time_ns(
+            uint64_t{}))>> : std::true_type {};
 
 /// Represents an outgoing gRPC request.
 ///
@@ -55,7 +77,45 @@ class ClientCall {
   /// Get stats handle for this RPC (for recording end).
   virtual std::shared_ptr<StatsHandle> GetStatsHandle() = 0;
 
+  bool RecoveryWitnessTimingProfiled() const {
+    return recovery_witness_timing_profiled_;
+  }
+
+  void EnableRecoveryWitnessTimingProfile() {
+    recovery_witness_timing_profiled_ = true;
+    recovery_witness_submit_time_ns_ = RecoveryWitnessClientCallNowNs();
+  }
+
+  void MarkRecoveryWitnessCompletionQueueReceived() {
+    if (recovery_witness_timing_profiled_) {
+      recovery_witness_cq_receive_time_ns_ = RecoveryWitnessClientCallNowNs();
+    }
+  }
+
+  void MarkRecoveryWitnessMainLoopCallbackStarted() {
+    if (recovery_witness_timing_profiled_) {
+      recovery_witness_main_loop_start_time_ns_ =
+          RecoveryWitnessClientCallNowNs();
+    }
+  }
+
+  uint64_t RecoveryWitnessSubmitTimeNs() const {
+    return recovery_witness_submit_time_ns_;
+  }
+  uint64_t RecoveryWitnessCqReceiveTimeNs() const {
+    return recovery_witness_cq_receive_time_ns_;
+  }
+  uint64_t RecoveryWitnessMainLoopStartTimeNs() const {
+    return recovery_witness_main_loop_start_time_ns_;
+  }
+
   virtual ~ClientCall() = default;
+
+ private:
+  bool recovery_witness_timing_profiled_ = false;
+  uint64_t recovery_witness_submit_time_ns_ = 0;
+  uint64_t recovery_witness_cq_receive_time_ns_ = 0;
+  uint64_t recovery_witness_main_loop_start_time_ns_ = 0;
 };
 
 class ClientCallManager;
@@ -86,6 +146,11 @@ class ClientCallImpl : public ClientCall {
     if (!cluster_id.IsNil()) {
       context_.AddMetadata(kClusterIdKey, cluster_id.Hex());
     }
+    if constexpr (HasRecoveryWitnessClientTimingFields<Reply>::value) {
+      if (RayConfig::instance().enable_recovery_succession_profiling()) {
+        EnableRecoveryWitnessTimingProfile();
+      }
+    }
   }
 
   Status GetStatus() override {
@@ -104,8 +169,16 @@ class ClientCallImpl : public ClientCall {
       absl::MutexLock lock(&mutex_);
       status = return_status_;
     }
+    if constexpr (HasRecoveryWitnessClientTimingFields<Reply>::value) {
+      if (RecoveryWitnessTimingProfiled()) {
+        reply_.set_client_submit_time_ns(RecoveryWitnessSubmitTimeNs());
+        reply_.set_client_cq_receive_time_ns(RecoveryWitnessCqReceiveTimeNs());
+        reply_.set_client_main_loop_start_time_ns(
+            RecoveryWitnessMainLoopStartTimeNs());
+      }
+    }
     if (callback_ != nullptr) {
-      // This should be only called once.
+      // This should only be called once.
       callback_(status, std::move(reply_));
     }
   }
@@ -327,6 +400,7 @@ class ClientCallManager {
         auto tag = static_cast<ClientCallTag *>(got_tag);
         // Refresh the tag.
         got_tag = nullptr;
+        tag->GetCall()->MarkRecoveryWitnessCompletionQueueReceived();
         tag->GetCall()->SetReturnStatus();
         std::shared_ptr<StatsHandle> stats_handle = tag->GetCall()->GetStatsHandle();
         RAY_CHECK_NE(stats_handle, nullptr);
@@ -338,6 +412,7 @@ class ClientCallManager {
           // Post the callback to the main event loop.
           main_service_.post(
               [tag]() {
+                tag->GetCall()->MarkRecoveryWitnessMainLoopCallbackStarted();
                 tag->GetCall()->OnReplyReceived();
                 // The call is finished, and we can delete this tag now.
                 delete tag;

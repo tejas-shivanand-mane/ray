@@ -510,6 +510,9 @@ message UpdateRecoveryWitnessReply {
   uint32 client_batch_size = 8;
   bool client_batch_leader = 9;
   uint64 witness_batch_queue_time_ns = 10;
+  uint64 client_submit_to_cq_time_ns = 11;
+  uint64 client_cq_to_main_loop_time_ns = 12;
+  uint64 client_main_loop_to_batch_callback_time_ns = 13;
 }
 
 // Batches independent logical witness updates that target the same raylet.
@@ -525,6 +528,13 @@ message UpdateRecoveryWitnessBatchReply {
   // Profiling-only physical-batch server wall time for Benchmark 70.
   // Zero when recovery succession profiling is disabled.
   uint64 witness_batch_handler_time_ns = 2;
+
+  // Client-side physical RPC phase timestamps, all from steady_clock in the
+  // submitting CoreWorker process. They are populated by ClientCallManager only
+  // while recovery succession profiling is enabled.
+  uint64 client_submit_time_ns = 3;
+  uint64 client_cq_receive_time_ns = 4;
+  uint64 client_main_loop_start_time_ns = 5;
 }
 
 message GetRecoveryWitnessRequest {

@@ -1356,10 +1356,20 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.witness_update_rpcs_completed;
   result["witness_update_client_queue_time_ns"] =
       profile.witness_update_client_queue_time_ns;
+  result["witness_update_client_submit_to_cq_time_ns"] =
+      profile.witness_update_client_submit_to_cq_time_ns;
+  result["witness_update_client_cq_to_main_loop_time_ns"] =
+      profile.witness_update_client_cq_to_main_loop_time_ns;
+  result["witness_update_client_main_loop_to_batch_callback_time_ns"] =
+      profile.witness_update_client_main_loop_to_batch_callback_time_ns;
+  result["witness_update_client_phase_samples"] =
+      profile.witness_update_client_phase_samples;
   result["witness_update_server_batch_queue_time_ns"] =
       profile.witness_update_server_batch_queue_time_ns;
   result["witness_update_handler_time_ns"] =
       profile.witness_update_handler_time_ns;
+  result["witness_update_handler_samples"] =
+      profile.witness_update_handler_samples;
   result["witness_update_mutex_wait_time_ns"] =
       profile.witness_update_mutex_wait_time_ns;
   result["witness_update_mutex_hold_time_ns"] =
@@ -1374,6 +1384,12 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.h2_reserved_at_h1_publish;
   result["h2_installed_at_h1_publish"] =
       profile.h2_installed_at_h1_publish;
+  result["h1_ack_readiness_samples"] =
+      profile.h1_ack_readiness_samples;
+  result["h2_reserved_at_h1_ack"] =
+      profile.h2_reserved_at_h1_ack;
+  result["h2_installed_at_h1_ack"] =
+      profile.h2_installed_at_h1_ack;
 
   result["task_spec_bytes_sent"] =
       profile.task_spec_bytes_sent;
@@ -5951,6 +5967,35 @@ void CoreWorker::FinishRecoveryHolderAdmission(
         if (witness_publish_start_ns != 0) {
           manager->RecordWitnessPublishLatency(
               RecoveryProfileNowNs() - witness_publish_start_ns);
+
+          // Benchmark 70: observe whether H2 became prepared while H1 was
+          // waiting on witness durability. This is sampled at the successful
+          // H1 publication callback, before local H1 commit/bookkeeping.
+          if (witness_stored &&
+              !recovery_witness_holder_baseline_enabled_ &&
+              !manager->RecoveryFrontierEnabled() &&
+              !RayConfig::instance()
+                   .enable_recovery_succession_certificate_admission() &&
+              state->rank == 1 &&
+              state->proposed_manifest.target_holder_count() == 2) {
+            bool h2_reserved = false;
+            bool h2_installed = false;
+            {
+              absl::MutexLock lock(&recovery_holder_admission_mutex_);
+              const auto task_it =
+                  recovery_holder_admission_states_.find(state->task_id);
+              if (task_it != recovery_holder_admission_states_.end()) {
+                const auto h2_it = task_it->second.pending_by_rank.find(2);
+                if (h2_it != task_it->second.pending_by_rank.end() &&
+                    !h2_it->second->aborted) {
+                  h2_reserved = true;
+                  h2_installed = h2_it->second->installed;
+                }
+              }
+            }
+            manager->RecordH2ReadinessAtH1Ack(
+                h2_reserved, h2_installed);
+          }
         }
 
         if (!witness_stored) {
@@ -9075,6 +9120,9 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
             RecoveryProfileNowNs() - witness_start_ns);
         manager->RecordWitnessUpdateRpcBreakdown(
             reply.client_queue_time_ns(),
+            reply.client_submit_to_cq_time_ns(),
+            reply.client_cq_to_main_loop_time_ns(),
+            reply.client_main_loop_to_batch_callback_time_ns(),
             reply.witness_batch_queue_time_ns(),
             reply.witness_handler_time_ns(),
             reply.witness_mutex_wait_time_ns(),
@@ -9199,13 +9247,16 @@ void CoreWorker::PublishRecoveryHolderCertificateToWitnesses(
             manager->RecordWitnessUpdateRpcLatency(
                 RecoveryProfileNowNs() - witness_start_ns);
             manager->RecordWitnessUpdateRpcBreakdown(
-                reply.client_queue_time_ns(),
-                reply.witness_batch_queue_time_ns(),
-                reply.witness_handler_time_ns(),
-                reply.witness_mutex_wait_time_ns(),
-                reply.witness_mutex_hold_time_ns(),
-                reply.client_batch_leader(),
-                reply.client_batch_size());
+            reply.client_queue_time_ns(),
+            reply.client_submit_to_cq_time_ns(),
+            reply.client_cq_to_main_loop_time_ns(),
+            reply.client_main_loop_to_batch_callback_time_ns(),
+            reply.witness_batch_queue_time_ns(),
+            reply.witness_handler_time_ns(),
+            reply.witness_mutex_wait_time_ns(),
+            reply.witness_mutex_hold_time_ns(),
+            reply.client_batch_leader(),
+            reply.client_batch_size());
           }
 
           bool success = false;

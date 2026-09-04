@@ -80,8 +80,13 @@ class RecoverySuccessionManager {
     // logical witness update; physical batch counters are derived from the
     // client-side demultiplexing metadata.
     uint64_t witness_update_client_queue_time_ns = 0;
+    uint64_t witness_update_client_submit_to_cq_time_ns = 0;
+    uint64_t witness_update_client_cq_to_main_loop_time_ns = 0;
+    uint64_t witness_update_client_main_loop_to_batch_callback_time_ns = 0;
+    uint64_t witness_update_client_phase_samples = 0;
     uint64_t witness_update_server_batch_queue_time_ns = 0;
     uint64_t witness_update_handler_time_ns = 0;
+    uint64_t witness_update_handler_samples = 0;
     uint64_t witness_update_mutex_wait_time_ns = 0;
     uint64_t witness_update_mutex_hold_time_ns = 0;
     uint64_t witness_update_physical_batches_completed = 0;
@@ -92,6 +97,9 @@ class RecoverySuccessionManager {
     uint64_t h1_publish_readiness_samples = 0;
     uint64_t h2_reserved_at_h1_publish = 0;
     uint64_t h2_installed_at_h1_publish = 0;
+    uint64_t h1_ack_readiness_samples = 0;
+    uint64_t h2_reserved_at_h1_ack = 0;
+    uint64_t h2_installed_at_h1_ack = 0;
 
     // Wall-clock latency of the whole witness-publication stage.
     // This is different from witness_update_rpc_time_ns, which sums
@@ -220,15 +228,20 @@ class RecoverySuccessionManager {
 
   void RecordWitnessUpdateRpcLatency(uint64_t latency_ns);
 
-  void RecordWitnessUpdateRpcBreakdown(uint64_t client_queue_ns,
-                                       uint64_t server_batch_queue_ns,
-                                       uint64_t handler_ns,
-                                       uint64_t mutex_wait_ns,
-                                       uint64_t mutex_hold_ns,
-                                       bool batch_leader,
-                                       uint32_t batch_size);
+  void RecordWitnessUpdateRpcBreakdown(
+      uint64_t client_queue_ns,
+      uint64_t client_submit_to_cq_ns,
+      uint64_t client_cq_to_main_loop_ns,
+      uint64_t client_main_loop_to_batch_callback_ns,
+      uint64_t server_batch_queue_ns,
+      uint64_t handler_ns,
+      uint64_t mutex_wait_ns,
+      uint64_t mutex_hold_ns,
+      bool batch_leader,
+      uint32_t batch_size);
 
   void RecordH2ReadinessAtH1Publish(bool h2_reserved, bool h2_installed);
+  void RecordH2ReadinessAtH1Ack(bool h2_reserved, bool h2_installed);
 
   void RecordWitnessPublishLatency(uint64_t latency_ns);
 
