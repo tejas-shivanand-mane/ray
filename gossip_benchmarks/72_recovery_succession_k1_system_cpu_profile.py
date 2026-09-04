@@ -134,8 +134,8 @@ def _process_table() -> dict[int, ProcInfo]:
     return out
 
 
-def _descendants(table: dict[int, ProcInfo], root_pid: int) -> set[int]:
-    selected = {root_pid}
+def _descendants(table: dict[int, ProcInfo], root_pids: set[int]) -> set[int]:
+    selected = set(root_pids)
     changed = True
     while changed:
         changed = False
@@ -146,11 +146,50 @@ def _descendants(table: dict[int, ProcInfo], root_pid: int) -> set[int]:
     return selected
 
 
-def _process_class(info: ProcInfo, root_pid: int, borrower_pids: set[int]) -> str:
+def _service_process_class(process_type: str) -> str:
+    lower = process_type.lower()
+    if "gcs_server" in lower:
+        return "gcs_server"
+    if "raylet" in lower:
+        return "raylet"
+    if "dashboard" in lower:
+        return "dashboard"
+    if "runtime_env" in lower:
+        return "runtime_env_agent"
+    if "log_monitor" in lower:
+        return "log_monitor"
+    if "monitor" in lower or "autoscaler" in lower:
+        return "autoscaler_monitor"
+    if "reaper" in lower:
+        return "reaper"
+    return "ray_auxiliary"
+
+
+def _cluster_service_classes(cluster: Any) -> dict[int, str]:
+    """Return authoritative PIDs for services started by Cluster/Node."""
+    out: dict[int, str] = {}
+    for node in cluster.list_all_nodes():
+        for process_type, infos in node.all_processes.items():
+            for info in infos:
+                process = getattr(info, "process", None)
+                pid = getattr(process, "pid", None)
+                if pid is not None and process.poll() is None:
+                    out[int(pid)] = _service_process_class(str(process_type))
+    return out
+
+
+def _process_class(
+    info: ProcInfo,
+    root_pid: int,
+    borrower_pids: set[int],
+    service_classes: dict[int, str],
+) -> str:
     if info.pid == root_pid:
         return "owner_driver_coreworker"
     if info.pid in borrower_pids:
         return "borrower_coreworker"
+    if info.pid in service_classes:
+        return service_classes[info.pid]
     text = f"{info.comm} {info.cmdline}".lower()
     if "gcs_server" in text:
         return "gcs_server"
@@ -186,9 +225,16 @@ def _thread_group(comm: str, is_main: bool) -> str:
 
 
 class ProcTreeSampler:
-    def __init__(self, borrower_pids: set[int], interval_s: float):
+    def __init__(
+        self,
+        borrower_pids: set[int],
+        service_classes: dict[int, str],
+        interval_s: float,
+    ):
         self.root_pid = os.getpid()
         self.borrower_pids = set(borrower_pids)
+        self.service_classes = dict(service_classes)
+        self.root_pids = {self.root_pid, *self.service_classes}
         self.interval_s = interval_s
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
@@ -204,7 +250,7 @@ class ProcTreeSampler:
 
     def _sample(self) -> None:
         table = _process_table()
-        selected = _descendants(table, self.root_pid)
+        selected = _descendants(table, self.root_pids)
         for pid in selected:
             info = table.get(pid)
             if info is None:
@@ -221,7 +267,10 @@ class ProcTreeSampler:
                     point=info.point,
                 )
                 self.proc_class[pkey] = _process_class(
-                    classified, self.root_pid, self.borrower_pids
+                    classified,
+                    self.root_pid,
+                    self.borrower_pids,
+                    self.service_classes,
                 )
             self.proc_last[pkey] = info.point
 
@@ -356,7 +405,14 @@ def single_profile(args: argparse.Namespace) -> dict[str, Any]:
         if args.settle_seconds > 0:
             time.sleep(args.settle_seconds)
 
-        sampler = ProcTreeSampler(borrower_pids, args.sample_interval_ms / 1000.0)
+        service_classes = _cluster_service_classes(cluster)
+        if not any(value == "raylet" for value in service_classes.values()):
+            raise RuntimeError("Cluster.all_processes did not expose a live Raylet PID")
+        sampler = ProcTreeSampler(
+            borrower_pids,
+            service_classes,
+            args.sample_interval_ms / 1000.0,
+        )
         sampler.start()
         started = time.perf_counter()
         perf = b58.run_window(
