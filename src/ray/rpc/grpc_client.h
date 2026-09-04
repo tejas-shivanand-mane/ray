@@ -17,7 +17,6 @@
 #include <grpcpp/grpcpp.h>
 
 #include <boost/asio.hpp>
-#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -118,8 +117,7 @@ class GrpcClient {
       const Request &request,
       const ClientCallback<Reply> &callback,
       std::string call_name = "UNKNOWN_RPC",
-      int64_t method_timeout_ms = -1,
-      std::function<void()> completion_queue_hook = nullptr) {
+      int64_t method_timeout_ms = -1) {
     testing::RpcFailure failure = skip_testing_intra_node_rpc_failure_
                                       ? testing::RpcFailure::None
                                       : testing::GetRpcFailure(call_name);
@@ -133,9 +131,6 @@ class GrpcClient {
                      Reply());
           },
           "RpcChaos");
-      if (completion_queue_hook) {
-        completion_queue_hook();
-      }
     } else if (failure == testing::RpcFailure::Response) {
       // Simulate the case where the RPC fails after server sends
       // the response.
@@ -149,8 +144,7 @@ class GrpcClient {
                      Reply());
           },
           std::move(call_name),
-          method_timeout_ms,
-          std::move(completion_queue_hook));
+          method_timeout_ms);
     } else if (failure == testing::RpcFailure::InFlight) {
       // Simulate the case where the RPC fails after sending the request to the server but
       // before the reply is sent back.
@@ -164,8 +158,7 @@ class GrpcClient {
             // The actual reply is dropped.
           },
           std::move(call_name),
-          method_timeout_ms,
-          std::move(completion_queue_hook));
+          method_timeout_ms);
       client_call_manager_.GetMainService().post(
           [callback]() {
             callback(Status::RpcError("Unavailable", grpc::StatusCode::UNAVAILABLE),
@@ -179,8 +172,7 @@ class GrpcClient {
           request,
           callback,
           std::move(call_name),
-          method_timeout_ms,
-          std::move(completion_queue_hook));
+          method_timeout_ms);
       RAY_CHECK(call != nullptr);
     }
 

@@ -20,7 +20,6 @@
 #include <boost/asio.hpp>
 #include <chrono>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -110,17 +109,6 @@ class ClientCall {
     return recovery_witness_main_loop_start_time_ns_;
   }
 
-  void SetCompletionQueueHook(std::function<void()> hook) {
-    completion_queue_hook_ = std::move(hook);
-  }
-
-  void RunCompletionQueueHook() {
-    if (completion_queue_hook_) {
-      auto hook = std::move(completion_queue_hook_);
-      hook();
-    }
-  }
-
   virtual ~ClientCall() = default;
 
  private:
@@ -128,7 +116,6 @@ class ClientCall {
   uint64_t recovery_witness_submit_time_ns_ = 0;
   uint64_t recovery_witness_cq_receive_time_ns_ = 0;
   uint64_t recovery_witness_main_loop_start_time_ns_ = 0;
-  std::function<void()> completion_queue_hook_;
 };
 
 class ClientCallManager;
@@ -147,8 +134,7 @@ class ClientCallImpl : public ClientCall {
                           const ClusterID &cluster_id,
                           std::shared_ptr<StatsHandle> stats_handle,
                           bool record_stats,
-                          int64_t timeout_ms = -1,
-                          std::function<void()> completion_queue_hook = nullptr)
+                          int64_t timeout_ms = -1)
       : callback_(std::move(const_cast<ClientCallback<Reply> &>(callback))),
         stats_handle_(std::move(stats_handle)),
         record_stats_(record_stats) {
@@ -160,7 +146,6 @@ class ClientCallImpl : public ClientCall {
     if (!cluster_id.IsNil()) {
       context_.AddMetadata(kClusterIdKey, cluster_id.Hex());
     }
-    SetCompletionQueueHook(std::move(completion_queue_hook));
     if constexpr (HasRecoveryWitnessClientTimingFields<Reply>::value) {
       if (::RayConfig::instance().enable_recovery_succession_profiling()) {
         EnableRecoveryWitnessTimingProfile();
@@ -351,20 +336,14 @@ class ClientCallManager {
       const Request &request,
       const ClientCallback<Reply> &callback,
       std::string call_name,
-      int64_t method_timeout_ms = -1,
-      std::function<void()> completion_queue_hook = nullptr) {
+      int64_t method_timeout_ms = -1) {
     auto stats_handle = main_service_.stats()->RecordStart(std::move(call_name));
     if (method_timeout_ms == -1) {
       method_timeout_ms = call_timeout_ms_;
     }
 
     auto call = std::make_shared<ClientCallImpl<Reply>>(
-        callback,
-        cluster_id_,
-        std::move(stats_handle),
-        record_stats_,
-        method_timeout_ms,
-        std::move(completion_queue_hook));
+        callback, cluster_id_, std::move(stats_handle), record_stats_, method_timeout_ms);
     // Send request.
     // Find the next completion queue to wait for response.
     call->response_reader_ = (stub.*prepare_async_function)(
@@ -430,12 +409,6 @@ class ClientCallManager {
             client_metrics_.req_failed.Record(1.0,
                                               {{"Method", stats_handle->event_name}});
           }
-          // Hold the ClientCall independently of `tag` before posting. The posted
-          // main-loop callback owns/deletes `tag`, and may execute concurrently
-          // immediately after boost::asio::post() returns. The CQ thread must
-          // therefore never dereference `tag` after the post.
-          auto call = tag->GetCall();
-
           // Post the callback to the main event loop.
           main_service_.post(
               [tag]() {
@@ -448,11 +421,6 @@ class ClientCallManager {
               // Implement the delay of the rpc client call as the
               // delay of OnReplyReceived().
               ray::asio::testing::GetDelayUs(stats_handle->event_name));
-
-          // CQ-driven transport hooks run only after the completed call's
-          // logical callback has been posted. Use the retained shared_ptr rather
-          // than `tag`, whose lifetime now belongs to the main-loop callback.
-          call->RunCompletionQueueHook();
           main_service_.stats()->RecordEnd(std::move(stats_handle));
         } else {
           delete tag;
