@@ -20,8 +20,6 @@
 #include <boost/asio.hpp>
 #include <chrono>
 #include <cstdint>
-#include <deque>
-#include <functional>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -111,25 +109,6 @@ class ClientCall {
     return recovery_witness_main_loop_start_time_ns_;
   }
 
-  void SetCompletionQueueHook(std::function<void()> hook) {
-    completion_queue_hook_ = std::move(hook);
-  }
-
-  void RunCompletionQueueHook() {
-    if (completion_queue_hook_) {
-      auto hook = std::move(completion_queue_hook_);
-      hook();
-    }
-  }
-
-  void SetCoalesceMainLoopCallback(bool enabled) {
-    coalesce_main_loop_callback_ = enabled;
-  }
-
-  bool CoalesceMainLoopCallback() const {
-    return coalesce_main_loop_callback_;
-  }
-
   virtual ~ClientCall() = default;
 
  private:
@@ -137,8 +116,6 @@ class ClientCall {
   uint64_t recovery_witness_submit_time_ns_ = 0;
   uint64_t recovery_witness_cq_receive_time_ns_ = 0;
   uint64_t recovery_witness_main_loop_start_time_ns_ = 0;
-  std::function<void()> completion_queue_hook_;
-  bool coalesce_main_loop_callback_ = false;
 };
 
 class ClientCallManager;
@@ -157,9 +134,7 @@ class ClientCallImpl : public ClientCall {
                           const ClusterID &cluster_id,
                           std::shared_ptr<StatsHandle> stats_handle,
                           bool record_stats,
-                          int64_t timeout_ms = -1,
-                          std::function<void()> completion_queue_hook = nullptr,
-                          bool coalesce_main_loop_callback = false)
+                          int64_t timeout_ms = -1)
       : callback_(std::move(const_cast<ClientCallback<Reply> &>(callback))),
         stats_handle_(std::move(stats_handle)),
         record_stats_(record_stats) {
@@ -171,8 +146,6 @@ class ClientCallImpl : public ClientCall {
     if (!cluster_id.IsNil()) {
       context_.AddMetadata(kClusterIdKey, cluster_id.Hex());
     }
-    SetCompletionQueueHook(std::move(completion_queue_hook));
-    SetCoalesceMainLoopCallback(coalesce_main_loop_callback);
     if constexpr (HasRecoveryWitnessClientTimingFields<Reply>::value) {
       if (::RayConfig::instance().enable_recovery_succession_profiling()) {
         EnableRecoveryWitnessTimingProfile();
@@ -284,12 +257,6 @@ using PrepareAsyncFunction = std::unique_ptr<grpc::ClientAsyncResponseReader<Rep
                           const Request &request,
                           grpc::CompletionQueue *cq);
 
-struct CoalescedClientCallbackState {
-  absl::Mutex mutex;
-  std::deque<std::shared_ptr<ClientCall>> pending ABSL_GUARDED_BY(mutex);
-  bool drain_scheduled ABSL_GUARDED_BY(mutex) = false;
-};
-
 /// `ClientCallManager` is used to manage outgoing gRPC requests and the lifecycles of
 /// `ClientCall` objects.
 ///
@@ -369,22 +336,14 @@ class ClientCallManager {
       const Request &request,
       const ClientCallback<Reply> &callback,
       std::string call_name,
-      int64_t method_timeout_ms = -1,
-      std::function<void()> completion_queue_hook = nullptr,
-      bool coalesce_main_loop_callback = false) {
+      int64_t method_timeout_ms = -1) {
     auto stats_handle = main_service_.stats()->RecordStart(std::move(call_name));
     if (method_timeout_ms == -1) {
       method_timeout_ms = call_timeout_ms_;
     }
 
     auto call = std::make_shared<ClientCallImpl<Reply>>(
-        callback,
-        cluster_id_,
-        std::move(stats_handle),
-        record_stats_,
-        method_timeout_ms,
-        std::move(completion_queue_hook),
-        coalesce_main_loop_callback);
+        callback, cluster_id_, std::move(stats_handle), record_stats_, method_timeout_ms);
     // Send request.
     // Find the next completion queue to wait for response.
     call->response_reader_ = (stub.*prepare_async_function)(
@@ -413,48 +372,6 @@ class ClientCallManager {
   const std::string &GetLocalAddress() const { return local_address_; }
 
  private:
-  void EnqueueCoalescedMainLoopCallback(
-      const std::shared_ptr<ClientCall> &call) {
-    auto state = coalesced_callback_state_;
-    bool schedule_drain = false;
-    {
-      absl::MutexLock lock(&state->mutex);
-      state->pending.push_back(call);
-      if (!state->drain_scheduled) {
-        state->drain_scheduled = true;
-        schedule_drain = true;
-      }
-    }
-
-    if (!schedule_drain) {
-      return;
-    }
-
-    main_service_.post(
-        [state]() {
-          // One main-loop event drains every completion that has accumulated.
-          // If more completions arrive while callbacks are running, continue
-          // draining them in this same event before releasing single-flight.
-          while (true) {
-            std::deque<std::shared_ptr<ClientCall>> ready;
-            {
-              absl::MutexLock lock(&state->mutex);
-              if (state->pending.empty()) {
-                state->drain_scheduled = false;
-                return;
-              }
-              ready.swap(state->pending);
-            }
-
-            for (auto &ready_call : ready) {
-              ready_call->MarkRecoveryWitnessMainLoopCallbackStarted();
-              ready_call->OnReplyReceived();
-            }
-          }
-        },
-        "ClientCallManager.CoalescedOnReplyReceived");
-  }
-
   /// This function runs in a background thread. It keeps polling events from the
   /// `CompletionQueue`, and dispatches the event to the callbacks via the `ClientCall`
   /// objects.
@@ -483,42 +400,27 @@ class ClientCallManager {
         auto tag = static_cast<ClientCallTag *>(got_tag);
         // Refresh the tag.
         got_tag = nullptr;
-        auto call = tag->GetCall();
-        call->MarkRecoveryWitnessCompletionQueueReceived();
-        call->SetReturnStatus();
-        std::shared_ptr<StatsHandle> stats_handle = call->GetStatsHandle();
+        tag->GetCall()->MarkRecoveryWitnessCompletionQueueReceived();
+        tag->GetCall()->SetReturnStatus();
+        std::shared_ptr<StatsHandle> stats_handle = tag->GetCall()->GetStatsHandle();
         RAY_CHECK_NE(stats_handle, nullptr);
         if (ok && !main_service_.stopped() && !shutdown_) {
-          if (record_stats_ && !call->GetStatus().ok()) {
+          if (record_stats_ && !tag->GetCall()->GetStatus().ok()) {
             client_metrics_.req_failed.Record(1.0,
                                               {{"Method", stats_handle->event_name}});
           }
-
-          if (call->CoalesceMainLoopCallback()) {
-            // The tag is only a wrapper around this stable shared_ptr. K1 witness
-            // completions opt into one single-flight main-loop drain instead of
-            // posting one event per physical batch.
-            delete tag;
-            EnqueueCoalescedMainLoopCallback(call);
-          } else {
-            // Existing behavior for every other RPC.
-            main_service_.post(
-                [tag]() {
-                  tag->GetCall()->MarkRecoveryWitnessMainLoopCallbackStarted();
-                  tag->GetCall()->OnReplyReceived();
-                  // The call is finished, and we can delete this tag now.
-                  delete tag;
-                },
-                stats_handle->event_name + ".OnReplyReceived",
-                // Implement the delay of the rpc client call as the
-                // delay of OnReplyReceived().
-                ray::asio::testing::GetDelayUs(stats_handle->event_name));
-          }
-
-          // Physical witness transport may advance immediately at CQ completion.
-          // Use the retained shared_ptr, never the raw tag, because the main loop
-          // may already have consumed and deleted the tag.
-          call->RunCompletionQueueHook();
+          // Post the callback to the main event loop.
+          main_service_.post(
+              [tag]() {
+                tag->GetCall()->MarkRecoveryWitnessMainLoopCallbackStarted();
+                tag->GetCall()->OnReplyReceived();
+                // The call is finished, and we can delete this tag now.
+                delete tag;
+              },
+              stats_handle->event_name + ".OnReplyReceived",
+              // Implement the delay of the rpc client call as the
+              // delay of OnReplyReceived().
+              ray::asio::testing::GetDelayUs(stats_handle->event_name));
           main_service_.stats()->RecordEnd(std::move(stats_handle));
         } else {
           delete tag;
@@ -549,12 +451,6 @@ class ClientCallManager {
 
   /// The index to send RPCs in a round-robin fashion
   std::atomic<uint64_t> rr_index_ = 0;
-
-  // Only explicitly opted-in calls use this queue. It is independent of the
-  // physical gRPC completion queues and exists solely to reduce main-loop post
-  // amplification for ordinary K1 witness batch completions.
-  std::shared_ptr<CoalescedClientCallbackState> coalesced_callback_state_ =
-      std::make_shared<CoalescedClientCallbackState>();
 
   /// The gRPC `CompletionQueue` object used to poll events.
   std::vector<std::unique_ptr<grpc::CompletionQueue>> cqs_;
