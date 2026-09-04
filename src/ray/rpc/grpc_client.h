@@ -134,6 +134,12 @@ class GrpcClient {
                      Reply());
           },
           "RpcChaos");
+      // There is no real CompletionQueue event for a request-side injected
+      // failure. If this call owns a transport-lane CQ hook, advance that lane
+      // immediately after handing the logical failure callback to the main loop.
+      if (completion_queue_hook) {
+        completion_queue_hook();
+      }
     } else if (failure == testing::RpcFailure::Response) {
       // Simulate the case where the RPC fails after server sends
       // the response.
