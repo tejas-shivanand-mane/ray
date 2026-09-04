@@ -643,9 +643,11 @@ void RayletClient::DispatchRecoveryWitnessBatch(
   const uint64_t dispatch_ns =
       profile_batch ? RecoveryWitnessClientProfileNowNs() : 0;
 
-  for (auto &item : *batch) {
-    if (item.profiling && item.enqueue_time_ns != 0) {
-      item.client_queue_time_ns = dispatch_ns - item.enqueue_time_ns;
+  if (profile_batch) {
+    for (auto &item : *batch) {
+      if (item.profiling && item.enqueue_time_ns != 0) {
+        item.client_queue_time_ns = dispatch_ns - item.enqueue_time_ns;
+      }
     }
   }
 
