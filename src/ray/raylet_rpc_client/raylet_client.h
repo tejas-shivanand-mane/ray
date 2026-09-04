@@ -23,7 +23,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "ray/asio/instrumented_io_context.h"
 #include "ray/raylet_rpc_client/raylet_client_interface.h"
 #include "ray/rpc/grpc_client.h"
 #include "ray/rpc/retryable_grpc_client.h"
@@ -173,14 +172,17 @@ class RayletClient : public RayletClientInterface {
                      int64_t timeout_ms);
 
   /// Get agents pids from raylet, include dashboard and runtime env agent
-  void GetAgentPIDs(const rpc::OptionalItemCallback<std::vector<int32_t>> &callback,
+  void GetAgentPIDs(const rpc::OptionalItemCallback<rpc::GetAgentPIDsReply> &callback,
                     int64_t timeout_ms);
+
+  void KillLocalActor(const rpc::KillLocalActorRequest &request,
+                      const rpc::ClientCallback<rpc::KillLocalActorReply> &callback) override;
+
   void CancelLocalTask(
       const rpc::CancelLocalTaskRequest &request,
       const rpc::ClientCallback<rpc::CancelLocalTaskReply> &callback) override;
 
   void FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request) override;
-
 
   void UpdateRecoveryWitness(
       rpc::UpdateRecoveryWitnessRequest &&request,
