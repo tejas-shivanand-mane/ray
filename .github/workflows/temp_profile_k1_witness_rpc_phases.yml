@@ -1,0 +1,40 @@
+name: Temporary K1 witness RPC phase profiler
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    if: github.repository == 'tejas-shivanand-mane/ray'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply K1 witness RPC phase profiler
+        run: python tools/_profile_k1_witness_rpc_phases.py
+
+      - name: Validate textual patch
+        run: |
+          python -m py_compile gossip_benchmarks/70_recovery_succession_k1_quick_control_profile.py
+          git diff --check
+          grep -q "client_submit_to_cq_time_ns" src/ray/protobuf/node_manager.proto
+          grep -q "client_cq_to_main_loop_time_ns" src/ray/core_worker/recovery_succession_manager.h
+          grep -q "RecordH2ReadinessAtH1Ack" src/ray/core_worker/core_worker.cc
+          grep -q "MarkRecoveryWitnessCompletionQueueReceived" src/ray/rpc/client_call.h
+
+      - name: Commit profiling instrumentation and remove applicator
+        run: |
+          rm tools/_profile_k1_witness_rpc_phases.py
+          rm .github/workflows/temp_profile_k1_witness_rpc_phases.yml
+          git config user.name "tejas-shivanand-mane"
+          git config user.email "38262749+tejas-shivanand-mane@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Profile K1 witness RPC client phases [skip ci]"
+          git push origin HEAD:main
