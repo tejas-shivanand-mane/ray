@@ -237,7 +237,9 @@ def _control_perf(
     readable, _, _ = select.select([ack_fd], [], [], timeout_seconds)
     if not readable:
         raise RuntimeError(f"timed out waiting for perf '{command}' acknowledgement")
-    reply = os.read(ack_fd, 64).decode("utf-8", "replace").strip()
+    # perf versions differ in whether FIFO acknowledgements include a trailing
+    # NUL after the documented ``ack\n`` payload.
+    reply = os.read(ack_fd, 64).decode("utf-8", "replace").strip(" \t\r\n\x00")
     if reply != "ack":
         raise RuntimeError(f"unexpected perf '{command}' acknowledgement: {reply!r}")
 
