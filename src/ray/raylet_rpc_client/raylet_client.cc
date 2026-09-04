@@ -43,8 +43,7 @@ uint64_t RecoveryWitnessClientProfileNowNs() {
 RayletClient::RayletClient(const rpc::Address &address,
                            rpc::ClientCallManager &client_call_manager,
                            std::function<void()> raylet_unavailable_timeout_callback)
-    : main_service_(client_call_manager.GetMainService()),
-      grpc_client_(std::make_shared<rpc::GrpcClient<rpc::NodeManagerService>>(
+    : grpc_client_(std::make_shared<rpc::GrpcClient<rpc::NodeManagerService>>(
           address.ip_address(), address.port(), client_call_manager)),
       retryable_grpc_client_(rpc::RetryableGrpcClient::Create(
           grpc_client_->Channel(),
@@ -592,108 +591,29 @@ void RayletClient::FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request)
 void RayletClient::UpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest &&request,
     const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) {
-  // Ordinary adaptive K=1 only: when an idle witness lane receives its first
-  // normal generation update, defer the physical send by exactly one ordinary
-  // event-loop post so peer updates arriving in this same turn can join it.
-  // There is no timer/fixed delay. Fixed-R, Frontier, certificate mode,
-  // tombstones, and failure-path claims retain the legacy immediate-idle path.
-  const bool use_k1_zero_turn_microbatch =
-      ::RayConfig::instance().enable_recovery_succession() &&
-      !::RayConfig::instance().enable_recovery_witness_holder_baseline() &&
-      !::RayConfig::instance().enable_recovery_frontier() &&
-      !::RayConfig::instance().enable_recovery_succession_certificate_admission() &&
-      request.has_manifest() && !request.manifest().tombstoned() &&
-      request.manifest().target_holder_count() == 2 &&
-      request.manifest().witness_count() == 2 &&
-      request.manifest().witness_raylets_size() == 2 &&
-      !request.has_task_spec() && request.serialized_task_spec().empty() &&
-      !request.has_holder_certificate() && !request.has_recovery_claim();
-
   PendingRecoveryWitnessUpdate item{std::move(request), callback};
   item.profiling =
       ::RayConfig::instance().enable_recovery_succession_profiling();
   if (item.profiling) {
     item.enqueue_time_ns = RecoveryWitnessClientProfileNowNs();
   }
-
   auto state = recovery_witness_batch_state_;
   std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch;
-  bool schedule_flush = false;
 
   {
     std::lock_guard<std::mutex> lock(state->mutex);
-
-    if (use_k1_zero_turn_microbatch) {
+    if (state->in_flight) {
       state->pending.emplace_back(std::move(item));
-      if (!state->in_flight && !state->flush_scheduled) {
-        state->flush_scheduled = true;
-        schedule_flush = true;
-      } else {
-        // An in-flight batch completion or an already-posted zero-turn flush
-        // owns this queued update. Do not fall through to the legacy immediate
-        // dispatch tail, where no local batch exists.
-        return;
-      }
-    } else {
-      // A legacy/tombstone update must not overtake an already-posted ordinary
-      // K1 flush. If such a flush exists, preserve FIFO order by joining the
-      // same pending deque; otherwise retain the old immediate-idle behavior.
-      if (state->in_flight || state->flush_scheduled) {
-        state->pending.emplace_back(std::move(item));
-        return;
-      }
-
-      state->in_flight = true;
-      batch = std::make_shared<std::vector<PendingRecoveryWitnessUpdate>>();
-      batch->reserve(1);
-      batch->emplace_back(std::move(item));
-    }
-  }
-
-  if (schedule_flush) {
-    auto state_for_flush = state;
-    auto grpc_client_for_flush = grpc_client_;
-    main_service_.post(
-        [state_for_flush, grpc_client_for_flush]() mutable {
-          RayletClient::FlushRecoveryWitnessMicrobatch(
-              std::move(state_for_flush), std::move(grpc_client_for_flush));
-        },
-        "RayletClient.FlushRecoveryWitnessMicrobatch");
-    return;
-  }
-
-  RAY_CHECK(batch != nullptr && !batch->empty());
-  DispatchRecoveryWitnessBatch(state, grpc_client_, std::move(batch));
-}
-
-void RayletClient::FlushRecoveryWitnessMicrobatch(
-    std::shared_ptr<RecoveryWitnessBatchState> state,
-    std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client) {
-  std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch;
-
-  {
-    std::lock_guard<std::mutex> lock(state->mutex);
-    state->flush_scheduled = false;
-
-    // A defensive guard: a legacy request that raced with the posted callback
-    // is required to queue while flush_scheduled=true, so normally in_flight
-    // cannot be true here. If it is, its completion will drain pending.
-    if (state->in_flight || state->pending.empty()) {
       return;
     }
 
     state->in_flight = true;
-    const size_t count = std::min(
-        RayletClient::kRecoveryWitnessBatchMaxSize, state->pending.size());
     batch = std::make_shared<std::vector<PendingRecoveryWitnessUpdate>>();
-    batch->reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-      batch->emplace_back(std::move(state->pending.front()));
-      state->pending.pop_front();
-    }
+    batch->reserve(1);
+    batch->emplace_back(std::move(item));
   }
 
-  DispatchRecoveryWitnessBatch(state, grpc_client, std::move(batch));
+  DispatchRecoveryWitnessBatch(state, grpc_client_, std::move(batch));
 }
 
 void RayletClient::DispatchRecoveryWitnessBatch(

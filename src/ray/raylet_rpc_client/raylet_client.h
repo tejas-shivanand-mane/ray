@@ -203,26 +203,17 @@ class RayletClient : public RayletClientInterface {
     std::mutex mutex;
     std::deque<PendingRecoveryWitnessUpdate> pending;
     bool in_flight = false;
-    bool flush_scheduled = false;
   };
 
   // At inflight=64 this cap is large enough to collapse queue pressure while
-  // keeping individual batch messages modest. Ordinary adaptive K=1 uses one
-  // zero-delay event-loop turn when an idle lane becomes active; no timer or
-  // fixed microsecond delay is introduced. Backlogged lanes still drain
-  // immediately after each physical RPC completes.
+  // keeping individual batch messages modest. There is intentionally no
+  // timer: an idle connection sends its first update immediately.
   static constexpr size_t kRecoveryWitnessBatchMaxSize = 32;
-
-  static void FlushRecoveryWitnessMicrobatch(
-      std::shared_ptr<RecoveryWitnessBatchState> state,
-      std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client);
 
   static void DispatchRecoveryWitnessBatch(
       std::shared_ptr<RecoveryWitnessBatchState> state,
       std::shared_ptr<rpc::GrpcClient<rpc::NodeManagerService>> grpc_client,
       std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch);
-
-  instrumented_io_context &main_service_;
 
   std::shared_ptr<RecoveryWitnessBatchState> recovery_witness_batch_state_ =
       std::make_shared<RecoveryWitnessBatchState>();
