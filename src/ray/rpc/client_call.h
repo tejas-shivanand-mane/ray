@@ -147,7 +147,7 @@ class ClientCallImpl : public ClientCall {
       context_.AddMetadata(kClusterIdKey, cluster_id.Hex());
     }
     if constexpr (HasRecoveryWitnessClientTimingFields<Reply>::value) {
-      if (RayConfig::instance().enable_recovery_succession_profiling()) {
+      if (::RayConfig::instance().enable_recovery_succession_profiling()) {
         EnableRecoveryWitnessTimingProfile();
       }
     }
