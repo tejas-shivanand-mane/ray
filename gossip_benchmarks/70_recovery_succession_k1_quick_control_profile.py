@@ -63,6 +63,8 @@ OWNER_ASYNC_PAIRS = [
     ("holder_commit_rpcs_sent", "holder_commit_rpcs_completed"),
     ("witness_update_rpcs_sent", "witness_update_rpcs_completed"),
 ]
+REPORT_TITLE = "Quick Succession K=1 control profile:"
+
 BORROWER_ASYNC_PAIRS = [
     ("candidate_rpc_logical_reports_sent", "candidate_rpc_logical_reports_completed"),
     ("candidate_rpc_physical_rpcs_sent", "candidate_rpc_physical_rpcs_completed"),
@@ -191,7 +193,7 @@ def run(args: argparse.Namespace) -> None:
                 f"{owner.get('holder_admissions_committed', 0)}"
             )
 
-        print("\nQuick Succession K=1 control profile:")
+        print(f"\n{REPORT_TITLE}")
         print(f"  producer tasks                         = {args.tasks}")
         print(f"  expected/committed holder admissions   = {expected_admissions}")
         print(f"  borrower batch delivery                = {borrower_delivery_ms:.2f} ms")
@@ -377,6 +379,79 @@ def run(args: argparse.Namespace) -> None:
             "  borrower candidate-queue CPU          = "
             f"{_avg_us(borrower_profile, 'candidate_queue_time_ns', 'candidate_queue_calls'):.1f} us/call"
         )
+        print()
+
+        def print_cpu_service(
+            label: str,
+            time_key: str,
+            count: int,
+        ) -> None:
+            total_ns = int(owner.get(time_key, 0))
+            avg_us = total_ns / count / 1e3 if count else 0.0
+            task_us = total_ns / args.tasks / 1e3 if args.tasks else 0.0
+            calls_per_task = count / args.tasks if args.tasks else 0.0
+            print(
+                f"  {label:<39} = {avg_us:7.2f} us/call  "
+                f"{calls_per_task:5.2f} calls/task  {task_us:7.2f} us/task"
+            )
+
+        print("CPU service attribution (profiling-only):")
+        print_cpu_service(
+            "owner admission decision",
+            "holder_admission_prepare_cpu_time_ns",
+            int(owner.get("holder_admission_prepare_cpu_calls", 0)),
+        )
+        print_cpu_service(
+            "owner witness request build",
+            "witness_request_build_cpu_time_ns",
+            int(owner.get("witness_request_build_cpu_calls", 0)),
+        )
+        print_cpu_service(
+            "RayletClient witness enqueue",
+            "witness_update_client_enqueue_cpu_time_ns",
+            witness_completed,
+        )
+        print_cpu_service(
+            "RayletClient physical batch build",
+            "witness_update_client_batch_build_cpu_time_ns",
+            witness_completed,
+        )
+        print_cpu_service(
+            "RayletClient logical reply demux",
+            "witness_update_client_batch_demux_cpu_time_ns",
+            witness_completed,
+        )
+        print_cpu_service(
+            "CoreWorker witness callback",
+            "witness_logical_callback_cpu_time_ns",
+            int(owner.get("witness_logical_callback_cpu_calls", 0)),
+        )
+        print_cpu_service(
+            "  durability-winning callback",
+            "witness_winner_callback_cpu_time_ns",
+            int(owner.get("witness_winner_callback_cpu_calls", 0)),
+        )
+        print_cpu_service(
+            "  redundant W=2 callback",
+            "witness_redundant_callback_cpu_time_ns",
+            int(owner.get("witness_redundant_callback_cpu_calls", 0)),
+        )
+        print_cpu_service(
+            "owner manifest commit",
+            "holder_commit_cpu_time_ns",
+            int(owner.get("holder_commit_cpu_calls", 0)),
+        )
+        logical_callback_count = int(
+            owner.get("witness_logical_callback_cpu_calls", 0)
+        )
+        classified_callback_count = int(
+            owner.get("witness_winner_callback_cpu_calls", 0)
+        ) + int(owner.get("witness_redundant_callback_cpu_calls", 0))
+        print(
+            "  callback classification coverage       = "
+            f"{classified_callback_count}/{logical_callback_count}"
+        )
+        print("  note: nested rows overlap; do not sum them as a CPU subtotal.")
         print()
 
         publish_us = _avg_us(owner, "witness_publish_time_ns", "witness_publish_count")

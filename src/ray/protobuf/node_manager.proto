@@ -513,6 +513,12 @@ message UpdateRecoveryWitnessReply {
   uint64 client_submit_to_cq_time_ns = 11;
   uint64 client_cq_to_main_loop_time_ns = 12;
   uint64 client_main_loop_to_batch_callback_time_ns = 13;
+
+  // Benchmark 71 profiling-only synchronous CPU service attribution.
+  // These values are local measurements and never affect recovery decisions.
+  uint64 client_enqueue_cpu_time_ns = 14;
+  uint64 client_batch_build_cpu_time_ns = 15;
+  uint64 client_batch_demux_cpu_time_ns = 16;
 }
 
 // Batches independent logical witness updates that target the same raylet.

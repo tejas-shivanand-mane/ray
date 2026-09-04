@@ -3500,6 +3500,9 @@ void RecoverySuccessionManager::RecordWitnessUpdateRpcBreakdown(
     uint64_t client_submit_to_cq_ns,
     uint64_t client_cq_to_main_loop_ns,
     uint64_t client_main_loop_to_batch_callback_ns,
+    uint64_t client_enqueue_cpu_ns,
+    uint64_t client_batch_build_cpu_ns,
+    uint64_t client_batch_demux_cpu_ns,
     uint64_t server_batch_queue_ns,
     uint64_t handler_ns,
     uint64_t mutex_wait_ns,
@@ -3522,6 +3525,12 @@ void RecoverySuccessionManager::RecordWitnessUpdateRpcBreakdown(
       client_main_loop_to_batch_callback_ns != 0) {
     ++profile_.witness_update_client_phase_samples;
   }
+  profile_.witness_update_client_enqueue_cpu_time_ns +=
+      client_enqueue_cpu_ns;
+  profile_.witness_update_client_batch_build_cpu_time_ns +=
+      client_batch_build_cpu_ns;
+  profile_.witness_update_client_batch_demux_cpu_time_ns +=
+      client_batch_demux_cpu_ns;
   profile_.witness_update_server_batch_queue_time_ns += server_batch_queue_ns;
   profile_.witness_update_handler_time_ns += handler_ns;
   if (handler_ns != 0) {
@@ -3533,6 +3542,52 @@ void RecoverySuccessionManager::RecordWitnessUpdateRpcBreakdown(
     ++profile_.witness_update_physical_batches_completed;
     profile_.witness_update_physical_batch_items += batch_size;
   }
+}
+
+void RecoverySuccessionManager::RecordHolderAdmissionPrepareCpu(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+  absl::MutexLock lock(&mutex_);
+  ++profile_.holder_admission_prepare_cpu_calls;
+  profile_.holder_admission_prepare_cpu_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordWitnessRequestBuildCpu(
+    uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+  absl::MutexLock lock(&mutex_);
+  ++profile_.witness_request_build_cpu_calls;
+  profile_.witness_request_build_cpu_time_ns += latency_ns;
+}
+
+void RecoverySuccessionManager::RecordWitnessLogicalCallbackCpu(
+    uint64_t latency_ns, bool winner) {
+  if (!profiling_enabled_) {
+    return;
+  }
+  absl::MutexLock lock(&mutex_);
+  ++profile_.witness_logical_callback_cpu_calls;
+  profile_.witness_logical_callback_cpu_time_ns += latency_ns;
+  if (winner) {
+    ++profile_.witness_winner_callback_cpu_calls;
+    profile_.witness_winner_callback_cpu_time_ns += latency_ns;
+  } else {
+    ++profile_.witness_redundant_callback_cpu_calls;
+    profile_.witness_redundant_callback_cpu_time_ns += latency_ns;
+  }
+}
+
+void RecoverySuccessionManager::RecordHolderCommitCpu(uint64_t latency_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+  absl::MutexLock lock(&mutex_);
+  ++profile_.holder_commit_cpu_calls;
+  profile_.holder_commit_cpu_time_ns += latency_ns;
 }
 
 void RecoverySuccessionManager::RecordH2ReadinessAtH1Publish(

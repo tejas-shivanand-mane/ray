@@ -196,6 +196,8 @@ class RayletClient : public RayletClientInterface {
     bool profiling = false;
     uint64_t enqueue_time_ns = 0;
     uint64_t client_queue_time_ns = 0;
+    uint64_t client_enqueue_cpu_time_ns = 0;
+    uint64_t client_batch_build_cpu_time_ns = 0;
   };
 
   struct RecoveryWitnessBatchState {

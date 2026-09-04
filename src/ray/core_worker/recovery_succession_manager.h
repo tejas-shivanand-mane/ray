@@ -92,6 +92,24 @@ class RecoverySuccessionManager {
     uint64_t witness_update_physical_batches_completed = 0;
     uint64_t witness_update_physical_batch_items = 0;
 
+    // Benchmark-71 profiling-only synchronous CPU service attribution.
+    uint64_t witness_update_client_enqueue_cpu_time_ns = 0;
+    uint64_t witness_update_client_batch_build_cpu_time_ns = 0;
+    uint64_t witness_update_client_batch_demux_cpu_time_ns = 0;
+
+    uint64_t holder_admission_prepare_cpu_calls = 0;
+    uint64_t holder_admission_prepare_cpu_time_ns = 0;
+    uint64_t witness_request_build_cpu_calls = 0;
+    uint64_t witness_request_build_cpu_time_ns = 0;
+    uint64_t witness_logical_callback_cpu_calls = 0;
+    uint64_t witness_logical_callback_cpu_time_ns = 0;
+    uint64_t witness_winner_callback_cpu_calls = 0;
+    uint64_t witness_winner_callback_cpu_time_ns = 0;
+    uint64_t witness_redundant_callback_cpu_calls = 0;
+    uint64_t witness_redundant_callback_cpu_time_ns = 0;
+    uint64_t holder_commit_cpu_calls = 0;
+    uint64_t holder_commit_cpu_time_ns = 0;
+
     // Opportunistic H2 readiness sampled at the instant ordinary K=1 H1
     // begins witness publication. This does not delay H1.
     uint64_t h1_publish_readiness_samples = 0;
@@ -233,12 +251,20 @@ class RecoverySuccessionManager {
       uint64_t client_submit_to_cq_ns,
       uint64_t client_cq_to_main_loop_ns,
       uint64_t client_main_loop_to_batch_callback_ns,
+      uint64_t client_enqueue_cpu_ns,
+      uint64_t client_batch_build_cpu_ns,
+      uint64_t client_batch_demux_cpu_ns,
       uint64_t server_batch_queue_ns,
       uint64_t handler_ns,
       uint64_t mutex_wait_ns,
       uint64_t mutex_hold_ns,
       bool batch_leader,
       uint32_t batch_size);
+
+  void RecordHolderAdmissionPrepareCpu(uint64_t latency_ns);
+  void RecordWitnessRequestBuildCpu(uint64_t latency_ns);
+  void RecordWitnessLogicalCallbackCpu(uint64_t latency_ns, bool winner);
+  void RecordHolderCommitCpu(uint64_t latency_ns);
 
   void RecordH2ReadinessAtH1Publish(bool h2_reserved, bool h2_installed);
   void RecordH2ReadinessAtH1Ack(bool h2_reserved, bool h2_installed);

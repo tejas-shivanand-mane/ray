@@ -591,12 +591,17 @@ void RayletClient::FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request)
 void RayletClient::UpdateRecoveryWitness(
     rpc::UpdateRecoveryWitnessRequest &&request,
     const rpc::ClientCallback<rpc::UpdateRecoveryWitnessReply> &callback) {
-  PendingRecoveryWitnessUpdate item{std::move(request), callback};
-  item.profiling =
+  const bool profiling =
       ::RayConfig::instance().enable_recovery_succession_profiling();
-  if (item.profiling) {
-    item.enqueue_time_ns = RecoveryWitnessClientProfileNowNs();
-  }
+  const uint64_t enqueue_time_ns =
+      profiling ? RecoveryWitnessClientProfileNowNs() : 0;
+  const uint64_t enqueue_cpu_start_ns =
+      profiling ? RecoveryWitnessClientProfileNowNs() : 0;
+
+  PendingRecoveryWitnessUpdate item{std::move(request), callback};
+  item.profiling = profiling;
+  item.enqueue_time_ns = enqueue_time_ns;
+
   auto state = recovery_witness_batch_state_;
   std::shared_ptr<std::vector<PendingRecoveryWitnessUpdate>> batch;
 
@@ -604,6 +609,10 @@ void RayletClient::UpdateRecoveryWitness(
     std::lock_guard<std::mutex> lock(state->mutex);
     if (state->in_flight) {
       state->pending.emplace_back(std::move(item));
+      if (profiling) {
+        state->pending.back().client_enqueue_cpu_time_ns =
+            RecoveryWitnessClientProfileNowNs() - enqueue_cpu_start_ns;
+      }
       return;
     }
 
@@ -613,6 +622,10 @@ void RayletClient::UpdateRecoveryWitness(
     batch->emplace_back(std::move(item));
   }
 
+  if (profiling) {
+    batch->back().client_enqueue_cpu_time_ns =
+        RecoveryWitnessClientProfileNowNs() - enqueue_cpu_start_ns;
+  }
   DispatchRecoveryWitnessBatch(state, grpc_client_, std::move(batch));
 }
 
@@ -634,11 +647,27 @@ void RayletClient::DispatchRecoveryWitnessBatch(
     if (item.profiling && item.enqueue_time_ns != 0) {
       item.client_queue_time_ns = dispatch_ns - item.enqueue_time_ns;
     }
+  }
+
+  const uint64_t batch_build_cpu_start_ns =
+      profile_batch ? RecoveryWitnessClientProfileNowNs() : 0;
+  for (auto &item : *batch) {
     rpc::UpdateRecoveryWitnessRequest *update = request.add_updates();
     // The pending request is dead after envelope construction. Move its protobuf
     // storage directly into the physical batch for both Fixed-R and adaptive
     // Succession instead of deep-copying every adaptive witness update.
     update->Swap(&item.request);
+  }
+  if (batch_build_cpu_start_ns != 0) {
+    const uint64_t amortized_batch_build_cpu_ns =
+        (RecoveryWitnessClientProfileNowNs() - batch_build_cpu_start_ns) /
+        batch->size();
+    for (auto &item : *batch) {
+      if (item.profiling) {
+        item.client_batch_build_cpu_time_ns =
+            amortized_batch_build_cpu_ns;
+      }
+    }
   }
 
   auto batch_callback =
@@ -686,10 +715,19 @@ void RayletClient::DispatchRecoveryWitnessBatch(
         }
 
         for (size_t i = 0; i < batch->size(); ++i) {
+          const uint64_t batch_demux_cpu_start_ns =
+              (*batch)[i].profiling
+                  ? RecoveryWitnessClientProfileNowNs()
+                  : 0;
           rpc::UpdateRecoveryWitnessReply item_reply;
           if (status.ok() && reply_shape_ok) {
             item_reply.Swap(reply.mutable_replies(static_cast<int>(i)));
           }
+          const uint64_t batch_demux_cpu_time_ns =
+              batch_demux_cpu_start_ns != 0
+                  ? RecoveryWitnessClientProfileNowNs() -
+                        batch_demux_cpu_start_ns
+                  : 0;
           // Transport failures retain their non-OK status. A malformed
           // successful batch reply yields the default stored=false item reply,
           // which safely fails that logical witness update.
@@ -708,6 +746,12 @@ void RayletClient::DispatchRecoveryWitnessBatch(
                 client_cq_to_main_loop_ns);
             item_reply.set_client_main_loop_to_batch_callback_time_ns(
                 client_main_loop_to_batch_callback_ns);
+            item_reply.set_client_enqueue_cpu_time_ns(
+                (*batch)[i].client_enqueue_cpu_time_ns);
+            item_reply.set_client_batch_build_cpu_time_ns(
+                (*batch)[i].client_batch_build_cpu_time_ns);
+            item_reply.set_client_batch_demux_cpu_time_ns(
+                batch_demux_cpu_time_ns);
           }
           (*batch)[i].callback(status, std::move(item_reply));
         }

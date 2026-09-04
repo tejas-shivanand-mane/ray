@@ -1378,6 +1378,36 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
       profile.witness_update_physical_batches_completed;
   result["witness_update_physical_batch_items"] =
       profile.witness_update_physical_batch_items;
+  result["witness_update_client_enqueue_cpu_time_ns"] =
+      profile.witness_update_client_enqueue_cpu_time_ns;
+  result["witness_update_client_batch_build_cpu_time_ns"] =
+      profile.witness_update_client_batch_build_cpu_time_ns;
+  result["witness_update_client_batch_demux_cpu_time_ns"] =
+      profile.witness_update_client_batch_demux_cpu_time_ns;
+  result["holder_admission_prepare_cpu_calls"] =
+      profile.holder_admission_prepare_cpu_calls;
+  result["holder_admission_prepare_cpu_time_ns"] =
+      profile.holder_admission_prepare_cpu_time_ns;
+  result["witness_request_build_cpu_calls"] =
+      profile.witness_request_build_cpu_calls;
+  result["witness_request_build_cpu_time_ns"] =
+      profile.witness_request_build_cpu_time_ns;
+  result["witness_logical_callback_cpu_calls"] =
+      profile.witness_logical_callback_cpu_calls;
+  result["witness_logical_callback_cpu_time_ns"] =
+      profile.witness_logical_callback_cpu_time_ns;
+  result["witness_winner_callback_cpu_calls"] =
+      profile.witness_winner_callback_cpu_calls;
+  result["witness_winner_callback_cpu_time_ns"] =
+      profile.witness_winner_callback_cpu_time_ns;
+  result["witness_redundant_callback_cpu_calls"] =
+      profile.witness_redundant_callback_cpu_calls;
+  result["witness_redundant_callback_cpu_time_ns"] =
+      profile.witness_redundant_callback_cpu_time_ns;
+  result["holder_commit_cpu_calls"] =
+      profile.holder_commit_cpu_calls;
+  result["holder_commit_cpu_time_ns"] =
+      profile.holder_commit_cpu_time_ns;
   result["h1_publish_readiness_samples"] =
       profile.h1_publish_readiness_samples;
   result["h2_reserved_at_h1_publish"] =
@@ -5881,8 +5911,16 @@ void CoreWorker::FinishRecoveryHolderAdmissionCertificate(
         }
 
         rpc::RecoveryManifest committed_manifest;
-        if (!manager->CommitHolderAdmission(state->reservation_id,
-                                            &committed_manifest)) {
+        const uint64_t holder_commit_cpu_start_ns =
+            recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+        const bool holder_committed =
+            manager->CommitHolderAdmission(state->reservation_id,
+                                           &committed_manifest);
+        if (holder_commit_cpu_start_ns != 0) {
+          manager->RecordHolderCommitCpu(
+              RecoveryProfileNowNs() - holder_commit_cpu_start_ns);
+        }
+        if (!holder_committed) {
           AbortRecoveryHolderAdmissionSuffix(
               state,
               rpc::ReportRecoveryCandidateReply::STALE_MANIFEST,
@@ -6031,7 +6069,16 @@ void CoreWorker::FinishRecoveryHolderAdmission(
         }
 
         rpc::RecoveryManifest committed_manifest;
-        if (!manager->CommitHolderAdmission(state->reservation_id, &committed_manifest)) {
+        const uint64_t holder_commit_cpu_start_ns =
+            recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+        const bool holder_committed =
+            manager->CommitHolderAdmission(state->reservation_id,
+                                           &committed_manifest);
+        if (holder_commit_cpu_start_ns != 0) {
+          manager->RecordHolderCommitCpu(
+              RecoveryProfileNowNs() - holder_commit_cpu_start_ns);
+        }
+        if (!holder_committed) {
           // This should not occur on the normal Patch-4D path because only the
           // lowest installed rank reaches this function. Fail the speculative
           // suffix rather than committing out of order.
@@ -6375,8 +6422,14 @@ CoreWorker::PrepareRecoveryCandidateAdmission(
     }
   }
 
+  const uint64_t holder_prepare_cpu_start_ns =
+      recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
   const auto result = manager->PrepareHolderAdmission(
       request, owner_task_proto, &admission_plan, &latest_manifest);
+  if (holder_prepare_cpu_start_ns != 0) {
+    manager->RecordHolderAdmissionPrepareCpu(
+        RecoveryProfileNowNs() - holder_prepare_cpu_start_ns);
+  }
 
   if (recovery_succession_profiling_enabled_) {
     const bool accepted_new_holder =
@@ -9063,6 +9116,10 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
   const size_t witness_count = static_cast<size_t>(manifest.witness_raylets_size());
 
   for (const rpc::Address &witness : manifest.witness_raylets()) {
+    const uint64_t witness_request_build_start_ns =
+        recovery_succession_profiling_enabled_ && !manifest.tombstoned()
+            ? RecoveryProfileNowNs()
+            : 0;
     rpc::UpdateRecoveryWitnessRequest request;
     request.mutable_manifest()->CopyFrom(manifest);
 
@@ -9082,6 +9139,10 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
     }
 
     auto witness_client = raylet_client_pool_->GetOrConnectByAddress(witness);
+    if (witness_request_build_start_ns != 0) {
+      recovery_succession_manager_->RecordWitnessRequestBuildCpu(
+          RecoveryProfileNowNs() - witness_request_build_start_ns);
+    }
 
     uint64_t witness_start_ns = 0;
 
@@ -9123,6 +9184,9 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
             reply.client_submit_to_cq_time_ns(),
             reply.client_cq_to_main_loop_time_ns(),
             reply.client_main_loop_to_batch_callback_time_ns(),
+            reply.client_enqueue_cpu_time_ns(),
+            reply.client_batch_build_cpu_time_ns(),
+            reply.client_batch_demux_cpu_time_ns(),
             reply.witness_batch_queue_time_ns(),
             reply.witness_handler_time_ns(),
             reply.witness_mutex_wait_time_ns(),
@@ -9131,6 +9195,8 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
             reply.client_batch_size());
       }
 
+      const uint64_t witness_callback_cpu_start_ns =
+          witness_start_ns != 0 ? RecoveryProfileNowNs() : 0;
       bool report_success = false;
       bool report_failure = false;
 
@@ -9192,6 +9258,11 @@ void CoreWorker::PublishRecoveryManifestToWitnesses(
       } else if (report_failure) {
         callback(false, std::move(newest_manifest));
       }
+      if (witness_callback_cpu_start_ns != 0) {
+        manager->RecordWitnessLogicalCallbackCpu(
+            RecoveryProfileNowNs() - witness_callback_cpu_start_ns,
+            report_success || report_failure);
+      }
     });
 
 
@@ -9251,6 +9322,9 @@ void CoreWorker::PublishRecoveryHolderCertificateToWitnesses(
             reply.client_submit_to_cq_time_ns(),
             reply.client_cq_to_main_loop_time_ns(),
             reply.client_main_loop_to_batch_callback_time_ns(),
+            reply.client_enqueue_cpu_time_ns(),
+            reply.client_batch_build_cpu_time_ns(),
+            reply.client_batch_demux_cpu_time_ns(),
             reply.witness_batch_queue_time_ns(),
             reply.witness_handler_time_ns(),
             reply.witness_mutex_wait_time_ns(),
