@@ -16,6 +16,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fix applicator matching
+        run: python tools/_fix_k1_cq_applicator.py
+
       - name: Apply K1 CQ witness drain
         run: python tools/_apply_k1_cq_witness_drain.py
 
@@ -30,6 +33,7 @@ jobs:
 
       - name: Commit source change and remove applicator
         run: |
+          rm tools/_fix_k1_cq_applicator.py
           rm tools/_apply_k1_cq_witness_drain.py
           rm .github/workflows/temp_apply_k1_cq_witness_drain.yml
           git config user.name "tejas-shivanand-mane"
