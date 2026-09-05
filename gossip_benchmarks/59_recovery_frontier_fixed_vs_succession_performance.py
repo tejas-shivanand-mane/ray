@@ -39,6 +39,14 @@ Outputs:
   fixed_vs_succession_frontier_perf_runs.csv
   fixed_vs_succession_frontier_perf_summary.csv
   fixed_vs_succession_frontier_perf_paired.csv
+  fixed_vs_succession_k_padding_<bytes>.png / .pdf
+
+Plot existing saved runs without executing benchmarks:
+  python gossip_benchmarks/59_recovery_frontier_fixed_vs_succession_performance.py plot
+
+This measures application completion throughput, not time to complete holder
+admission. Fixed-R gates exports on holder ACKs; Succession can overlap its
+witness-backed admission with application execution.
 
 Recommended paper run:
   python gossip_benchmarks/59_recovery_frontier_fixed_vs_succession_performance.py --overwrite
@@ -447,6 +455,8 @@ def perf_cmd(
 
 
 def run_parent(args: argparse.Namespace) -> None:
+    from _recovery_frontier_plots import pyplot
+    pyplot()  # Report a missing plotting dependency before running any cases.
     if args.repetitions < 2:
         raise ValueError("--repetitions must be >= 2")
     if args.burst_size % max(K_VALUES):
@@ -484,7 +494,7 @@ def run_parent(args: argparse.Namespace) -> None:
         if (case[2], case[1].size_bytes, case[0]) not in completed
     ]
 
-    complete_balance = args.repetitions >= len(VARIANTS)
+    complete_balance = args.repetitions % len(VARIANTS) == 0
     print(
         "Fixed-R vs adaptive Succession x Frontier: "
         f"R=2 borrowers/pipeline=2 burst={args.burst_size} "
@@ -601,9 +611,21 @@ def run_parent(args: argparse.Namespace) -> None:
             )
 
 
+    plot_results(args)
+
+
+def plot_results(args: argparse.Namespace) -> None:
+    from _recovery_frontier_plots import plot_k
+
+    out = Path(args.output_dir)
+    rows = read_csv(out / "fixed_vs_succession_frontier_perf_runs.csv")
+    plot_k(rows, summary_rows(rows), paired_rows(rows), out, VARIANTS,
+           FIXED_VARIANT_FOR_K, SUCCESSION_VARIANT_FOR_K)
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
-    p.add_argument("command", choices=["run", "_single-perf"], nargs="?", default="run")
+    p.add_argument("command", choices=["run", "plot", "_single-perf"], nargs="?", default="run")
     p.add_argument(
         "--output-dir",
         default="gossip_benchmarks/results/59_recovery_frontier_fixed_vs_succession_performance",
@@ -648,6 +670,8 @@ def main() -> None:
         row = b58.single_perf(args)
         row["method"] = method_family(args.single_variant)
         Path(args.single_output_json).write_text(json.dumps(row, allow_nan=True))
+    elif args.command == "plot":
+        plot_results(args)
     else:
         run_parent(args)
 
