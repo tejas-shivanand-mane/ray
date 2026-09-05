@@ -711,10 +711,19 @@ class RecoverySuccessionManager {
   absl::flat_hash_map<TaskID, rpc::RecoveryManifest>
       recovery_frontier_protection_manifests_ ABSL_GUARDED_BY(mutex_);
 
+  struct InitialFrontierAdmission {
+    RecoveryFrontierAppendBatch batch;
+    // Built lazily from this exact prefix and copied into each holder's request.
+    // The encoding excludes reservation/rank-specific admission metadata.
+    std::string encoded_recipe;
+  };
+
   /// Exact initial recipe prefix frozen for the duration of adaptive holder
   /// admission. The Frontier itself remains open so later owner tasks can join
   /// it; H1..HR nevertheless all receive the same initial replay snapshot.
-  absl::flat_hash_map<TaskID, RecoveryFrontierAppendBatch>
+  /// Cache its encoding until formation completes, an admission aborts, or the
+  /// group is retired. An abort keeps the batch so retries use the same prefix.
+  absl::flat_hash_map<TaskID, InitialFrontierAdmission>
       adaptive_frontier_initial_append_batches_ ABSL_GUARDED_BY(mutex_);
 
   mutable RecoverySuccessionProfile profile_ ABSL_GUARDED_BY(mutex_);
