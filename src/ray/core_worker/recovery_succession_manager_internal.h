@@ -484,17 +484,13 @@ inline bool BuildFrontierSuccessionSnapshot(const RecoveryFrontierGroup &group,
 }
 
 inline void PutFrontierSuccessionAppendCapsule(
-    const std::string &encoded_append, rpc::TaskSpec *task_spec) {
+    const rpc::RecoveryFrontierAppend &append, rpc::TaskSpec *task_spec) {
   RAY_CHECK(task_spec != nullptr);
   task_spec->clear_recovery_argument_metadata();
   rpc::RecoveryTaskArgumentMetadata *entry =
       task_spec->add_recovery_argument_metadata();
-  entry->mutable_recovery_metadata()->set_first_holder_task_spec(encoded_append);
-}
-
-inline void PutFrontierSuccessionAppendCapsule(
-    const rpc::RecoveryFrontierAppend &append, rpc::TaskSpec *task_spec) {
-  PutFrontierSuccessionAppendCapsule(EncodeFrontierSuccessionAppend(append), task_spec);
+  entry->mutable_recovery_metadata()->set_first_holder_task_spec(
+      EncodeFrontierSuccessionAppend(append));
 }
 
 inline bool ExtractFrontierSuccessionAppendCapsule(

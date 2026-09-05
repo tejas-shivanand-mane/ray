@@ -1050,7 +1050,6 @@ bool RecoverySuccessionManager::HandleOwnerTaskLineageReleased(
       }
 
       // Never activated/exported: there is no remote state to tombstone.
-      adaptive_frontier_initial_append_batches_.erase(membership->group_id);
       RAY_CHECK(recovery_frontier_planner_->EraseGroup(membership->group_id));
       return false;
     }
@@ -1150,7 +1149,6 @@ bool RecoverySuccessionManager::HandleOwnerReturnRefDeleted(
 
       // The group was never activated/exported, so there is no remote
       // recovery state to tombstone. Reclaim the owner-local planner state.
-      adaptive_frontier_initial_append_batches_.erase(membership->group_id);
       RAY_CHECK(recovery_frontier_planner_->EraseGroup(membership->group_id));
       return false;
     }
@@ -1617,7 +1615,7 @@ RecoverySuccessionManager::PrepareHolderAdmission(
       AdaptiveRecoveryFrontierEnabledCached() &&
       recovery_frontier_planner_->GetGroup(task_id) != nullptr;
 
-  InitialFrontierAdmission *initial_frontier_admission = nullptr;
+  std::optional<RecoveryFrontierAppendBatch> frontier_install_batch;
   if (frontier_group_admission) {
     RecoveryFrontierGroup *group =
         recovery_frontier_planner_->GetMutableGroup(task_id);
@@ -1637,11 +1635,10 @@ RecoverySuccessionManager::PrepareHolderAdmission(
         }
         initial_it =
             adaptive_frontier_initial_append_batches_
-                .emplace(task_id,
-                         InitialFrontierAdmission{std::move(staged.value()), {}})
+                .emplace(task_id, std::move(staged.value()))
                 .first;
       }
-      initial_frontier_admission = &initial_it->second;
+      frontier_install_batch = initial_it->second;
     }
   }
 
@@ -1822,33 +1819,19 @@ RecoverySuccessionManager::PrepareHolderAdmission(
     const RecoveryFrontierGroup *group =
         recovery_frontier_planner_->GetGroup(task_id);
     RAY_CHECK(group != nullptr);
-    if (initial_frontier_admission != nullptr) {
-      // The manager mutex protects this entry throughout preparation. Later
-      // registrations cannot extend the frozen batch, and each RPC owns a copy
-      // of the encoding; no asynchronous callback borrows cache storage.
-      if (initial_frontier_admission->encoded_recipe.empty()) {
-        rpc::RecoveryFrontierAppend snapshot;
-        if (!recovery_succession_internal::BuildFrontierSuccessionAppend(
-                initial_frontier_admission->batch, &snapshot)) {
-          EraseHolderReservationLocked(reservation_id);
-          return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
-        }
-        initial_frontier_admission->encoded_recipe =
-            recovery_succession_internal::EncodeFrontierSuccessionAppend(snapshot);
-      }
-      recovery_succession_internal::PutFrontierSuccessionAppendCapsule(
-          initial_frontier_admission->encoded_recipe, &plan->task_spec);
-    } else {
-      // Preserve the existing snapshot path outside initial holder formation.
-      rpc::RecoveryFrontierAppend snapshot;
-      if (!recovery_succession_internal::BuildFrontierSuccessionSnapshot(
-              *group, &snapshot)) {
-        EraseHolderReservationLocked(reservation_id);
-        return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
-      }
-      recovery_succession_internal::PutFrontierSuccessionAppendCapsule(
-          snapshot, &plan->task_spec);
+    rpc::RecoveryFrontierAppend snapshot;
+    const bool built =
+        frontier_install_batch.has_value()
+            ? recovery_succession_internal::BuildFrontierSuccessionAppend(
+                  frontier_install_batch.value(), &snapshot)
+            : recovery_succession_internal::BuildFrontierSuccessionSnapshot(
+                  *group, &snapshot);
+    if (!built) {
+      EraseHolderReservationLocked(reservation_id);
+      return rpc::ReportRecoveryCandidateReply::STALE_MANIFEST;
     }
+    recovery_succession_internal::PutFrontierSuccessionAppendCapsule(
+        snapshot, &plan->task_spec);
   }
 
   plan->proposed_manifest.CopyFrom(proposed_manifest);
@@ -1991,7 +1974,7 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
             adaptive_frontier_initial_append_batches_.find(task_id);
         if (initial_it != adaptive_frontier_initial_append_batches_.end()) {
           limit = std::max(
-              limit, initial_it->second.batch.end_member_index);
+              limit, initial_it->second.end_member_index);
         }
         return limit;
       };
@@ -2041,7 +2024,7 @@ bool RecoverySuccessionManager::CommitHolderAdmission(
         RecoveryFrontierGroup *group =
             recovery_frontier_planner_->GetMutableGroup(task_id);
         if (group == nullptr ||
-            !group->CommitAppend(initial_it->second.batch)) {
+            !group->CommitAppend(initial_it->second)) {
           return false;
         }
         adaptive_frontier_initial_append_batches_.erase(initial_it);
@@ -2158,14 +2141,6 @@ void RecoverySuccessionManager::AbortHolderAdmission(
 
   const TaskID task_id = reservation_it->second.task_id;
   const uint32_t failed_rank = reservation_it->second.proposed_rank;
-
-  const auto initial_it = adaptive_frontier_initial_append_batches_.find(task_id);
-  if (initial_it != adaptive_frontier_initial_append_batches_.end()) {
-    // Requests already in flight own their bytes. Release only the extra
-    // encoding; the pinned prefix must survive a partial admission failure so
-    // a retry cannot include members that earlier holders never installed.
-    std::string().swap(initial_it->second.encoded_recipe);
-  }
 
 
   // Patch 4M-CERT independent abort: another certificate does not depend on
@@ -3281,7 +3256,6 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
 
       candidate_reports_sent_.erase(task_id);
       recovery_frontier_protection_manifests_.erase(protection_it);
-      adaptive_frontier_initial_append_batches_.erase(task_id);
       RAY_CHECK(recovery_frontier_planner_->EraseGroup(task_id));
       return true;
     }
@@ -3325,7 +3299,6 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
   }
 
   candidate_reports_sent_.erase(task_id);
-  adaptive_frontier_initial_append_batches_.erase(task_id);
 
   return true;
 }
