@@ -35,6 +35,8 @@ commit RPCs.
 Use --initial-k2-piggyback to exercise R=2/W=2/K=2 with two independent
 witness nodes. In that mode the one in-progress H1 admission must have stored
 both recipes through the owner export, with zero holder-install RPCs.
+Add --fail-holder-witness-confirmation to require recovery to fail without
+replay when only the holder's independent witness confirmation is blocked.
 """
 from __future__ import annotations
 
@@ -265,7 +267,13 @@ def main() -> None:
         "--initial-k2-piggyback", action="store_true",
         help="Require the initial full K=2 recipe piggyback path with R=2/W=2",
     )
+    parser.add_argument(
+        "--fail-holder-witness-confirmation", action="store_true",
+        help="Negative K=2 check: requester discovery cannot authorize holder replay",
+    )
     args = parser.parse_args()
+    if args.fail_holder_witness_confirmation and not args.initial_k2_piggyback:
+        parser.error("--fail-holder-witness-confirmation requires --initial-k2-piggyback")
     if args.initial_k2_piggyback:
         K = 2
         WITNESS_COUNT = 2
@@ -278,9 +286,13 @@ def main() -> None:
 
     try:
         cluster = Cluster()
+        config = frontier_succession_system_config()
+        config["recovery_succession_test_fail_holder_witness_confirmation"] = (
+            args.fail_holder_witness_confirmation
+        )
         cluster.add_node(
             num_cpus=0,
-            _system_config=frontier_succession_system_config(),
+            _system_config=config,
             include_dashboard=False,
         )
         owner_node = cluster.add_node(
@@ -419,6 +431,28 @@ def main() -> None:
         # on the dead owner or on a requester vouching for it; its recovery path
         # independently queries the witness and promotes its own provisional
         # state before replay.
+        if args.fail_holder_witness_confirmation:
+            try:
+                ray.get(holder.read.remote(TARGET_INDEX), timeout=GET_TIMEOUT_S)
+            except ray.exceptions.OwnerDiedError:
+                pass
+            else:
+                raise AssertionError("Provisional holder replayed without its witness confirmation")
+            blocked_logs = wait_for_log(
+                sessions,
+                "TEST ONLY: suppressing provisional holder witness confirmation",
+                PROMOTION_LOG_TIMEOUT_S,
+            )
+            assert blocked_logs, (
+                "Failure did not reach the holder confirmation boundary; "
+                "requester witness discovery may still be broken"
+            )
+            for token in tokens:
+                assert count_token_starts(marker, token, after_ns=failure_wall_ns) == 0, read_marker(marker)
+            print("PASS: K=2 requester discovery cannot replace holder witness confirmation")
+            print(f"  R={R} W={WITNESS_COUNT} K={K}; post-failure replays=0")
+            return
+
         recovered_object_id, value = ray.get(
             holder.read.remote(TARGET_INDEX),
             timeout=GET_TIMEOUT_S,

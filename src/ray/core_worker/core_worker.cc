@@ -7389,19 +7389,65 @@ void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
       return;
     }
 
+    // A recipe piggyback contains the owner's pre-admission view, so there
+    // may be no cached non-owner holder to contact yet. Frontier witnesses
+    // index topology by group/leader ID, while replay remains member-keyed.
+    // Use locally installed membership to select the witness key.
+    rpc::RecoveryManifest witness_lookup_manifest;
+    witness_lookup_manifest.CopyFrom(manifest);
+    const auto membership =
+        recovery_succession_manager_->GetRecoveryFrontierMembership(
+            object_id.TaskId());
+    const bool frontier_lookup =
+        membership.has_value() &&
+        RayConfig::instance().recovery_frontier_group_size() == 2 &&
+        !RayConfig::instance().enable_recovery_succession_certificate_admission();
+    if (frontier_lookup) {
+      if (manifest.task_id() != object_id.TaskId().Binary()) {
+        callback(false);
+        return;
+      }
+      witness_lookup_manifest.set_task_id(membership->group_id.Binary());
+    }
+    const std::string expected_witness_task_id = witness_lookup_manifest.task_id();
+
     LookupRecoveryManifestFromWitnesses(
-        manifest,
-        [this, object_id, return_index, manifest, callback = std::move(callback)](
+        witness_lookup_manifest,
+        [this, object_id, return_index, manifest, frontier_lookup,
+         expected_witness_task_id, callback = std::move(callback)](
             std::optional<rpc::RecoveryManifest> witness_manifest) mutable {
           if (!witness_manifest.has_value() ||
+              !witness_manifest->has_version() ||
+              witness_manifest->task_id() != expected_witness_task_id ||
               CompareRecoveryManifestVersions(witness_manifest.value(), manifest) <= 0) {
+            callback(false);
+            return;
+          }
+
+          if (frontier_lookup && witness_manifest->tombstoned()) {
+            // Apply the original group-keyed tombstone to every local member
+            // before discarding the recipe/membership needed for translation.
+            recovery_succession_manager_->ApplyRecoveryTombstone(
+                witness_manifest.value());
             callback(false);
             return;
           }
 
           rpc::RecoveryManifest newer_manifest;
           newer_manifest.CopyFrom(witness_manifest.value());
+          if (frontier_lookup) {
+            // Match BuildFrontierMemberManifest: topology/version come from
+            // witnesses, but task identity and retry budget belong to the
+            // requested member, not the group's leader.
+            newer_manifest.set_task_id(manifest.task_id());
+            newer_manifest.set_job_id(manifest.job_id());
+            newer_manifest.set_max_recovery_attempts(manifest.max_recovery_attempts());
+          }
 
+          // Updating a borrowed view does not commit provisional holder state
+          // on the ordinary ordered-admission path. Even a self-directed replay
+          // RPC must still pass HandleRecoverTaskOutput's independent witness
+          // confirmation; this requester lookup is only holder discovery.
           recovery_succession_manager_->UpdateBorrowedObjectManifest(object_id,
                                                                      newer_manifest);
 
