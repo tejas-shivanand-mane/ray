@@ -1541,6 +1541,43 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
         &reports);
   }
 
+  // Nested dependency order is not group order: a non-leader can create the
+  // candidate report before the leader's recipe sidecar is processed. Derive
+  // stored-prefix proofs only after this TaskSpec's metadata has all been
+  // consumed. Reports are still local here and have not reached CoreWorker's
+  // RPC queue. This adds no event-loop turn or wait for another export.
+  if (InitialFrontierPiggybackEnabledCached()) {
+    for (auto &report : reports) {
+      const TaskID task_id = TaskID::FromBinary(report.request.task_id());
+      const auto *group = recovery_frontier_planner_->GetGroup(task_id);
+      if (group != nullptr && group->Full() &&
+          group->MemberCount() == recovery_frontier_group_size_config_ &&
+          group->CommittedMemberCount() == group->MemberCount() &&
+          group->Generation() == 1) {
+        bool retained = true;
+        for (const auto &member : group->Members()) {
+          const auto stored = task_states_.find(member.task_id);
+          if (stored == task_states_.end() ||
+              !stored->second.task_spec.has_value() ||
+              stored->second.task_spec->task_id() != member.task_id.Binary() ||
+              stored->second.manifest.tombstoned() ||
+              !stored->second.provisional_piggyback_task_spec ||
+              stored->second.manifest_committed) {
+            retained = false;
+            break;
+          }
+        }
+        if (retained) {
+          report.request.set_already_stores_task_spec(true);
+          report.request.set_stored_frontier_generation(group->Generation());
+          for (const auto &member : group->Members()) {
+            report.request.add_stored_frontier_member_ids(member.task_id.Binary());
+          }
+        }
+      }
+    }
+  }
+
   if (profiling_enabled_) {
     ++profile_.register_executor_task_calls;
     profile_.register_executor_task_time_ns += static_cast<uint64_t>(
@@ -2943,34 +2980,6 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
   report.request.mutable_candidate_address()->CopyFrom(self_address_);
   report.request.mutable_cached_manifest()->CopyFrom(*effective_manifest);
   report.request.set_already_stores_task_spec(already_stores_task_spec);
-  if (InitialFrontierPiggybackEnabledCached()) {
-    const auto *group = recovery_frontier_planner_->GetGroup(task_id);
-    if (group != nullptr && group->Full() &&
-        group->MemberCount() == recovery_frontier_group_size_config_ &&
-        group->CommittedMemberCount() == group->MemberCount() &&
-        group->Generation() == 1) {
-      bool retained = true;
-      for (const auto &member : group->Members()) {
-        const auto stored = task_states_.find(member.task_id);
-        if (stored == task_states_.end() ||
-            !stored->second.task_spec.has_value() ||
-            stored->second.task_spec->task_id() != member.task_id.Binary() ||
-            stored->second.manifest.tombstoned() ||
-            !stored->second.provisional_piggyback_task_spec ||
-            stored->second.manifest_committed) {
-          retained = false;
-          break;
-        }
-      }
-      if (retained) {
-        report.request.set_already_stores_task_spec(true);
-        report.request.set_stored_frontier_generation(group->Generation());
-        for (const auto &member : group->Members()) {
-          report.request.add_stored_frontier_member_ids(member.task_id.Binary());
-        }
-      }
-    }
-  }
 
   reports->push_back(std::move(report));
 

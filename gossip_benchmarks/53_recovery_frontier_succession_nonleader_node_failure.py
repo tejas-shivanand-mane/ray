@@ -25,8 +25,9 @@ A recovery-only pass is NOT sufficient: the benchmark must also prove the
 shared Frontier Succession topology via exactly R holder admissions.
 
 Use --initial-piggyback-k K for K=2/4/8/16/32 with R=2/W=2. This fills
-one group, repeats an export to the first borrower, and requires two verified
-recipe-piggyback admissions with zero separate holder-install RPCs before
+one group, exports the leader last, repeats an export to the first borrower,
+and requires two verified recipe-piggyback admissions with zero separate
+holder-install RPCs before
 killing the owner. Recover the last member only, with no other member replay.
 --initial-k2-piggyback remains an alias for K=2.
 """
@@ -128,10 +129,10 @@ def types():
 
     @ray.remote(max_restarts=0, max_task_retries=0, max_concurrency=1)
     class Borrower:
-        def hold(self, wrapped_refs):
+        def hold(self, wrapped_refs, leader_last: bool = False):
             # Nested refs force normal task-argument recovery metadata transport
             # while keeping the ObjectRefs alive on this borrower.
-            self.refs = list(wrapped_refs)
+            self.refs = list(reversed(wrapped_refs)) if leader_last else list(wrapped_refs)
             return [ref.hex() for ref in self.refs]
 
         def read(self, index: int):
@@ -169,12 +170,18 @@ def types():
             # Succession candidate formation happens at downstream CoreWorkers.
             # Submit these actor calls FROM THE OWNER so recovery metadata for
             # the producer refs is attached by the producer owner's manager.
+            # Exercise non-leader metadata before the leader recipe. The
+            # receiver restores application order only after native admission.
+            exported_refs = list(reversed(refs)) if duplicate_first_borrower else refs
             if duplicate_first_borrower:
                 # The first two exports go to the same worker. They must not
                 # consume another independent holder's recipe opportunity.
-                ray.get(borrowers[0].hold.remote(refs), timeout=GET_TIMEOUT_S)
+                ray.get(borrowers[0].hold.remote(exported_refs, True), timeout=GET_TIMEOUT_S)
             held_ids = ray.get(
-                [borrower.hold.remote(refs) for borrower in borrowers]
+                [
+                    borrower.hold.remote(exported_refs, bool(duplicate_first_borrower))
+                    for borrower in borrowers
+                ]
             )
             object_ids = [ref.hex() for ref in refs]
             return object_ids, held_ids
@@ -398,20 +405,22 @@ def main() -> None:
         )
         assert max_holders == R, profile
         if args.initial_piggyback_k:
-            assert profile.get("initial_install_profile_version") == 3, profile
-            assert int(profile.get("frontier_recipe_piggyback_admissions", 0)) == R, profile
-            assert int(profile.get("holder_install_rpcs_sent", 0)) == 0, profile
-            assert int(profile.get("holder_install_rpcs_completed", 0)) == 0, profile
-            for borrower_profile in ray.get(
+            borrower_profiles = ray.get(
                 [borrower.recovery_profile.remote() for borrower in borrowers],
                 timeout=PROTECTION_TIMEOUT_S,
-            ):
+            )
+            evidence = {"owner": profile, "borrowers": borrower_profiles}
+            assert profile.get("initial_install_profile_version") == 3, evidence
+            assert int(profile.get("frontier_recipe_piggyback_admissions", 0)) == R, evidence
+            assert int(profile.get("holder_install_rpcs_sent", 0)) == 0, evidence
+            assert int(profile.get("holder_install_rpcs_completed", 0)) == 0, evidence
+            for borrower_profile in borrower_profiles:
                 assert int(borrower_profile.get(
                     "frontier_recipe_piggybacks_stored", 0
-                )) == 1, borrower_profile
+                )) == 1, evidence
                 assert int(borrower_profile.get(
                     "frontier_holder_materialize_members", 0
-                )) == NUM_TASKS, borrower_profile
+                )) == NUM_TASKS, evidence
 
         failure_wall_ns = time.time_ns()
         failure_start = time.perf_counter()

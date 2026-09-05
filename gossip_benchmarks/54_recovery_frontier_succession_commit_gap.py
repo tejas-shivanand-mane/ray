@@ -34,7 +34,7 @@ commit RPCs.
 
 Use --initial-piggyback-k K for K=2/4/8/16/32 with R=2/W=2 and two
 independent witness nodes. The in-progress H1 admission must store all K
-recipes through the owner export with zero holder-install RPCs. Recovery
+recipes through a leader-last owner export with zero holder-install RPCs. Recovery
 requests the last member; every other member must have zero replay starts.
 --initial-k2-piggyback remains an alias for K=2.
 Add --fail-holder-witness-confirmation to require recovery to fail without
@@ -187,11 +187,11 @@ def types():
 
     @ray.remote(max_restarts=0, max_task_retries=0, max_concurrency=1)
     class HolderBorrower:
-        def hold(self, wrapped_refs):
+        def hold(self, wrapped_refs, leader_last: bool = False):
             # Both Frontier refs arrive together at one CoreWorker.  Correct
             # Frontier+Succession metadata handling must deduplicate them to one
             # candidate report for the shared group.
-            self.refs = list(wrapped_refs)
+            self.refs = list(reversed(wrapped_refs)) if leader_last else list(wrapped_refs)
             return [ref.hex() for ref in self.refs]
 
         def read(self, index: int):
@@ -214,6 +214,7 @@ def types():
             marker_path: str,
             payload_bytes: int,
             holder,
+            leader_last: bool = False,
         ):
             strategy = NodeAffinitySchedulingStrategy(
                 node_id=executor_node_id,
@@ -229,7 +230,10 @@ def types():
 
             # Critical: export directly FROM THE OWNER.  A driver relay would
             # not exercise normal task-argument Recovery Succession metadata.
-            held_ids = ray.get(holder.hold.remote(refs))
+            # Native metadata handling must consume the recipe even when a
+            # non-leader sidecar creates the group candidate first.
+            exported_refs = list(reversed(refs)) if leader_last else refs
+            held_ids = ray.get(holder.hold.remote(exported_refs, leader_last))
             return [ref.hex() for ref in refs], held_ids
 
         def recovery_profile(self):
@@ -353,6 +357,7 @@ def main() -> None:
                 str(marker),
                 PAYLOAD_BYTES,
                 holder,
+                bool(args.initial_piggyback_k),
             )
         )
         assert len(object_ids) == NUM_TASKS
@@ -387,8 +392,7 @@ def main() -> None:
                 int(p.get("candidate_reports_received", 0)) >= 1
                 and (
                     int(p.get("frontier_recipe_piggyback_admissions", 0)) >= 1
-                    if args.initial_piggyback_k
-                    else int(p.get("holder_install_rpcs_completed", 0)) >= 1
+                    or int(p.get("holder_install_rpcs_completed", 0)) >= 1
                 )
                 and int(p.get("witness_update_rpcs_completed", 0)) >= WITNESS_COUNT
             ),
@@ -412,9 +416,10 @@ def main() -> None:
         assert reports_accepted == 1, profile
         if args.initial_piggyback_k:
             assert profile.get("initial_install_profile_version") == 3, profile
-            assert int(profile.get("frontier_recipe_piggyback_admissions", 0)) == 1, profile
-            assert install_sent == 0 and install_completed == 0, profile
             holder_profile = ray.get(holder.recovery_profile.remote(), timeout=PROFILE_TIMEOUT_S)
+            evidence = {"owner": profile, "holder": holder_profile}
+            assert int(profile.get("frontier_recipe_piggyback_admissions", 0)) == 1, evidence
+            assert install_sent == 0 and install_completed == 0, evidence
             assert int(holder_profile.get("frontier_recipe_piggybacks_stored", 0)) == 1, holder_profile
             assert int(holder_profile.get("frontier_holder_materialize_members", 0)) == NUM_TASKS, holder_profile
         else:
