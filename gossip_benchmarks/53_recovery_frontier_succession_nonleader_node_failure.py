@@ -24,9 +24,11 @@ Target semantics (R=2, K=4):
 A recovery-only pass is NOT sufficient: the benchmark must also prove the
 shared Frontier Succession topology via exactly R holder admissions.
 
-Use --initial-k2-piggyback for R=2/W=2/K=2. This additionally repeats an
-export to the first borrower and requires two verified recipe-piggyback
-admissions with zero separate holder-install RPCs before killing the owner.
+Use --initial-piggyback-k K for K=2/4/8/16/32 with R=2/W=2. This fills
+one group, repeats an export to the first borrower, and requires two verified
+recipe-piggyback admissions with zero separate holder-install RPCs before
+killing the owner. Recover the last member only, with no other member replay.
+--initial-k2-piggyback remains an alias for K=2.
 """
 from __future__ import annotations
 
@@ -60,7 +62,7 @@ TARGET_INDEX = 1
 PAYLOAD_BYTES = 64 * 1024
 OBJECT_TIMEOUT_MS = 500
 GET_TIMEOUT_S = 90.0
-INITIAL_BLOCK_TIMEOUT_S = 180.0
+INITIAL_BLOCK_TIMEOUT_S = 300.0
 PROTECTION_TIMEOUT_S = 30.0
 PROTECTION_STABLE_S = 0.75
 
@@ -271,15 +273,23 @@ def wait_for_protection_quiescence(owner, borrowers, timeout_s: float) -> dict:
 
 
 def main() -> None:
-    global K
+    global K, NUM_TASKS, TARGET_INDEX
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--initial-k2-piggyback", action="store_true",
-        help="Require the initial full K=2 recipe piggyback path with R=2/W=2",
+    initial = parser.add_mutually_exclusive_group()
+    initial.add_argument(
+        "--initial-piggyback-k", type=int, choices=(2, 4, 8, 16, 32),
+        help="Require a full initial group with verified recipe piggybacks, R=2/W=2",
+    )
+    initial.add_argument(
+        "--initial-k2-piggyback", dest="initial_piggyback_k",
+        action="store_const", const=2,
+        help="Compatibility alias for --initial-piggyback-k 2",
     )
     args = parser.parse_args()
-    if args.initial_k2_piggyback:
-        K = 2
+    if args.initial_piggyback_k:
+        K = args.initial_piggyback_k
+        NUM_TASKS = K
+        TARGET_INDEX = K - 1
         os.environ["RAY_RECOVERY_CERTIFICATE_ADMISSION"] = "0"
         os.environ["RAY_RECOVERY_TASKMANAGER_PIN"] = "0"
     cluster = None
@@ -299,7 +309,8 @@ def main() -> None:
             resources={"owner_node": 1},
         )
         executor_node = cluster.add_node(
-            num_cpus=2,
+            # Every original task blocks, so all K must fit concurrently.
+            num_cpus=max(2, (NUM_TASKS + 9) // 10 + 1),
             resources={"executor_node": 1},
         )
         # Succession witnesses are control-plane durability nodes. They are
@@ -336,10 +347,7 @@ def main() -> None:
             for i in range(R)
         ]
 
-        tokens = [
-            f"leader-{uuid.uuid4().hex}",
-            f"member-{uuid.uuid4().hex}",
-        ]
+        tokens = [f"member-{i}-{uuid.uuid4().hex}" for i in range(NUM_TASKS)]
 
         # Do not relay producer ObjectRefs through the driver. The actual owner
         # creates them and directly submits the borrower actor calls that carry
@@ -351,7 +359,7 @@ def main() -> None:
                 str(marker),
                 PAYLOAD_BYTES,
                 borrowers,
-                args.initial_k2_piggyback,
+                args.initial_piggyback_k,
             )
         )
         assert len(object_ids) == NUM_TASKS
@@ -362,7 +370,7 @@ def main() -> None:
         starts = wait_for_marker(
             marker,
             "START",
-            timeout_s=10.0,
+            timeout_s=60.0,
             min_count=NUM_TASKS,
         )
         assert len(starts) >= NUM_TASKS, read_marker(marker)
@@ -389,11 +397,21 @@ def main() -> None:
             profile,
         )
         assert max_holders == R, profile
-        if args.initial_k2_piggyback:
-            assert profile.get("initial_install_profile_version") == 2, profile
+        if args.initial_piggyback_k:
+            assert profile.get("initial_install_profile_version") == 3, profile
             assert int(profile.get("frontier_recipe_piggyback_admissions", 0)) == R, profile
             assert int(profile.get("holder_install_rpcs_sent", 0)) == 0, profile
             assert int(profile.get("holder_install_rpcs_completed", 0)) == 0, profile
+            for borrower_profile in ray.get(
+                [borrower.recovery_profile.remote() for borrower in borrowers],
+                timeout=PROTECTION_TIMEOUT_S,
+            ):
+                assert int(borrower_profile.get(
+                    "frontier_recipe_piggybacks_stored", 0
+                )) == 1, borrower_profile
+                assert int(borrower_profile.get(
+                    "frontier_holder_materialize_members", 0
+                )) == NUM_TASKS, borrower_profile
 
         failure_wall_ns = time.time_ns()
         failure_start = time.perf_counter()
@@ -425,11 +443,16 @@ def main() -> None:
 
         assert target_post_failure_starts == 1, read_marker(marker)
         assert leader_post_failure_starts == 0, read_marker(marker)
+        for i, token in enumerate(tokens):
+            if i != TARGET_INDEX:
+                assert count_token_starts(
+                    marker, token, after_ns=failure_wall_ns
+                ) == 0, read_marker(marker)
 
         print("PASS: Recovery Frontier + Succession non-leader owner-node failure")
         print(f"  R                         = {R}")
         print(f"  K                         = {K}")
-        if args.initial_k2_piggyback:
+        if args.initial_piggyback_k:
             print("  W                         = 2")
             print("  verified recipe piggybacks = 2; separate install RPCs = 0")
         print(f"  initial manifest builds   = {initial_manifest_builds}")

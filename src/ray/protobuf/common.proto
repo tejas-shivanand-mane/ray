@@ -1272,7 +1272,7 @@ message RecoveryTaskArgumentMetadata {
   Address owner_address = 2;
   RecoveryObjectMetadata recovery_metadata = 3;
 
-  // Owner-to-borrower transport only, for an initial full K=2 Frontier.
+  // Owner-to-borrower transport only, for an initial full K>1 Frontier.
   // Receipt stores provisional lineage; it is NOT a witness confirmation.
   // Keep this separate from the membership marker in recovery_metadata.
   // Serialized RecoveryFrontierAppend. Its schema imports common.proto for

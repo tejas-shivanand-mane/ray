@@ -13,6 +13,9 @@ After the owner worker is killed, the test recovers:
   * task 4: a non-leader member at the end of the full first group, and
   * task 5: the leader of the rollover group.
 
+The owner exports directly to borrower actor calls, exercising asynchronous
+Fixed-R publication and deferred actor dispatch for both groups.
+
 Both original ObjectIDs must be preserved. Each requested task must replay
 exactly once, and tasks 1-3 must not replay as a side effect.
 """
@@ -120,20 +123,29 @@ def types():
             tokens: list[str],
             marker_path: str,
             payload_bytes: int,
+            borrowers,
         ):
             strategy = NodeAffinitySchedulingStrategy(
                 node_id=executor_node_id,
                 soft=False,
             )
-            # All five tasks are submitted before the ObjectRef list is returned,
-            # so submission-order frontier membership is deterministic here.
-            return [
+            # Register the full group and rollover member before any export.
+            # Retain every owner ref until failure, and export directly through
+            # actor submission so the asynchronous ACK/dispatch path is covered.
+            self.refs = [
                 work.options(
                     scheduling_strategy=strategy,
                     num_cpus=0.1,
                 ).remote(token, marker_path, payload_bytes)
                 for token in tokens
             ]
+            held_ids = ray.get([
+                borrower.hold.remote([self.refs[index]])
+                for borrower, index in zip(
+                    borrowers, (GROUP1_TARGET_INDEX, GROUP2_TARGET_INDEX)
+                )
+            ])
+            return [ref.hex() for ref in self.refs], held_ids
 
         def recovery_profile(self):
             from ray._private.worker import global_worker
@@ -210,15 +222,17 @@ def main() -> None:
 
         tokens = [f"task-{i + 1}-{uuid.uuid4().hex}" for i in range(NUM_TASKS)]
 
-        refs = ray.get(
+        object_ids, held_ids = ray.get(
             owner.dispatch.remote(
                 executor_node.node_id,
                 tokens,
                 str(marker),
                 PAYLOAD_BYTES,
+                [borrower_group1, borrower_group2],
             )
         )
-        assert len(refs) == NUM_TASKS
+        assert len(object_ids) == NUM_TASKS
+        assert len(set(object_ids)) == NUM_TASKS
 
         starts = wait_for_marker(
             marker,
@@ -230,14 +244,10 @@ def main() -> None:
         for token in tokens:
             assert count_token_starts(marker, token) == 1, read_marker(marker)
 
-        group1_ref = refs[GROUP1_TARGET_INDEX]
-        group2_ref = refs[GROUP2_TARGET_INDEX]
-        group1_object_id = group1_ref.hex()
-        group2_object_id = group2_ref.hex()
+        group1_object_id = object_ids[GROUP1_TARGET_INDEX]
+        group2_object_id = object_ids[GROUP2_TARGET_INDEX]
         assert group1_object_id != group2_object_id
-
-        borrower_group1_id = ray.get(borrower_group1.hold.remote([group1_ref]))
-        borrower_group2_id = ray.get(borrower_group2.hold.remote([group2_ref]))
+        borrower_group1_id, borrower_group2_id = held_ids
         assert borrower_group1_id == group1_object_id
         assert borrower_group2_id == group2_object_id
 

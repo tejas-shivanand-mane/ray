@@ -1458,7 +1458,7 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
   result["first_holder_piggyback_serialize_time_ns"] =
       profile.first_holder_piggyback_serialize_time_ns;
 
-  result["initial_install_profile_version"] = 2;
+  result["initial_install_profile_version"] = 3;
   result["frontier_recipe_piggybacks_sent"] =
       profile.frontier_recipe_piggybacks_sent;
   result["frontier_recipe_piggyback_bytes_sent"] =
@@ -7400,7 +7400,7 @@ void CoreWorker::TryRecoveryHolders(const ObjectID &object_id,
             object_id.TaskId());
     const bool frontier_lookup =
         membership.has_value() &&
-        RayConfig::instance().recovery_frontier_group_size() == 2 &&
+        RayConfig::instance().recovery_frontier_group_size() > 1 &&
         !RayConfig::instance().enable_recovery_succession_certificate_admission();
     if (frontier_lookup) {
       if (manifest.task_id() != object_id.TaskId().Binary()) {

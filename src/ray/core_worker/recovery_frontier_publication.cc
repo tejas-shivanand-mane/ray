@@ -331,6 +331,10 @@ void CoreWorker::PublishRecoveryFrontierGroupAsync(
                   << batch->begin_member_index << ","
                   << batch->end_member_index << ") on all fixed-R holders";
 
+              std::vector<RecoveryFrontierPublicationCallback> waiters;
+              const bool full_group_committed =
+                  batch->end_member_index ==
+                  RayConfig::instance().recovery_frontier_group_size();
               {
                 std::lock_guard<std::mutex> lock(
                     recovery_frontier_publication_mutex_);
@@ -339,12 +343,28 @@ void CoreWorker::PublishRecoveryFrontierGroupAsync(
                     it->second != state) {
                   return;
                 }
-                state->driving = false;
+                // Every holder ACK and CommitAppend have completed on the IO
+                // service. A full group cannot acquire another member, so it
+                // needs no final empty drive to release exports. Partial groups
+                // retain the existing asynchronous finalization/recheck path.
+                if (!full_group_committed) {
+                  state->driving = false;
+                } else {
+                  waiters.swap(state->waiters);
+                  recovery_frontier_publications_.erase(it);
+                }
               }
 
-              // The next generation, if any, is also kicked off asynchronously.
-              PublishRecoveryFrontierGroupAsync(
-                  group_id, state->protection_manifest, {});
+              if (!full_group_committed) {
+                PublishRecoveryFrontierGroupAsync(
+                    group_id, state->protection_manifest, {});
+              } else {
+                for (auto &waiter : waiters) {
+                  if (waiter) {
+                    waiter();
+                  }
+                }
+              }
             },
             /*task_spec=*/nullptr,
             &serialized_append);

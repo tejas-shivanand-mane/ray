@@ -32,9 +32,11 @@ for the two Frontier members, a completed provisional holder install and
 witness publication, zero owner-side committed admissions, and zero candidate
 commit RPCs.
 
-Use --initial-k2-piggyback to exercise R=2/W=2/K=2 with two independent
-witness nodes. In that mode the one in-progress H1 admission must have stored
-both recipes through the owner export, with zero holder-install RPCs.
+Use --initial-piggyback-k K for K=2/4/8/16/32 with R=2/W=2 and two
+independent witness nodes. The in-progress H1 admission must store all K
+recipes through the owner export with zero holder-install RPCs. Recovery
+requests the last member; every other member must have zero replay starts.
+--initial-k2-piggyback remains an alias for K=2.
 Add --fail-holder-witness-confirmation to require recovery to fail without
 replay when only the holder's independent witness confirmation is blocked.
 """
@@ -74,7 +76,7 @@ WITNESS_COUNT = 1
 PAYLOAD_BYTES = 64 * 1024
 OBJECT_TIMEOUT_MS = 500
 GET_TIMEOUT_S = 90.0
-INITIAL_BLOCK_TIMEOUT_S = 180.0
+INITIAL_BLOCK_TIMEOUT_S = 300.0
 FAULT_TIMEOUT_S = 30.0
 PROFILE_TIMEOUT_S = 30.0
 OWNER_DEAD_TIMEOUT_S = 30.0
@@ -261,21 +263,29 @@ def wait_for_profile(
 
 
 def main() -> None:
-    global K, WITNESS_COUNT
+    global K, NUM_TASKS, TARGET_INDEX, WITNESS_COUNT
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--initial-k2-piggyback", action="store_true",
-        help="Require the initial full K=2 recipe piggyback path with R=2/W=2",
+    initial = parser.add_mutually_exclusive_group()
+    initial.add_argument(
+        "--initial-piggyback-k", type=int, choices=(2, 4, 8, 16, 32),
+        help="Require a full initial group with verified recipe piggybacks, R=2/W=2",
+    )
+    initial.add_argument(
+        "--initial-k2-piggyback", dest="initial_piggyback_k",
+        action="store_const", const=2,
+        help="Compatibility alias for --initial-piggyback-k 2",
     )
     parser.add_argument(
         "--fail-holder-witness-confirmation", action="store_true",
-        help="Negative K=2 check: requester discovery cannot authorize holder replay",
+        help="Negative check: requester discovery cannot authorize holder replay",
     )
     args = parser.parse_args()
-    if args.fail_holder_witness_confirmation and not args.initial_k2_piggyback:
-        parser.error("--fail-holder-witness-confirmation requires --initial-k2-piggyback")
-    if args.initial_k2_piggyback:
-        K = 2
+    if args.fail_holder_witness_confirmation and not args.initial_piggyback_k:
+        parser.error("--fail-holder-witness-confirmation requires --initial-piggyback-k")
+    if args.initial_piggyback_k:
+        K = args.initial_piggyback_k
+        NUM_TASKS = K
+        TARGET_INDEX = K - 1
         WITNESS_COUNT = 2
         os.environ["RAY_RECOVERY_CERTIFICATE_ADMISSION"] = "0"
         os.environ["RAY_RECOVERY_TASKMANAGER_PIN"] = "0"
@@ -300,7 +310,8 @@ def main() -> None:
             resources={"owner_node": 1},
         )
         executor_node = cluster.add_node(
-            num_cpus=2,
+            # Every original task blocks, so all K must fit concurrently.
+            num_cpus=max(2, (NUM_TASKS + 9) // 10 + 1),
             resources={"executor_node": 1},
         )
         holder_node = cluster.add_node(
@@ -308,7 +319,7 @@ def main() -> None:
             resources={"holder_node": 1},
         )
 
-        if args.initial_k2_piggyback:
+        if args.initial_piggyback_k:
             # Keep both actual witnesses outside the owner and holder nodes.
             for i in range(WITNESS_COUNT):
                 cluster.add_node(num_cpus=0, resources={f"witness_node_{i}": 1})
@@ -319,7 +330,7 @@ def main() -> None:
             include_dashboard=False,
         )
         wait_for_cluster(
-            ray, 4 + (WITNESS_COUNT if args.initial_k2_piggyback else 0), 30.0
+            ray, 4 + (WITNESS_COUNT if args.initial_piggyback_k else 0), 30.0
         )
         sessions = session_dirs(cluster)
 
@@ -333,10 +344,7 @@ def main() -> None:
             num_cpus=0,
         ).remote()
 
-        tokens = [
-            f"leader-{uuid.uuid4().hex}",
-            f"member-{uuid.uuid4().hex}",
-        ]
+        tokens = [f"member-{i}-{uuid.uuid4().hex}" for i in range(NUM_TASKS)]
 
         object_ids, held_ids = ray.get(
             owner.dispatch_and_export.remote(
@@ -354,7 +362,7 @@ def main() -> None:
         starts = wait_for_marker(
             marker,
             "START",
-            timeout_s=10.0,
+            timeout_s=60.0,
             min_count=NUM_TASKS,
         )
         assert len(starts) >= NUM_TASKS, read_marker(marker)
@@ -379,7 +387,7 @@ def main() -> None:
                 int(p.get("candidate_reports_received", 0)) >= 1
                 and (
                     int(p.get("frontier_recipe_piggyback_admissions", 0)) >= 1
-                    if args.initial_k2_piggyback
+                    if args.initial_piggyback_k
                     else int(p.get("holder_install_rpcs_completed", 0)) >= 1
                 )
                 and int(p.get("witness_update_rpcs_completed", 0)) >= WITNESS_COUNT
@@ -402,13 +410,13 @@ def main() -> None:
         # arrived at one borrower, but only one group candidate was reported.
         assert reports_received == 1, profile
         assert reports_accepted == 1, profile
-        if args.initial_k2_piggyback:
-            assert profile.get("initial_install_profile_version") == 2, profile
+        if args.initial_piggyback_k:
+            assert profile.get("initial_install_profile_version") == 3, profile
             assert int(profile.get("frontier_recipe_piggyback_admissions", 0)) == 1, profile
             assert install_sent == 0 and install_completed == 0, profile
             holder_profile = ray.get(holder.recovery_profile.remote(), timeout=PROFILE_TIMEOUT_S)
             assert int(holder_profile.get("frontier_recipe_piggybacks_stored", 0)) == 1, holder_profile
-            assert int(holder_profile.get("frontier_holder_materialize_members", 0)) == 2, holder_profile
+            assert int(holder_profile.get("frontier_holder_materialize_members", 0)) == NUM_TASKS, holder_profile
         else:
             assert install_sent == 1, profile
             assert install_completed == 1, profile
@@ -449,7 +457,7 @@ def main() -> None:
             )
             for token in tokens:
                 assert count_token_starts(marker, token, after_ns=failure_wall_ns) == 0, read_marker(marker)
-            print("PASS: K=2 requester discovery cannot replace holder witness confirmation")
+            print("PASS: requester discovery cannot replace holder witness confirmation")
             print(f"  R={R} W={WITNESS_COUNT} K={K}; post-failure replays=0")
             return
 
@@ -486,12 +494,17 @@ def main() -> None:
 
         assert target_post_failure_starts == 1, read_marker(marker)
         assert leader_post_failure_starts == 0, read_marker(marker)
+        for i, token in enumerate(tokens):
+            if i != TARGET_INDEX:
+                assert count_token_starts(
+                    marker, token, after_ns=failure_wall_ns
+                ) == 0, read_marker(marker)
 
         print("PASS: Recovery Frontier + Succession witness-ACK commit-gap recovery")
         print(f"  R                         = {R}")
         print(f"  K                         = {K}")
         print(f"  W                         = {WITNESS_COUNT}")
-        if args.initial_k2_piggyback:
+        if args.initial_piggyback_k:
             print("  provisional recipe piggybacks = 1; separate install RPCs = 0")
         print(f"  candidate reports recv    = {reports_received}")
         print(f"  candidate reports accept  = {reports_accepted}")

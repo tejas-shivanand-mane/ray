@@ -83,7 +83,7 @@ from _benchmark_common import safe_shutdown, wait_for_cluster  # noqa: E402
 def _profile(raw: Any, role: str) -> dict[str, int]:
     profile = {key: int(value) for key, value in dict(raw).items()}
     missing = set(PROFILE_FIELDS) - profile.keys()
-    if profile.get("initial_install_profile_version") != 2 or missing:
+    if profile.get("initial_install_profile_version") != 3 or missing:
         raise RuntimeError(
             f"{role}: initial installation counters unavailable; rebuild Ray "
             f"and check the imported ray._raylet binary. Missing: {sorted(missing)}"
@@ -388,8 +388,8 @@ def report(results: list[dict[str, Any]], output_dir: Path) -> None:
     _write_json(output_dir / "initial_install_profiles.json", results)
     print("\nInterpretation:")
     print("  Fixed-R installs full recipes on witnesses; Succession installs on borrowers.")
-    print("  K=1 Succession uses TaskSpec piggybacks; full K=2 groups can piggyback recipes.")
-    print("  K=2 admission can mix verified recipe piggybacks and ordinary install fallback.")
+    print("  K=1 Succession uses TaskSpec piggybacks; full K>1 groups can piggyback recipes.")
+    print("  Frontier admission can mix verified recipe piggybacks and ordinary install fallback.")
     print("  Piggyback recipe-build timing includes recipe serialization, not the later PushTask envelope.")
     print("  Encoding, callbacks, handler work and admission latencies overlap; do not sum them.")
     print("  Elapsed service includes lock waits/preemption; it is not process/thread CPU.")

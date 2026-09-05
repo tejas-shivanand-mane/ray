@@ -604,10 +604,10 @@ class RecoverySuccessionManager {
            recovery_frontier_group_size_config_ > 1;
   }
 
-  // Deliberately limited to the full K=2 initial-install experiment.
+  // Full initial groups can carry provisional recipes on owner exports.
+  // R=2 and ordinary witness-backed admission remain mandatory.
   bool InitialFrontierPiggybackEnabledCached() const {
     return AdaptiveRecoveryFrontierEnabledCached() &&
-           recovery_frontier_group_size_config_ == 2 &&
            recovery_succession_target_holder_count_config_ == 2 &&
            !recovery_succession_certificate_admission_enabled_config_;
   }

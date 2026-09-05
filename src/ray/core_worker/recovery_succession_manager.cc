@@ -1778,11 +1778,14 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   if (frontier_group_admission && InitialFrontierPiggybackEnabledCached() &&
       request.already_stores_task_spec() && frontier_install_batch.has_value()) {
     const auto &batch = frontier_install_batch.value();
-    bool matches = batch.begin_member_index == 0 && batch.end_member_index == 2 &&
-                   batch.members.size() == 2 &&
+    const uint32_t member_count = recovery_frontier_group_size_config_;
+    bool matches = batch.begin_member_index == 0 &&
+                   batch.end_member_index == member_count &&
+                   batch.members.size() == member_count &&
                    request.stored_frontier_generation() == batch.generation &&
-                   request.stored_frontier_member_ids_size() == 2;
-    for (int i = 0; matches && i < 2; ++i) {
+                   static_cast<uint32_t>(request.stored_frontier_member_ids_size()) ==
+                       member_count;
+    for (int i = 0; matches && i < request.stored_frontier_member_ids_size(); ++i) {
       matches = request.stored_frontier_member_ids(i) ==
                 batch.members[i].task_id.Binary();
     }
@@ -1897,11 +1900,13 @@ bool RecoverySuccessionManager::StoreInitialFrontierPiggybackLocked(
   if (!snapshot.ParseFromString(serialized_snapshot)) {
     return false;
   }
+  const uint32_t member_count = recovery_frontier_group_size_config_;
   if (snapshot.group_id().size() != TaskID::Size() ||
       snapshot.group_id() != manifest.task_id() ||
       snapshot.base_generation() != 0 || snapshot.generation() != 1 ||
-      snapshot.begin_member_index() != 0 || snapshot.end_member_index() != 2 ||
-      snapshot.members_size() != 2 ||
+      snapshot.begin_member_index() != 0 ||
+      snapshot.end_member_index() != member_count ||
+      static_cast<uint32_t>(snapshot.members_size()) != member_count ||
       snapshot.members(0).task_id() != snapshot.group_id() ||
       manifest.tombstoned() || manifest.frozen() ||
       manifest.target_holder_count() != 2 || manifest.witness_count() != 2 ||
@@ -1955,7 +1960,7 @@ bool RecoverySuccessionManager::StoreInitialFrontierPiggybackLocked(
     return true;
   }
   const auto *group = recovery_frontier_planner_->GetGroup(group_id);
-  RAY_CHECK(group != nullptr && group->MemberCount() == 2);
+  RAY_CHECK(group != nullptr && group->MemberCount() == member_count);
   recovery_frontier_protection_manifests_[group_id].CopyFrom(manifest);
 
   const auto materialize_start =
@@ -1977,7 +1982,7 @@ bool RecoverySuccessionManager::StoreInitialFrontierPiggybackLocked(
   }
   if (profiling_enabled_) {
     ++profile_.frontier_holder_materialize_calls;
-    profile_.frontier_holder_materialize_members += 2;
+    profile_.frontier_holder_materialize_members += member_count;
     profile_.frontier_holder_materialize_time_ns +=
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - materialize_start).count();
@@ -2747,14 +2752,15 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
       // No send quota: repeated exports to one worker cannot consume another
       // failure domain's chance to receive a recipe. Non-leader/partial-group
       // exports keep the existing installation path and never wait for filling.
-      if (group != nullptr && group->Full() && group->MemberCount() == 2 &&
+      if (group != nullptr && group->Full() &&
+          group->MemberCount() == recovery_frontier_group_size_config_ &&
           group->Generation() == 0 && group->CommittedMemberCount() == 0 &&
           owner != nullptr && SameWorker(owner->address(), self_address_) &&
           !source->manifest().tombstoned() && !source->manifest().frozen() &&
           source->manifest().witness_count() == 2 &&
           (initial == adaptive_frontier_initial_append_batches_.end() ||
            (initial->second.begin_member_index == 0 &&
-            initial->second.end_member_index == 2))) {
+            initial->second.end_member_index == group->MemberCount()))) {
         const auto build_start =
             profiling_enabled_ ? std::chrono::steady_clock::now()
                                : std::chrono::steady_clock::time_point{};
@@ -2771,7 +2777,7 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
             profile_.frontier_recipe_piggyback_bytes_sent += bytes;
             ++profile_.frontier_recipe_encode_calls;
             profile_.frontier_recipe_encode_time_ns += build_ns;
-            profile_.frontier_recipe_encode_members += 2;
+            profile_.frontier_recipe_encode_members += group->MemberCount();
             profile_.frontier_recipe_encode_bytes += bytes;
             profile_.task_spec_bytes_sent += bytes;
           }
@@ -2939,8 +2945,10 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
   report.request.set_already_stores_task_spec(already_stores_task_spec);
   if (InitialFrontierPiggybackEnabledCached()) {
     const auto *group = recovery_frontier_planner_->GetGroup(task_id);
-    if (group != nullptr && group->MemberCount() == 2 &&
-        group->CommittedMemberCount() == 2 && group->Generation() == 1) {
+    if (group != nullptr && group->Full() &&
+        group->MemberCount() == recovery_frontier_group_size_config_ &&
+        group->CommittedMemberCount() == group->MemberCount() &&
+        group->Generation() == 1) {
       bool retained = true;
       for (const auto &member : group->Members()) {
         const auto stored = task_states_.find(member.task_id);
