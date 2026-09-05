@@ -276,12 +276,8 @@ bool WriteCompactTaskArgumentRecoveryMetadata(
 // Patch 4H receiver-side expansion. Existing admission, witness confirmation,
 // replay, tombstone, and rollback code continues to consume the ordinary full
 // RecoveryManifest, so the compact representation never escapes this boundary.
-// ObjectReference and TaskSpec sidecar entries expose the same transport fields.
-// K=1 can read a sidecar directly and leave its immutable lineage bytes in the
-// incoming TaskSpec until RegisterExecutorTask parses them.
-template <bool CopyPiggyback = true, typename Reference>
 bool ExpandTaskArgumentRecoveryMetadata(
-    const Reference &object_ref,
+    const rpc::ObjectReference &object_ref,
     rpc::RecoveryObjectMetadata *expanded) {
   if (expanded == nullptr || object_ref.object_id().empty() ||
       !object_ref.has_recovery_metadata()) {
@@ -315,10 +311,8 @@ bool ExpandTaskArgumentRecoveryMetadata(
   expanded->Clear();
   expanded->set_task_id(task_id.Binary());
   expanded->set_return_index(transport.return_index());
-  if constexpr (CopyPiggyback) {
-    if (!transport.first_holder_task_spec().empty()) {
-      expanded->set_first_holder_task_spec(transport.first_holder_task_spec());
-    }
+  if (!transport.first_holder_task_spec().empty()) {
+    expanded->set_first_holder_task_spec(transport.first_holder_task_spec());
   }
 
   rpc::RecoveryManifest *manifest = expanded->mutable_manifest();
@@ -1181,41 +1175,23 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     const rpc::RecoveryTaskArgumentMetadata *entry = nullptr;
   };
 
-  struct ReceivedRecoveryMetadata {
-    ObjectID object_id;
-    rpc::RecoveryObjectMetadata metadata;
-    // Non-owning, used only during this synchronous call. The incoming TaskSpec
-    // is immutable and outlives both receiver loops; manager state never stores
-    // this pointer. Non-K1 and legacy entries retain their copied payload.
-    const std::string *borrowed_piggyback = nullptr;
-  };
-
-  const bool borrow_k1_piggyback =
-      recovery_succession_enabled_config_ &&
-      !recovery_witness_holder_baseline_enabled_config_ &&
-      !recovery_frontier_enabled_config_ &&
-      !recovery_succession_certificate_admission_enabled_config_;
-
   std::vector<DirectCompactDependency> direct_compact_metadata;
-  std::vector<ReceivedRecoveryMetadata> received_metadata;
+  std::vector<std::pair<ObjectID, rpc::RecoveryObjectMetadata>> received_metadata;
   absl::flat_hash_set<ObjectID> received_object_ids;
 
   auto append_metadata = [&received_metadata, &received_object_ids](
                              const ObjectID &object_id,
-                             rpc::RecoveryObjectMetadata metadata,
-                             const std::string *borrowed_piggyback = nullptr) {
+                             rpc::RecoveryObjectMetadata metadata) {
     if (!received_object_ids.insert(object_id).second) {
       return;
     }
-    received_metadata.push_back(
-        {object_id, std::move(metadata), borrowed_piggyback});
+    received_metadata.emplace_back(object_id, std::move(metadata));
   };
 
   // Patch 4I primary path: one TaskSpec-level sidecar per unique dependency.
   // Compact adaptive-Succession entries stay compact here. Fixed-R, full or
   // legacy metadata, Patch-4F payloads, and malformed compact entries retain
-  // compatibility processing below. K=1 borrows compact Patch-4F payload bytes
-  // while expanding the same metadata shape, without a synthetic reference.
+  // the compatibility expansion below.
   for (const rpc::RecoveryTaskArgumentMetadata &entry :
        task_spec.recovery_argument_metadata()) {
     if (entry.object_id().size() != ObjectID::Size()) {
@@ -1274,17 +1250,6 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     }
 
     rpc::RecoveryObjectMetadata metadata;
-    const auto &transport = entry.recovery_metadata();
-    if (borrow_k1_piggyback && transport.has_compact_manifest() &&
-        !transport.first_holder_task_spec().empty() &&
-        !(transport.has_manifest() && !transport.task_id().empty())) {
-      if (!ExpandTaskArgumentRecoveryMetadata<false>(entry, &metadata)) {
-        continue;
-      }
-      append_metadata(
-          object_id, std::move(metadata), &transport.first_holder_task_spec());
-      continue;
-    }
     if (!ExpandTaskSidecarRecoveryMetadata(entry, &metadata)) {
       continue;
     }
@@ -1430,15 +1395,12 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
 
   // Compatibility path for Fixed-R, legacy/full transport, Patch-4F payloads,
   // and any compact sidecar that could not use the direct adaptive path.
-  for (const auto &[object_id, metadata, borrowed_piggyback] : received_metadata) {
-    const std::string &piggyback_bytes =
-        borrowed_piggyback != nullptr ? *borrowed_piggyback
-                                     : metadata.first_holder_task_spec();
+  for (const auto &[object_id, metadata] : received_metadata) {
     TaskID frontier_group_id;
     const bool frontier_member =
         AdaptiveRecoveryFrontierEnabledCached() &&
         recovery_succession_internal::ParseFrontierSuccessionMemberMarker(
-            piggyback_bytes, &frontier_group_id);
+            metadata.first_holder_task_spec(), &frontier_group_id);
 
     // Parse the Patch-4F transport sidecar before normal metadata selection.
     // A Frontier membership marker occupies the same transport-only field but
@@ -1446,9 +1408,9 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     rpc::TaskSpec piggyback_task_spec;
     bool valid_piggyback = false;
 
-    if (!piggyback_bytes.empty() && !frontier_member) {
+    if (!metadata.first_holder_task_spec().empty() && !frontier_member) {
       valid_piggyback =
-          piggyback_task_spec.ParseFromString(piggyback_bytes) &&
+          piggyback_task_spec.ParseFromString(metadata.first_holder_task_spec()) &&
           !piggyback_task_spec.task_id().empty() &&
           piggyback_task_spec.task_id() == metadata.task_id() &&
           IsEligibleTask(piggyback_task_spec);
@@ -1549,8 +1511,8 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     }
   }
 
-  for (const auto &received : received_metadata) {
-    const auto &metadata = received.metadata;
+  for (const auto &[object_id, metadata] : received_metadata) {
+    static_cast<void>(object_id);
 
     const TaskID metadata_task_id = TaskID::FromBinary(metadata.task_id());
     rpc::RecoveryManifest candidate_manifest;
