@@ -36,8 +36,9 @@ bool CanShareRecoveryFrontierReplayRecipe(const rpc::TaskSpec &task_spec) {
   // one is present instead of mutating the shared source TaskSpec.
   for (const rpc::RecoveryTaskArgumentMetadata &entry :
        task_spec.recovery_argument_metadata()) {
-    if (entry.has_recovery_metadata() &&
-        !entry.recovery_metadata().first_holder_task_spec().empty()) {
+    if (entry.has_initial_frontier_recipe() ||
+        (entry.has_recovery_metadata() &&
+         !entry.recovery_metadata().first_holder_task_spec().empty())) {
       return false;
     }
   }
@@ -51,6 +52,7 @@ std::shared_ptr<const rpc::TaskSpec> MakeSanitizedRecoveryFrontierReplayRecipe(
   stored_task_spec->clear_recovery_manifest();
   for (rpc::RecoveryTaskArgumentMetadata &entry :
        *stored_task_spec->mutable_recovery_argument_metadata()) {
+    entry.clear_initial_frontier_recipe();
     if (entry.has_recovery_metadata()) {
       entry.mutable_recovery_metadata()->clear_first_holder_task_spec();
     }

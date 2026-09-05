@@ -23,9 +23,14 @@ Target semantics (R=2, K=4):
 
 A recovery-only pass is NOT sufficient: the benchmark must also prove the
 shared Frontier Succession topology via exactly R holder admissions.
+
+Use --initial-k2-piggyback for R=2/W=2/K=2. This additionally repeats an
+export to the first borrower and requires two verified recipe-piggyback
+admissions with zero separate holder-install RPCs before killing the owner.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import tempfile
 import time
@@ -145,6 +150,7 @@ def types():
             marker_path: str,
             payload_bytes: int,
             borrowers,
+            duplicate_first_borrower: bool = False,
         ):
             strategy = NodeAffinitySchedulingStrategy(
                 node_id=executor_node_id,
@@ -161,6 +167,10 @@ def types():
             # Succession candidate formation happens at downstream CoreWorkers.
             # Submit these actor calls FROM THE OWNER so recovery metadata for
             # the producer refs is attached by the producer owner's manager.
+            if duplicate_first_borrower:
+                # The first two exports go to the same worker. They must not
+                # consume another independent holder's recipe opportunity.
+                ray.get(borrowers[0].hold.remote(refs), timeout=GET_TIMEOUT_S)
             held_ids = ray.get(
                 [borrower.hold.remote(refs) for borrower in borrowers]
             )
@@ -261,6 +271,17 @@ def wait_for_protection_quiescence(owner, borrowers, timeout_s: float) -> dict:
 
 
 def main() -> None:
+    global K
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--initial-k2-piggyback", action="store_true",
+        help="Require the initial full K=2 recipe piggyback path with R=2/W=2",
+    )
+    args = parser.parse_args()
+    if args.initial_k2_piggyback:
+        K = 2
+        os.environ["RAY_RECOVERY_CERTIFICATE_ADMISSION"] = "0"
+        os.environ["RAY_RECOVERY_TASKMANAGER_PIN"] = "0"
     cluster = None
     marker = Path(tempfile.gettempdir()) / (
         f"ray_frontier_succession_nonleader_node_failure_{uuid.uuid4().hex}.csv"
@@ -330,6 +351,7 @@ def main() -> None:
                 str(marker),
                 PAYLOAD_BYTES,
                 borrowers,
+                args.initial_k2_piggyback,
             )
         )
         assert len(object_ids) == NUM_TASKS
@@ -367,6 +389,11 @@ def main() -> None:
             profile,
         )
         assert max_holders == R, profile
+        if args.initial_k2_piggyback:
+            assert profile.get("initial_install_profile_version") == 2, profile
+            assert int(profile.get("frontier_recipe_piggyback_admissions", 0)) == R, profile
+            assert int(profile.get("holder_install_rpcs_sent", 0)) == 0, profile
+            assert int(profile.get("holder_install_rpcs_completed", 0)) == 0, profile
 
         failure_wall_ns = time.time_ns()
         failure_start = time.perf_counter()
@@ -402,6 +429,9 @@ def main() -> None:
         print("PASS: Recovery Frontier + Succession non-leader owner-node failure")
         print(f"  R                         = {R}")
         print(f"  K                         = {K}")
+        if args.initial_k2_piggyback:
+            print("  W                         = 2")
+            print("  verified recipe piggybacks = 2; separate install RPCs = 0")
         print(f"  initial manifest builds   = {initial_manifest_builds}")
         print(f"  candidate reports recv    = {reports_received}")
         print(f"  candidate reports accept  = {reports_accepted}")

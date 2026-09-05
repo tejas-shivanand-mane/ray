@@ -477,8 +477,16 @@ message ReportRecoveryCandidateRequest {
 
   // True when the candidate already has the full producer TaskSpec.
   // Patch 4F sets this only after a downstream borrower consumes the
-  // transport-only first_holder_task_spec sidecar.
+  // transport-only first_holder_task_spec sidecar. For Frontier groups this
+  // also requires the matching stored-prefix fields below; the bool alone
+  // cannot bypass group installation.
   bool already_stores_task_spec = 4;
+
+  // A Frontier candidate may skip installation only after retaining every
+  // member of this exact initial prefix. The owner matches both generation
+  // and ordered TaskIDs against its frozen initial admission batch.
+  uint64 stored_frontier_generation = 5;
+  repeated bytes stored_frontier_member_ids = 6;
 }
 
 message ReportRecoveryCandidateReply {

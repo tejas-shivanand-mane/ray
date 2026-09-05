@@ -31,9 +31,14 @@ not enough: before owner failure we additionally require one candidate report
 for the two Frontier members, a completed provisional holder install and
 witness publication, zero owner-side committed admissions, and zero candidate
 commit RPCs.
+
+Use --initial-k2-piggyback to exercise R=2/W=2/K=2 with two independent
+witness nodes. In that mode the one in-progress H1 admission must have stored
+both recipes through the owner export, with zero holder-install RPCs.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import tempfile
 import time
@@ -254,6 +259,18 @@ def wait_for_profile(
 
 
 def main() -> None:
+    global K, WITNESS_COUNT
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--initial-k2-piggyback", action="store_true",
+        help="Require the initial full K=2 recipe piggyback path with R=2/W=2",
+    )
+    args = parser.parse_args()
+    if args.initial_k2_piggyback:
+        K = 2
+        WITNESS_COUNT = 2
+        os.environ["RAY_RECOVERY_CERTIFICATE_ADMISSION"] = "0"
+        os.environ["RAY_RECOVERY_TASKMANAGER_PIN"] = "0"
     cluster = None
     marker = Path(tempfile.gettempdir()) / (
         f"ray_frontier_succession_commit_gap_{uuid.uuid4().hex}.csv"
@@ -279,12 +296,19 @@ def main() -> None:
             resources={"holder_node": 1},
         )
 
+        if args.initial_k2_piggyback:
+            # Keep both actual witnesses outside the owner and holder nodes.
+            for i in range(WITNESS_COUNT):
+                cluster.add_node(num_cpus=0, resources={f"witness_node_{i}": 1})
+
         ray.init(
             address=cluster.address,
             log_to_driver=False,
             include_dashboard=False,
         )
-        wait_for_cluster(ray, 4, 30.0)
+        wait_for_cluster(
+            ray, 4 + (WITNESS_COUNT if args.initial_k2_piggyback else 0), 30.0
+        )
         sessions = session_dirs(cluster)
 
         Owner, HolderBorrower = types()
@@ -341,7 +365,11 @@ def main() -> None:
             owner,
             lambda p: (
                 int(p.get("candidate_reports_received", 0)) >= 1
-                and int(p.get("holder_install_rpcs_completed", 0)) >= 1
+                and (
+                    int(p.get("frontier_recipe_piggyback_admissions", 0)) >= 1
+                    if args.initial_k2_piggyback
+                    else int(p.get("holder_install_rpcs_completed", 0)) >= 1
+                )
                 and int(p.get("witness_update_rpcs_completed", 0)) >= WITNESS_COUNT
             ),
             PROFILE_TIMEOUT_S,
@@ -362,8 +390,16 @@ def main() -> None:
         # arrived at one borrower, but only one group candidate was reported.
         assert reports_received == 1, profile
         assert reports_accepted == 1, profile
-        assert install_sent == 1, profile
-        assert install_completed == 1, profile
+        if args.initial_k2_piggyback:
+            assert profile.get("initial_install_profile_version") == 2, profile
+            assert int(profile.get("frontier_recipe_piggyback_admissions", 0)) == 1, profile
+            assert install_sent == 0 and install_completed == 0, profile
+            holder_profile = ray.get(holder.recovery_profile.remote(), timeout=PROFILE_TIMEOUT_S)
+            assert int(holder_profile.get("frontier_recipe_piggybacks_stored", 0)) == 1, holder_profile
+            assert int(holder_profile.get("frontier_holder_materialize_members", 0)) == 2, holder_profile
+        else:
+            assert install_sent == 1, profile
+            assert install_completed == 1, profile
 
         # Decisive crash-window assertions.  The holder has its provisional
         # replay snapshot and witnesses are durable, but normal commit has NOT
@@ -420,6 +456,9 @@ def main() -> None:
         print("PASS: Recovery Frontier + Succession witness-ACK commit-gap recovery")
         print(f"  R                         = {R}")
         print(f"  K                         = {K}")
+        print(f"  W                         = {WITNESS_COUNT}")
+        if args.initial_k2_piggyback:
+            print("  provisional recipe piggybacks = 1; separate install RPCs = 0")
         print(f"  candidate reports recv    = {reports_received}")
         print(f"  candidate reports accept  = {reports_accepted}")
         print(f"  holder install            = {install_sent}/{install_completed}")

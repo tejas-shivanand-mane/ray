@@ -212,6 +212,7 @@ void ClearFirstHolderTaskSpecPiggybacks(rpc::TaskSpec *task_spec) {
   // full-lineage piggyback is transport-only and must be stripped.
   for (rpc::RecoveryTaskArgumentMetadata &entry :
        *task_spec->mutable_recovery_argument_metadata()) {
+    entry.clear_initial_frontier_recipe();
     if (entry.has_recovery_metadata()) {
       entry.mutable_recovery_metadata()->clear_first_holder_task_spec();
     }
@@ -1371,6 +1372,12 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
     }
 
     if (dependency.frontier_member) {
+      if (dependency.task_id == dependency.group_id &&
+          entry.has_initial_frontier_recipe()) {
+        StoreInitialFrontierPiggybackLocked(
+            entry.initial_frontier_recipe(), incoming_manifest,
+            task_spec.caller_address());
+      }
       // Candidate admission is group-centric. Once this borrower has reported
       // the group, later members skip candidate-manifest construction entirely.
       if (!candidate_reports_sent_.contains(dependency.group_id)) {
@@ -1768,6 +1775,22 @@ RecoverySuccessionManager::PrepareHolderAdmission(
   plan->candidate_address.CopyFrom(candidate_address);
   plan->candidate_already_stores_task_spec =
       frontier_group_admission ? false : request.already_stores_task_spec();
+  if (frontier_group_admission && InitialFrontierPiggybackEnabledCached() &&
+      request.already_stores_task_spec() && frontier_install_batch.has_value()) {
+    const auto &batch = frontier_install_batch.value();
+    bool matches = batch.begin_member_index == 0 && batch.end_member_index == 2 &&
+                   batch.members.size() == 2 &&
+                   request.stored_frontier_generation() == batch.generation &&
+                   request.stored_frontier_member_ids_size() == 2;
+    for (int i = 0; matches && i < 2; ++i) {
+      matches = request.stored_frontier_member_ids(i) ==
+                batch.members[i].task_id.Binary();
+    }
+    plan->candidate_already_stores_task_spec = matches;
+    if (matches && profiling_enabled_) {
+      ++profile_.frontier_recipe_piggyback_admissions;
+    }
+  }
 
   if (!plan->candidate_already_stores_task_spec) {
     const rpc::TaskSpec *lineage_task_spec = nullptr;
@@ -1776,6 +1799,14 @@ RecoverySuccessionManager::PrepareHolderAdmission(
       lineage_task_spec = &task_it->second.task_spec.value();
     } else if (owner_task_spec != nullptr) {
       lineage_task_spec = owner_task_spec;
+    } else if (frontier_group_admission && InitialFrontierPiggybackEnabledCached()) {
+      // A missing/mismatched storage proof takes the ordinary install path.
+      // The planner still owns the leader recipe even when CoreWorker skipped
+      // a TaskManager lookup because the request claimed local storage.
+      const auto *group = recovery_frontier_planner_->GetGroup(task_id);
+      if (group != nullptr && !group->Members().empty()) {
+        lineage_task_spec = group->Members().front().task_spec.get();
+      }
     } else {
       // Patch 4L: TaskManager may have legitimately dropped ordinary lineage
       // while the application still owns a return ObjectRef.
@@ -1815,7 +1846,7 @@ RecoverySuccessionManager::PrepareHolderAdmission(
     }
   }
 
-  if (frontier_group_admission) {
+  if (frontier_group_admission && !plan->candidate_already_stores_task_spec) {
     const RecoveryFrontierGroup *group =
         recovery_frontier_planner_->GetGroup(task_id);
     RAY_CHECK(group != nullptr);
@@ -1850,6 +1881,106 @@ RecoverySuccessionManager::PrepareHolderAdmission(
 
   plan->proposed_manifest.CopyFrom(proposed_manifest);
   return rpc::ReportRecoveryCandidateReply::ACCEPTED;
+}
+
+bool RecoverySuccessionManager::StoreInitialFrontierPiggybackLocked(
+    const rpc::RecoveryFrontierAppend &snapshot,
+    const rpc::RecoveryManifest &manifest,
+    const rpc::Address &sender) {
+  if (!InitialFrontierPiggybackEnabledCached() ||
+      snapshot.group_id().size() != TaskID::Size() ||
+      snapshot.group_id() != manifest.task_id() ||
+      snapshot.base_generation() != 0 || snapshot.generation() != 1 ||
+      snapshot.begin_member_index() != 0 || snapshot.end_member_index() != 2 ||
+      snapshot.members_size() != 2 ||
+      snapshot.members(0).task_id() != snapshot.group_id() ||
+      manifest.tombstoned() || manifest.frozen() ||
+      manifest.target_holder_count() != 2 || manifest.witness_count() != 2 ||
+      ContainsWorker(manifest, self_address_)) {
+    return false;
+  }
+  const auto *owner = FindHolderByRank(manifest, 0);
+  if (owner == nullptr || !SameWorker(owner->address(), sender) ||
+      SameWorker(owner->address(), self_address_) ||
+      owner->address().node_id() == self_address_.node_id()) {
+    return false;
+  }
+
+  const auto store_start =
+      profiling_enabled_ ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{};
+  const TaskID group_id = TaskID::FromBinary(snapshot.group_id());
+  bool already_provisional = true;
+  // Validate every member before installing anything. Never replace a
+  // tombstone, a newer view, or an RPC-installed/confirmed holder with a
+  // provisional payload from an older in-flight PushTask.
+  for (const auto &record : snapshot.members()) {
+    if (record.task_id().size() != TaskID::Size() ||
+        !record.has_task_spec() ||
+        record.task_spec().task_id() != record.task_id() ||
+        !IsEligibleTask(record.task_spec()) ||
+        !SameWorker(record.task_spec().caller_address(), owner->address())) {
+      return false;
+    }
+    const auto existing = task_states_.find(TaskID::FromBinary(record.task_id()));
+    if (existing == task_states_.end()) {
+      already_provisional = false;
+      continue;
+    }
+    const auto &state = existing->second;
+    if (state.manifest.tombstoned() ||
+        CompareManifestVersions(state.manifest, manifest) > 0 ||
+        (state.task_spec.has_value() &&
+         (state.manifest_committed || !state.provisional_piggyback_task_spec ||
+          !state.provisional_reservation_id.empty()))) {
+      return false;
+    }
+    already_provisional = already_provisional && state.task_spec.has_value() &&
+                          state.provisional_piggyback_task_spec;
+  }
+
+  // This is the same recipe-import primitive used by InstallRecoveryHolder.
+  // Its planner prefix means locally stored recipes, not holder durability:
+  // every task state below remains provisional and uses the witness check.
+  if (!recovery_frontier_planner_->ApplyCommittedAppend(snapshot)) {
+    return false;
+  }
+  if (already_provisional) {
+    return true;
+  }
+  const auto *group = recovery_frontier_planner_->GetGroup(group_id);
+  RAY_CHECK(group != nullptr && group->MemberCount() == 2);
+  recovery_frontier_protection_manifests_[group_id].CopyFrom(manifest);
+
+  const auto materialize_start =
+      profiling_enabled_ ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{};
+  for (const auto &member : group->Members()) {
+    auto member_manifest =
+        recovery_succession_internal::BuildFrontierMemberManifest(manifest, member);
+    rpc::TaskSpec stored_task_spec;
+    stored_task_spec.CopyFrom(*member.task_spec);
+    ClearFirstHolderTaskSpecPiggybacks(&stored_task_spec);
+    stored_task_spec.mutable_recovery_manifest()->CopyFrom(member_manifest);
+    auto &state = task_states_[member.task_id];
+    state.manifest.CopyFrom(member_manifest);
+    state.task_spec = std::move(stored_task_spec);
+    state.manifest_committed = false;
+    state.provisional_reservation_id.clear();
+    state.provisional_piggyback_task_spec = true;
+  }
+  if (profiling_enabled_) {
+    ++profile_.frontier_holder_materialize_calls;
+    profile_.frontier_holder_materialize_members += 2;
+    profile_.frontier_holder_materialize_time_ns +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - materialize_start).count();
+    ++profile_.frontier_recipe_piggybacks_stored;
+    profile_.frontier_recipe_piggyback_store_time_ns +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - store_start).count();
+  }
+  return true;
 }
 
 bool RecoverySuccessionManager::InstallRecoveryHolder(
@@ -1891,6 +2022,12 @@ bool RecoverySuccessionManager::InstallRecoveryHolder(
   absl::MutexLock lock(&mutex_);
 
   if (carries_frontier_snapshot && AdaptiveRecoveryFrontierEnabledCached()) {
+    if (InitialFrontierPiggybackEnabledCached()) {
+      const auto terminal = task_states_.find(task_id);
+      if (terminal != task_states_.end() && terminal->second.manifest.tombstoned()) {
+        return false;
+      }
+    }
     if (frontier_snapshot.group_id() != request.task_id() ||
         recovery_frontier_planner_ == nullptr ||
         !recovery_frontier_planner_->ApplyCommittedAppend(frontier_snapshot)) {
@@ -2251,6 +2388,13 @@ bool RecoverySuccessionManager::ApplyCommittedManifest(
   const TaskID task_id = TaskID::FromBinary(manifest.task_id());
   absl::MutexLock lock(&mutex_);
 
+  if (InitialFrontierPiggybackEnabledCached() && !manifest.tombstoned()) {
+    const auto terminal = task_states_.find(task_id);
+    if (terminal != task_states_.end() && terminal->second.manifest.tombstoned()) {
+      return false;
+    }
+  }
+
   const bool frontier_group_manifest =
       AdaptiveRecoveryFrontierEnabledCached() &&
       recovery_frontier_planner_->GetGroup(task_id) != nullptr;
@@ -2589,6 +2733,46 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
       out->clear_compact_manifest();
     }
 
+    if (InitialFrontierPiggybackEnabledCached() && compact_transport) {
+      const TaskID group_id = object_id.TaskId();
+      const auto *group = recovery_frontier_planner_->GetGroup(group_id);
+      const auto *owner = FindHolderByRank(source->manifest(), 0);
+      const auto initial = adaptive_frontier_initial_append_batches_.find(group_id);
+      // No send quota: repeated exports to one worker cannot consume another
+      // failure domain's chance to receive a recipe. Non-leader/partial-group
+      // exports keep the existing installation path and never wait for filling.
+      if (group != nullptr && group->Full() && group->MemberCount() == 2 &&
+          group->Generation() == 0 && group->CommittedMemberCount() == 0 &&
+          owner != nullptr && SameWorker(owner->address(), self_address_) &&
+          !source->manifest().tombstoned() && !source->manifest().frozen() &&
+          source->manifest().witness_count() == 2 &&
+          (initial == adaptive_frontier_initial_append_batches_.end() ||
+           (initial->second.begin_member_index == 0 &&
+            initial->second.end_member_index == 2))) {
+        const auto build_start =
+            profiling_enabled_ ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
+        if (recovery_succession_internal::BuildFrontierSuccessionSnapshot(
+                *group, entry->mutable_initial_frontier_recipe())) {
+          if (profiling_enabled_) {
+            const uint64_t build_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - build_start).count();
+            const uint64_t bytes = entry->initial_frontier_recipe().ByteSizeLong();
+            ++profile_.frontier_recipe_piggybacks_sent;
+            profile_.frontier_recipe_piggyback_bytes_sent += bytes;
+            ++profile_.frontier_recipe_encode_calls;
+            profile_.frontier_recipe_encode_time_ns += build_ns;
+            profile_.frontier_recipe_encode_members += 2;
+            profile_.frontier_recipe_encode_bytes += bytes;
+            profile_.task_spec_bytes_sent += bytes;
+          }
+        } else {
+          entry->clear_initial_frontier_recipe();
+        }
+      }
+    }
+
     // Ordinary adaptive K=1 holder fast path. Lazy activation staged one
     // sanitized producer TaskSpec in the existing task state. The first two
     // downstream metadata builds may transport it in the already-supported
@@ -2745,6 +2929,32 @@ void RecoverySuccessionManager::MaybeAddCandidateReportLocked(
   report.request.mutable_candidate_address()->CopyFrom(self_address_);
   report.request.mutable_cached_manifest()->CopyFrom(*effective_manifest);
   report.request.set_already_stores_task_spec(already_stores_task_spec);
+  if (InitialFrontierPiggybackEnabledCached()) {
+    const auto *group = recovery_frontier_planner_->GetGroup(task_id);
+    if (group != nullptr && group->MemberCount() == 2 &&
+        group->CommittedMemberCount() == 2 && group->Generation() == 1) {
+      bool retained = true;
+      for (const auto &member : group->Members()) {
+        const auto stored = task_states_.find(member.task_id);
+        if (stored == task_states_.end() ||
+            !stored->second.task_spec.has_value() ||
+            stored->second.task_spec->task_id() != member.task_id.Binary() ||
+            stored->second.manifest.tombstoned() ||
+            !stored->second.provisional_piggyback_task_spec ||
+            stored->second.manifest_committed) {
+          retained = false;
+          break;
+        }
+      }
+      if (retained) {
+        report.request.set_already_stores_task_spec(true);
+        report.request.set_stored_frontier_generation(group->Generation());
+        for (const auto &member : group->Members()) {
+          report.request.add_stored_frontier_member_ids(member.task_id.Binary());
+        }
+      }
+    }
+  }
 
   reports->push_back(std::move(report));
 
@@ -3289,9 +3499,18 @@ bool RecoverySuccessionManager::ApplyRecoveryTombstone(
         owner_retained_tasks_.erase(member_task_id);
       }
 
+      const bool keep_terminal_marker =
+          InitialFrontierPiggybackEnabledCached() && group->Full();
       candidate_reports_sent_.erase(task_id);
       recovery_frontier_protection_manifests_.erase(protection_it);
       RAY_CHECK(recovery_frontier_planner_->EraseGroup(task_id));
+      if (keep_terminal_marker) {
+        // A delayed owner-to-borrower recipe must not recreate this group.
+        // Retain only the leader tombstone, not any member replay recipes.
+        auto &terminal = task_states_[task_id];
+        terminal.manifest.CopyFrom(tombstone);
+        terminal.manifest_committed = true;
+      }
       return true;
     }
   }

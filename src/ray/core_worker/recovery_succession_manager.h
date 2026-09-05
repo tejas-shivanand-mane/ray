@@ -124,6 +124,11 @@ class RecoverySuccessionManager {
     uint64_t frontier_holder_materialize_members = 0;
     uint64_t holder_install_callback_calls = 0;
     uint64_t holder_install_callback_time_ns = 0;
+    uint64_t frontier_recipe_piggybacks_sent = 0;
+    uint64_t frontier_recipe_piggyback_bytes_sent = 0;
+    uint64_t frontier_recipe_piggybacks_stored = 0;
+    uint64_t frontier_recipe_piggyback_store_time_ns = 0;
+    uint64_t frontier_recipe_piggyback_admissions = 0;
 
     // Opportunistic H2 readiness sampled at the instant ordinary K=1 H1
     // begins witness publication. This does not delay H1.
@@ -598,6 +603,20 @@ class RecoverySuccessionManager {
            recovery_frontier_enabled_config_ &&
            recovery_frontier_group_size_config_ > 1;
   }
+
+  // Deliberately limited to the full K=2 initial-install experiment.
+  bool InitialFrontierPiggybackEnabledCached() const {
+    return AdaptiveRecoveryFrontierEnabledCached() &&
+           recovery_frontier_group_size_config_ == 2 &&
+           recovery_succession_target_holder_count_config_ == 2 &&
+           !recovery_succession_certificate_admission_enabled_config_;
+  }
+
+  bool StoreInitialFrontierPiggybackLocked(
+      const rpc::RecoveryFrontierAppend &snapshot,
+      const rpc::RecoveryManifest &manifest,
+      const rpc::Address &sender)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   /// If object_id is a member appended after the adaptive H1..HR topology was
   /// established, synchronously publish the next contiguous recipe suffix and

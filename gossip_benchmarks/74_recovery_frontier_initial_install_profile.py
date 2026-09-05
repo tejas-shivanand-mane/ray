@@ -52,6 +52,11 @@ PROFILE_FIELDS = (
     "frontier_holder_materialize_members",
     "holder_install_callback_calls",
     "holder_install_callback_time_ns",
+    "frontier_recipe_piggybacks_sent",
+    "frontier_recipe_piggyback_bytes_sent",
+    "frontier_recipe_piggybacks_stored",
+    "frontier_recipe_piggyback_store_time_ns",
+    "frontier_recipe_piggyback_admissions",
 )
 
 
@@ -78,7 +83,7 @@ from _benchmark_common import safe_shutdown, wait_for_cluster  # noqa: E402
 def _profile(raw: Any, role: str) -> dict[str, int]:
     profile = {key: int(value) for key, value in dict(raw).items()}
     missing = set(PROFILE_FIELDS) - profile.keys()
-    if profile.get("initial_install_profile_version") != 1 or missing:
+    if profile.get("initial_install_profile_version") != 2 or missing:
         raise RuntimeError(
             f"{role}: initial installation counters unavailable; rebuild Ray "
             f"and check the imported ray._raylet binary. Missing: {sorted(missing)}"
@@ -119,11 +124,11 @@ def _coverage_errors(result: dict[str, Any]) -> list[str]:
         "holder_admissions_committed": 2 * groups if adaptive else 0,
         "witness_update_rpcs_completed": (4 if adaptive else 2) * groups,
     }
-    if k > 1:
-        expected["holder_install_rpcs_completed"] = 2 * groups if adaptive else 0
-        expected["frontier_recipe_encode_calls"] = (2 if adaptive else 1) * groups
-        expected["frontier_recipe_encode_members"] = (2 if adaptive else 1) * result["tasks"]
-    else:
+    if k > 1 and not adaptive:
+        expected["holder_install_rpcs_completed"] = 0
+        expected["frontier_recipe_encode_calls"] = groups
+        expected["frontier_recipe_encode_members"] = result["tasks"]
+    elif k == 1:
         expected["frontier_recipe_encode_calls"] = 0
     errors = [
         f"owner {key}: expected {value}, got {owner[key]}"
@@ -136,10 +141,22 @@ def _coverage_errors(result: dict[str, Any]) -> list[str]:
     if owner["holder_install_callback_calls"] != installs:
         errors.append("owner install-callback coverage does not match completions")
     if adaptive and k > 1:
-        if borrowers["frontier_holder_materialize_calls"] != installs:
-            errors.append("Frontier materialization coverage does not match installs")
-        if borrowers["frontier_holder_materialize_members"] != 2 * result["tasks"]:
-            errors.append("Frontier materialized member count does not match R=2")
+        piggyback_admissions = owner["frontier_recipe_piggyback_admissions"]
+        piggyback_stores = borrowers["frontier_recipe_piggybacks_stored"]
+        if installs + piggyback_admissions != 2 * groups:
+            errors.append("RPC installs plus verified piggyback admissions do not match R=2")
+        if piggyback_admissions > piggyback_stores:
+            errors.append("more piggyback admissions than receiver storage events")
+        materializations = installs + piggyback_stores
+        if borrowers["frontier_holder_materialize_calls"] != materializations:
+            errors.append("materialization coverage does not match RPC and piggyback stores")
+        if borrowers["frontier_holder_materialize_members"] != k * materializations:
+            errors.append("materialized member count does not match the measured stores")
+        builds = installs + owner["frontier_recipe_piggybacks_sent"]
+        if owner["frontier_recipe_encode_calls"] != builds:
+            errors.append("recipe build count does not match sends and fallback installs")
+        if owner["frontier_recipe_encode_members"] != k * builds:
+            errors.append("recipe build member count does not match full groups")
     if owner["witness_update_handler_samples"] != owner["witness_update_rpcs_completed"]:
         errors.append(
             "witness receiver timing coverage is incomplete; rebuild the raylet "
@@ -301,6 +318,7 @@ STAGES = (
     ("owner", "K=1 piggyback serialization", "first_holder_piggyback_serialize_time_ns", "first_holder_piggyback_copies_sent"),
     ("owner", "Frontier recipe build/encode", "frontier_recipe_encode_time_ns", "frontier_recipe_encode_calls"),
     ("owner", "owner admission preparation", "holder_admission_prepare_cpu_time_ns", "holder_admission_prepare_cpu_calls"),
+    ("borrower_total", "provisional piggyback store", "frontier_recipe_piggyback_store_time_ns", "frontier_recipe_piggybacks_stored"),
     ("borrower_total", "holder install handler", "holder_install_handler_time_ns", "holder_install_handler_calls"),
     ("borrower_total", "  Frontier member materialization", "frontier_holder_materialize_time_ns", "frontier_holder_materialize_calls"),
     ("owner", "owner install callback", "holder_install_callback_time_ns", "holder_install_callback_calls"),
@@ -330,10 +348,16 @@ def report(results: list[dict[str, Any]], output_dir: Path) -> None:
             "witness_update_rpcs_sent", "holder_admissions_committed",
             "task_spec_bytes_sent", "manifest_bytes_sent",
             "first_holder_piggyback_copies_sent", "first_holder_piggyback_bytes_sent",
+            "frontier_recipe_piggybacks_sent", "frontier_recipe_piggyback_bytes_sent",
+            "frontier_recipe_piggyback_admissions",
             "frontier_recipe_encode_members", "frontier_recipe_encode_bytes",
             "witness_update_physical_batches_completed",
         ):
             print(f"    {key:43s} {owner[key]:8d}  {owner[key] / tasks:9.3f}/task")
+        print(
+            "    borrower Frontier piggyback stores: "
+            f"{result['borrower_total']['frontier_recipe_piggybacks_stored']}"
+        )
         print(
             "    witness client/server timing coverage: "
             f"{owner['witness_update_client_phase_samples']}/"
@@ -364,7 +388,9 @@ def report(results: list[dict[str, Any]], output_dir: Path) -> None:
     _write_json(output_dir / "initial_install_profiles.json", results)
     print("\nInterpretation:")
     print("  Fixed-R installs full recipes on witnesses; Succession installs on borrowers.")
-    print("  K=1 Succession can use TaskSpec piggybacking: no install RPC is expected there.")
+    print("  K=1 Succession uses TaskSpec piggybacks; full K=2 groups can piggyback recipes.")
+    print("  K=2 admission can mix verified recipe piggybacks and ordinary install fallback.")
+    print("  A recipe-build timing for a typed piggyback excludes later PushTask serialization.")
     print("  Encoding, callbacks, handler work and admission latencies overlap; do not sum them.")
     print("  Elapsed service includes lock waits/preemption; it is not process/thread CPU.")
     print("  Use concentrated service/byte costs to choose the next source change.")

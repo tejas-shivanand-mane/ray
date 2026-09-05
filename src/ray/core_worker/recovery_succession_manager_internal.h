@@ -259,6 +259,7 @@ inline void ClearFirstHolderTaskSpecPiggybacks(rpc::TaskSpec *task_spec) {
 
   for (rpc::RecoveryTaskArgumentMetadata &entry :
        *task_spec->mutable_recovery_argument_metadata()) {
+    entry.clear_initial_frontier_recipe();
     if (entry.has_recovery_metadata()) {
       ClearFirstHolderPayloadUnlessFrontierMembership(
           entry.mutable_recovery_metadata());

@@ -1458,7 +1458,17 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
   result["first_holder_piggyback_serialize_time_ns"] =
       profile.first_holder_piggyback_serialize_time_ns;
 
-  result["initial_install_profile_version"] = 1;
+  result["initial_install_profile_version"] = 2;
+  result["frontier_recipe_piggybacks_sent"] =
+      profile.frontier_recipe_piggybacks_sent;
+  result["frontier_recipe_piggyback_bytes_sent"] =
+      profile.frontier_recipe_piggyback_bytes_sent;
+  result["frontier_recipe_piggybacks_stored"] =
+      profile.frontier_recipe_piggybacks_stored;
+  result["frontier_recipe_piggyback_store_time_ns"] =
+      profile.frontier_recipe_piggyback_store_time_ns;
+  result["frontier_recipe_piggyback_admissions"] =
+      profile.frontier_recipe_piggyback_admissions;
   result["frontier_recipe_encode_calls"] =
       profile.frontier_recipe_encode_calls;
   result["frontier_recipe_encode_time_ns"] =
