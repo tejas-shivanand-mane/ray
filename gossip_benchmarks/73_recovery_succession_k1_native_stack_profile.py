@@ -292,34 +292,32 @@ def _preflight(perf: str, out: Path, args: argparse.Namespace) -> None:
         stderr_path.unlink(missing_ok=True)
 
 
-def _run_perf_text(cmd: list[str], label: str) -> str:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+def _run_perf_text(
+    cmd: list[str],
+    label: str,
+    timeout_seconds: float,
+) -> str:
+    env = os.environ.copy()
+    # Ubuntu may configure remote debuginfod servers. Native Ray symbols are
+    # already available locally, so network lookup only makes analysis hang
+    # when those servers are unreachable.
+    env["DEBUGINFOD_URLS"] = ""
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{label} exceeded {timeout_seconds:.0f}s; "
+            "the perf analysis subprocess was terminated"
+        ) from exc
     if proc.returncode != 0:
         raise _perf_failure(label, proc.stderr)
     return proc.stdout
-
-
-def _write_report(
-    perf: str,
-    data_path: Path,
-    report_path: Path,
-    pids: list[int],
-) -> None:
-    report = _run_perf_text(
-        [
-            perf,
-            "report",
-            "--stdio",
-            "--no-children",
-            "--show-nr-samples",
-            "--percent-limit", "0.50",
-            "--sort", "comm,dso,symbol",
-            "--pid", ",".join(str(pid) for pid in pids),
-            "--input", str(data_path),
-        ],
-        f"perf report failed for {report_path.name}",
-    )
-    report_path.write_text(report)
 
 
 def _leaf_symbol(block: str) -> str | None:
@@ -376,9 +374,9 @@ def _analyze_role(
     case_dir: Path,
     role: str,
     pids: list[int],
+    timeout_seconds: float,
 ) -> dict[str, Any]:
-    report_path = case_dir / f"{role}.perf.report.txt"
-    _write_report(perf, data_path, report_path, pids)
+    script_path = case_dir / f"{role}.perf.script.txt"
     script = _run_perf_text(
         [
             perf,
@@ -387,7 +385,9 @@ def _analyze_role(
             "--input", str(data_path),
         ],
         f"perf script failed for {role}",
+        timeout_seconds,
     )
+    script_path.write_text(script)
     analysis = _analyze_script(script)
     if int(analysis["samples"]) == 0:
         raise RuntimeError(
@@ -399,7 +399,7 @@ def _analyze_role(
             "role": role,
             "pids": pids,
             "perf_data": str(data_path),
-            "perf_report": str(report_path),
+            "perf_script": str(script_path),
             "perf_data_bytes": data_path.stat().st_size,
         }
     )
@@ -444,6 +444,7 @@ def single_profile(args: argparse.Namespace) -> dict[str, Any]:
     ack_fd: int | None = None
     sampling_enabled = False
     try:
+        print(f"  {args.single_variant}: starting Ray cluster", flush=True)
         cluster, producer_node = b58.start_cluster(args, args.single_variant, False)
         ray.init(address=cluster.address, log_to_driver=False, include_dashboard=False)
         wait_for_cluster(
@@ -451,6 +452,7 @@ def single_profile(args: argparse.Namespace) -> dict[str, Any]:
             1 + 1 + args.holders + args.witness_count,
             args.cluster_timeout_seconds,
         )
+        print(f"  {args.single_variant}: cluster ready; starting warmup", flush=True)
         produce, Borrower = b58.remote_types()
         borrowers = [
             Borrower.options(
@@ -485,10 +487,20 @@ def single_profile(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError(f"expected two borrower CoreWorkers, got {role_pids['borrowers']}")
         if not role_pids["producer_workers"]:
             raise RuntimeError("warmup exposed no producer-side CoreWorker PID")
+        print(
+            f"  {args.single_variant}: warmup drained; "
+            f"owner={len(role_pids['owner'])} borrowers={len(role_pids['borrowers'])} "
+            f"producer_workers={len(role_pids['producer_workers'])}",
+            flush=True,
+        )
 
         control_fd, ack_fd = _open_child_control(args)
         _control_perf(control_fd, ack_fd, "enable", args.perf_control_timeout_seconds)
         sampling_enabled = True
+        print(
+            f"  {args.single_variant}: sampling enabled; running timed window",
+            flush=True,
+        )
         started = time.perf_counter()
         measured = b58.run_window(
             produce=produce,
@@ -506,6 +518,11 @@ def single_profile(args: argparse.Namespace) -> dict[str, Any]:
         elapsed = time.perf_counter() - started
         _control_perf(control_fd, ack_fd, "disable", args.perf_control_timeout_seconds)
         sampling_enabled = False
+        print(
+            f"  {args.single_variant}: timed window drained in {elapsed:.2f}s; "
+            "sampling disabled",
+            flush=True,
+        )
         return {
             "variant": args.single_variant,
             "profiling_enabled": 0,
@@ -532,7 +549,9 @@ def single_profile(args: argparse.Namespace) -> dict[str, Any]:
             os.close(ack_fd)
         if control_fd is not None:
             os.close(control_fd)
+        print(f"  {args.single_variant}: shutting down Ray cluster", flush=True)
         safe_shutdown(ray, cluster)
+        print(f"  {args.single_variant}: Ray shutdown complete", flush=True)
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -570,7 +589,7 @@ def _summary_row(
         "matched_pct": 100.0 * int(analysis["matched_samples"]) / samples,
         "estimated_cpu_us_per_task": sample_us * samples / pipelines,
         "perf_data": analysis["perf_data"],
-        "perf_report": analysis["perf_report"],
+        "perf_script": analysis["perf_script"],
         "perf_data_bytes": analysis["perf_data_bytes"],
         "top_leaf_symbols": json.dumps(analysis["top_leaf_symbols"]),
     }
@@ -620,6 +639,7 @@ def _clean_case(case_dir: Path) -> None:
         case_dir / "profile.perf.data.old",
         case_dir / "perf.record.stderr.txt",
         *(case_dir / f"{role}.perf.report.txt" for role in ROLES),
+        *(case_dir / f"{role}.perf.script.txt" for role in ROLES),
     ]:
         path.unlink(missing_ok=True)
 
@@ -653,10 +673,20 @@ def _run_variant(
     result = json.loads(result_path.read_text())
     result_path.unlink(missing_ok=True)
     role_pids = result.pop("role_pids")
-    analyses = [
-        _analyze_role(perf, data_path, case_dir, role, role_pids[role])
-        for role in ROLES
-    ]
+    analyses = []
+    print(f"  {variant}: recording finalized; analyzing native stacks", flush=True)
+    for role in ROLES:
+        print(f"  {variant}: analyzing {role}", flush=True)
+        analyses.append(
+            _analyze_role(
+                perf,
+                data_path,
+                case_dir,
+                role,
+                role_pids[role],
+                args.perf_analysis_timeout_seconds,
+            )
+        )
     return result, analyses
 
 
@@ -665,6 +695,8 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("--inflight-tasks must be divisible by --burst-size")
     if args.frequency < 19 or args.frequency > 999:
         raise ValueError("--frequency must be between 19 and 999 Hz")
+    if args.perf_analysis_timeout_seconds <= 0:
+        raise ValueError("--perf-analysis-timeout-seconds must be positive")
     if args.holders != 2 or args.witness_count != 2:
         raise ValueError("Benchmark 73 requires R=2 and W=2")
 
@@ -763,7 +795,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"  {role:18s} " + "  ".join(deltas))
 
     print("\nDecision signal:")
-    print("  Use the detailed *.perf.report.txt files to identify concrete hot call paths.")
+    print("  Use the detailed *.perf.script.txt files to inspect concrete hot call paths.")
     print("  Require a recovery-RPC-specific stack concentration before changing transport.")
     print("  If stacks remain generic, stop ordinary K=1 transport experimentation.")
     print("  R=2, W=2, K=1 ordering, and witness-backed durability remain unchanged.")
@@ -796,6 +828,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--frequency", type=int, default=99)
     p.add_argument("--call-graph", default="dwarf,8192")
     p.add_argument("--perf-control-timeout-seconds", type=float, default=10.0)
+    p.add_argument("--perf-analysis-timeout-seconds", type=float, default=120.0)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--holders", type=int, default=2)
     p.add_argument("--witness-count", type=int, default=2)
