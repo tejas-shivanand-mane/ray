@@ -110,6 +110,21 @@ class RecoverySuccessionManager {
     uint64_t holder_commit_cpu_calls = 0;
     uint64_t holder_commit_cpu_time_ns = 0;
 
+    // Benchmark-74 initial installation service elapsed time (steady clock).
+    // Includes lock waits/preemption. Materialization is nested inside the
+    // install handler; encoding/callback rows also overlap admission timings.
+    uint64_t frontier_recipe_encode_calls = 0;
+    uint64_t frontier_recipe_encode_time_ns = 0;
+    uint64_t frontier_recipe_encode_members = 0;
+    uint64_t frontier_recipe_encode_bytes = 0;
+    uint64_t holder_install_handler_calls = 0;
+    uint64_t holder_install_handler_time_ns = 0;
+    uint64_t frontier_holder_materialize_calls = 0;
+    uint64_t frontier_holder_materialize_time_ns = 0;
+    uint64_t frontier_holder_materialize_members = 0;
+    uint64_t holder_install_callback_calls = 0;
+    uint64_t holder_install_callback_time_ns = 0;
+
     // Opportunistic H2 readiness sampled at the instant ordinary K=1 H1
     // begins witness publication. This does not delay H1.
     uint64_t h1_publish_readiness_samples = 0;
@@ -238,6 +253,12 @@ class RecoverySuccessionManager {
                                   uint64_t manifest_bytes);
 
   void RecordHolderInstallRpcLatency(uint64_t latency_ns);
+
+  void RecordFrontierRecipeEncoding(uint64_t elapsed_ns,
+                                    uint64_t members,
+                                    uint64_t bytes);
+  void RecordHolderInstallHandler(uint64_t elapsed_ns);
+  void RecordHolderInstallCallback(uint64_t elapsed_ns);
 
   void RecordOwnerTaskSpecCopyLatency(uint64_t latency_ns);
 

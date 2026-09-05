@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -490,10 +491,25 @@ void NodeManager::HandleUpdateRecoveryWitness(
     rpc::SendReplyCallback send_reply_callback) {
   const bool profile_witness =
       RayConfig::instance().enable_recovery_succession_profiling();
+  const uint64_t handler_start_ns =
+      profile_witness ? RecoveryWitnessProfileNowNs() : 0;
+  // Stamp before sending, including early-return Fixed-R recipe installation.
+  // Keep this wrapper local: no extra std::function allocation per update.
+  const auto send_reply =
+      [reply, handler_start_ns, &send_reply_callback](
+          Status status, std::function<void()> success,
+          std::function<void()> failure) {
+        if (handler_start_ns != 0) {
+          reply->set_witness_handler_time_ns(
+              RecoveryWitnessProfileNowNs() - handler_start_ns);
+        }
+        send_reply_callback(
+            std::move(status), std::move(success), std::move(failure));
+      };
 
   if (!RayConfig::instance().enable_recovery_succession()) {
     reply->set_stored(false);
-    send_reply_callback(Status::OK(), nullptr, nullptr);
+    send_reply(Status::OK(), nullptr, nullptr);
     return;
   }
 
@@ -511,7 +527,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
         request.has_holder_certificate() || !request.serialized_task_spec().empty() ||
         !ValidRecoveryWitnessClaim(incoming_claim)) {
       reply->set_stored(false);
-      send_reply_callback(Status::OK(), nullptr, nullptr);
+      send_reply(Status::OK(), nullptr, nullptr);
       return;
     }
 
@@ -630,7 +646,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
         }
       }
     }
-    send_reply_callback(Status::OK(), nullptr, nullptr);
+    send_reply(Status::OK(), nullptr, nullptr);
     return;
   }
 
@@ -646,7 +662,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
           request.manifest().task_id() != request.holder_certificate().task_id() ||
           request.manifest().tombstoned()))) {
       reply->set_stored(false);
-      send_reply_callback(Status::OK(), nullptr, nullptr);
+      send_reply(Status::OK(), nullptr, nullptr);
       return;
     }
 
@@ -682,7 +698,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
       }
     }
 
-    send_reply_callback(Status::OK(), nullptr, nullptr);
+    send_reply(Status::OK(), nullptr, nullptr);
     return;
   }
 
@@ -690,7 +706,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
   // witness-as-holder baseline retain Patch 4L/4K behavior.
   if (!request.has_manifest() || !ValidRecoveryManifest(request.manifest())) {
     reply->set_stored(false);
-    send_reply_callback(Status::OK(), nullptr, nullptr);
+    send_reply(Status::OK(), nullptr, nullptr);
     return;
   }
 
@@ -702,7 +718,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
 
   if (request.has_task_spec() && has_serialized_task_spec) {
     reply->set_stored(false);
-    send_reply_callback(Status::OK(), nullptr, nullptr);
+    send_reply(Status::OK(), nullptr, nullptr);
     return;
   }
 
@@ -715,7 +731,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
     if (!baseline_enabled ||
         !decoded_task_spec.ParseFromString(request.serialized_task_spec())) {
       reply->set_stored(false);
-      send_reply_callback(Status::OK(), nullptr, nullptr);
+      send_reply(Status::OK(), nullptr, nullptr);
       return;
     }
     incoming_task_spec = &decoded_task_spec;
@@ -744,7 +760,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
 
     if (!valid_lineage) {
       reply->set_stored(false);
-      send_reply_callback(Status::OK(), nullptr, nullptr);
+      send_reply(Status::OK(), nullptr, nullptr);
       return;
     }
   }
@@ -818,7 +834,7 @@ void NodeManager::HandleUpdateRecoveryWitness(
     }
   }
 
-  send_reply_callback(Status::OK(), nullptr, nullptr);
+  send_reply(Status::OK(), nullptr, nullptr);
 }
 
 

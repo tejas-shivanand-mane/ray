@@ -1458,6 +1458,30 @@ CoreWorker::GetRecoverySuccessionProfileJson() const {
   result["first_holder_piggyback_serialize_time_ns"] =
       profile.first_holder_piggyback_serialize_time_ns;
 
+  result["initial_install_profile_version"] = 1;
+  result["frontier_recipe_encode_calls"] =
+      profile.frontier_recipe_encode_calls;
+  result["frontier_recipe_encode_time_ns"] =
+      profile.frontier_recipe_encode_time_ns;
+  result["frontier_recipe_encode_members"] =
+      profile.frontier_recipe_encode_members;
+  result["frontier_recipe_encode_bytes"] =
+      profile.frontier_recipe_encode_bytes;
+  result["holder_install_handler_calls"] =
+      profile.holder_install_handler_calls;
+  result["holder_install_handler_time_ns"] =
+      profile.holder_install_handler_time_ns;
+  result["frontier_holder_materialize_calls"] =
+      profile.frontier_holder_materialize_calls;
+  result["frontier_holder_materialize_time_ns"] =
+      profile.frontier_holder_materialize_time_ns;
+  result["frontier_holder_materialize_members"] =
+      profile.frontier_holder_materialize_members;
+  result["holder_install_callback_calls"] =
+      profile.holder_install_callback_calls;
+  result["holder_install_callback_time_ns"] =
+      profile.holder_install_callback_time_ns;
+
   result["holder_install_rpc_time_ns"] =
       profile.holder_install_rpc_time_ns;
   result["holder_commit_rpc_time_ns"] =
@@ -6550,6 +6574,14 @@ void CoreWorker::HandleRecoveryHolderInstallResult(
         RecoveryProfileNowNs() - state->install_start_ns);
     state->install_start_ns = 0;
   }
+  const uint64_t callback_start_ns =
+      recovery_succession_profiling_enabled_ ? RecoveryProfileNowNs() : 0;
+  absl::Cleanup callback_profile = [&manager, callback_start_ns]() {
+    if (callback_start_ns != 0) {
+      manager->RecordHolderInstallCallback(
+          RecoveryProfileNowNs() - callback_start_ns);
+    }
+  };
 
   bool already_aborted = false;
   rpc::RecoveryManifest abort_manifest;

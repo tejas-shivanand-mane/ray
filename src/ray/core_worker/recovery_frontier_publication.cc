@@ -272,8 +272,16 @@ void CoreWorker::PublishRecoveryFrontierGroupAsync(
 
         auto batch = std::make_shared<RecoveryFrontierAppendBatch>(
             std::move(staged.value()));
+        const uint64_t encode_start_ns =
+            recovery_succession_profiling_enabled_
+                ? RecoveryFrontierProfileNowNs() : 0;
         const std::string serialized_append =
             BuildRecoveryFrontierAppendEnvelope(*batch);
+        if (encode_start_ns != 0) {
+          recovery_succession_manager_->RecordFrontierRecipeEncoding(
+              RecoveryFrontierProfileNowNs() - encode_start_ns,
+              batch->members.size(), serialized_append.size());
+        }
         const uint64_t publish_start_ns =
             recovery_succession_profiling_enabled_
                 ? RecoveryFrontierProfileNowNs()
@@ -377,7 +385,15 @@ void CoreWorker::PublishRecoveryFrontierGroup(
 
     auto batch = std::make_shared<RecoveryFrontierAppendBatch>(
         std::move(staged.value()));
+    const uint64_t encode_start_ns =
+        recovery_succession_profiling_enabled_
+            ? RecoveryFrontierProfileNowNs() : 0;
     const std::string serialized_append = BuildRecoveryFrontierAppendEnvelope(*batch);
+    if (encode_start_ns != 0) {
+      recovery_succession_manager_->RecordFrontierRecipeEncoding(
+          RecoveryFrontierProfileNowNs() - encode_start_ns,
+          batch->members.size(), serialized_append.size());
+    }
     auto completion = std::make_shared<std::promise<bool>>();
     std::future<bool> completion_future = completion->get_future();
     const uint64_t publish_start_ns =

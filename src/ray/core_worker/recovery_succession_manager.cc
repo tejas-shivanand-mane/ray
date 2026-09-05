@@ -1819,6 +1819,9 @@ RecoverySuccessionManager::PrepareHolderAdmission(
     const RecoveryFrontierGroup *group =
         recovery_frontier_planner_->GetGroup(task_id);
     RAY_CHECK(group != nullptr);
+    const auto encode_start =
+        profiling_enabled_ ? std::chrono::steady_clock::now()
+                           : std::chrono::steady_clock::time_point{};
     rpc::RecoveryFrontierAppend snapshot;
     const bool built =
         frontier_install_batch.has_value()
@@ -1832,6 +1835,17 @@ RecoverySuccessionManager::PrepareHolderAdmission(
     }
     recovery_succession_internal::PutFrontierSuccessionAppendCapsule(
         snapshot, &plan->task_spec);
+    if (profiling_enabled_) {
+      // mutex_ is already held; do not call the locking recorder here.
+      ++profile_.frontier_recipe_encode_calls;
+      profile_.frontier_recipe_encode_time_ns +=
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - encode_start).count();
+      profile_.frontier_recipe_encode_members += snapshot.members_size();
+      profile_.frontier_recipe_encode_bytes +=
+          plan->task_spec.recovery_argument_metadata(0)
+              .recovery_metadata().first_holder_task_spec().size();
+    }
   }
 
   plan->proposed_manifest.CopyFrom(proposed_manifest);
@@ -1840,6 +1854,17 @@ RecoverySuccessionManager::PrepareHolderAdmission(
 
 bool RecoverySuccessionManager::InstallRecoveryHolder(
     const rpc::InstallRecoveryHolderRequest &request) {
+  const auto handler_start =
+      profiling_enabled_ ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{};
+  // Declared before mutex_'s guard so recording happens after it is released.
+  absl::Cleanup handler_profile = [this, handler_start]() {
+    if (profiling_enabled_) {
+      RecordHolderInstallHandler(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - handler_start).count());
+    }
+  };
   if (request.task_id().empty() || request.reservation_id().empty() ||
       !request.has_task_spec() || !request.has_proposed_manifest() ||
       request.task_spec().task_id() != request.task_id() ||
@@ -1878,6 +1903,9 @@ bool RecoverySuccessionManager::InstallRecoveryHolder(
       return false;
     }
 
+    const auto materialize_start =
+        profiling_enabled_ ? std::chrono::steady_clock::now()
+                           : std::chrono::steady_clock::time_point{};
     for (const RecoveryFrontierMember &member : group->Members()) {
       if (member.task_spec == nullptr || !IsEligibleTask(*member.task_spec)) {
         return false;
@@ -1905,6 +1933,13 @@ bool RecoverySuccessionManager::InstallRecoveryHolder(
       member_state.provisional_piggyback_task_spec = false;
     }
 
+    if (profiling_enabled_) {
+      ++profile_.frontier_holder_materialize_calls;
+      profile_.frontier_holder_materialize_time_ns +=
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - materialize_start).count();
+      profile_.frontier_holder_materialize_members += group->MemberCount();
+    }
     candidate_reports_sent_.insert(task_id);
     return true;
   }
@@ -3457,6 +3492,36 @@ void RecoverySuccessionManager::RecordHolderInstallRpcLatency(
   profile_.holder_install_rpc_time_ns += latency_ns;
 }
 
+
+void RecoverySuccessionManager::RecordFrontierRecipeEncoding(
+    uint64_t elapsed_ns, uint64_t members, uint64_t bytes) {
+  if (!profiling_enabled_) {
+    return;
+  }
+  absl::MutexLock lock(&mutex_);
+  ++profile_.frontier_recipe_encode_calls;
+  profile_.frontier_recipe_encode_time_ns += elapsed_ns;
+  profile_.frontier_recipe_encode_members += members;
+  profile_.frontier_recipe_encode_bytes += bytes;
+}
+
+void RecoverySuccessionManager::RecordHolderInstallHandler(uint64_t elapsed_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+  absl::MutexLock lock(&mutex_);
+  ++profile_.holder_install_handler_calls;
+  profile_.holder_install_handler_time_ns += elapsed_ns;
+}
+
+void RecoverySuccessionManager::RecordHolderInstallCallback(uint64_t elapsed_ns) {
+  if (!profiling_enabled_) {
+    return;
+  }
+  absl::MutexLock lock(&mutex_);
+  ++profile_.holder_install_callback_calls;
+  profile_.holder_install_callback_time_ns += elapsed_ns;
+}
 
 void RecoverySuccessionManager::RecordOwnerTaskSpecCopyLatency(
     uint64_t latency_ns) {
