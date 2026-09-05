@@ -613,7 +613,7 @@ class RecoverySuccessionManager {
   }
 
   bool StoreInitialFrontierPiggybackLocked(
-      const rpc::RecoveryFrontierAppend &snapshot,
+      const std::string &serialized_snapshot,
       const rpc::RecoveryManifest &manifest,
       const rpc::Address &sender)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);

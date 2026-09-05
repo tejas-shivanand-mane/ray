@@ -1373,7 +1373,7 @@ RecoverySuccessionManager::RegisterExecutorTask(const rpc::TaskSpec &task_spec) 
 
     if (dependency.frontier_member) {
       if (dependency.task_id == dependency.group_id &&
-          entry.has_initial_frontier_recipe()) {
+          !entry.initial_frontier_recipe().empty()) {
         StoreInitialFrontierPiggybackLocked(
             entry.initial_frontier_recipe(), incoming_manifest,
             task_spec.caller_address());
@@ -1884,11 +1884,20 @@ RecoverySuccessionManager::PrepareHolderAdmission(
 }
 
 bool RecoverySuccessionManager::StoreInitialFrontierPiggybackLocked(
-    const rpc::RecoveryFrontierAppend &snapshot,
+    const std::string &serialized_snapshot,
     const rpc::RecoveryManifest &manifest,
     const rpc::Address &sender) {
-  if (!InitialFrontierPiggybackEnabledCached() ||
-      snapshot.group_id().size() != TaskID::Size() ||
+  if (!InitialFrontierPiggybackEnabledCached()) {
+    return false;
+  }
+  const auto store_start =
+      profiling_enabled_ ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{};
+  rpc::RecoveryFrontierAppend snapshot;
+  if (!snapshot.ParseFromString(serialized_snapshot)) {
+    return false;
+  }
+  if (snapshot.group_id().size() != TaskID::Size() ||
       snapshot.group_id() != manifest.task_id() ||
       snapshot.base_generation() != 0 || snapshot.generation() != 1 ||
       snapshot.begin_member_index() != 0 || snapshot.end_member_index() != 2 ||
@@ -1906,9 +1915,6 @@ bool RecoverySuccessionManager::StoreInitialFrontierPiggybackLocked(
     return false;
   }
 
-  const auto store_start =
-      profiling_enabled_ ? std::chrono::steady_clock::now()
-                         : std::chrono::steady_clock::time_point{};
   const TaskID group_id = TaskID::FromBinary(snapshot.group_id());
   bool already_provisional = true;
   // Validate every member before installing anything. Never replace a
@@ -2752,13 +2758,15 @@ void RecoverySuccessionManager::PopulateTaskArgumentMetadataInternal(
         const auto build_start =
             profiling_enabled_ ? std::chrono::steady_clock::now()
                                : std::chrono::steady_clock::time_point{};
+        rpc::RecoveryFrontierAppend snapshot;
         if (recovery_succession_internal::BuildFrontierSuccessionSnapshot(
-                *group, entry->mutable_initial_frontier_recipe())) {
+                *group, &snapshot) &&
+            snapshot.SerializeToString(entry->mutable_initial_frontier_recipe())) {
           if (profiling_enabled_) {
             const uint64_t build_ns =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - build_start).count();
-            const uint64_t bytes = entry->initial_frontier_recipe().ByteSizeLong();
+            const uint64_t bytes = entry->initial_frontier_recipe().size();
             ++profile_.frontier_recipe_piggybacks_sent;
             profile_.frontier_recipe_piggyback_bytes_sent += bytes;
             ++profile_.frontier_recipe_encode_calls;

@@ -390,7 +390,7 @@ def report(results: list[dict[str, Any]], output_dir: Path) -> None:
     print("  Fixed-R installs full recipes on witnesses; Succession installs on borrowers.")
     print("  K=1 Succession uses TaskSpec piggybacks; full K=2 groups can piggyback recipes.")
     print("  K=2 admission can mix verified recipe piggybacks and ordinary install fallback.")
-    print("  A recipe-build timing for a typed piggyback excludes later PushTask serialization.")
+    print("  Piggyback recipe-build timing includes recipe serialization, not the later PushTask envelope.")
     print("  Encoding, callbacks, handler work and admission latencies overlap; do not sum them.")
     print("  Elapsed service includes lock waits/preemption; it is not process/thread CPU.")
     print("  Use concentrated service/byte costs to choose the next source change.")

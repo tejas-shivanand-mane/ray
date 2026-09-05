@@ -1275,5 +1275,9 @@ message RecoveryTaskArgumentMetadata {
   // Owner-to-borrower transport only, for an initial full K=2 Frontier.
   // Receipt stores provisional lineage; it is NOT a witness confirmation.
   // Keep this separate from the membership marker in recovery_metadata.
-  RecoveryFrontierAppend initial_frontier_recipe = 4;
+  // Serialized RecoveryFrontierAppend. Its schema imports common.proto for
+  // TaskSpec, so referencing that message here would create an import cycle.
+  // The receiver must parse and validate the complete recipe before reporting
+  // that it already stores the initial Frontier prefix.
+  bytes initial_frontier_recipe = 4;
 }
