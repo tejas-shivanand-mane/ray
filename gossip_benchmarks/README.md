@@ -482,3 +482,26 @@ in `plotting/plot_08_replication_count_performance.py`; tick coordinates are the
 
 This addition was manually source/diff-reviewed only. No build, test, lint,
 benchmark, or plot rendering was run.
+
+## Benchmark 04 failure diagnostics
+
+An unexpected borrower worker death aborts the case. It is not counted as an
+ordinary read timeout or a completed measurement. On a Python exception, the
+child attempts to save `diagnostics/trial_<N>_<method>/` under its result
+directory before shutting down the cluster and removing execution markers.
+
+`failure.json` records the traceback, experiment phase, settings, object IDs,
+read events and last observed protection profile. `markers/` preserves tails
+of execution-start records. Session folders contain up to 64 KiB per stderr,
+native core-worker and raylet log; `manifest.json` maps copies to original paths
+and records copy errors. These are bounded snapshots taken before shutdown,
+not complete logs. A forcibly terminated driver may not capture diagnostics.
+Failure JSON files are separate from the successful trial files used by plots.
+
+The parent prints the child log tail on a nonzero exit or timeout. For an EOF /
+`ActorDiedError`, inspect the failed borrower's native log and stderr; the generic
+message alone does not establish OOM versus a native crash. This diagnostic
+change does not fix the underlying recovery runtime failure.
+
+Manual source review only; no tests, builds, lint, benchmarks or plot rendering
+were run for this change.

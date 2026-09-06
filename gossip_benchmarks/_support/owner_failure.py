@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 import random
 import sys
+import subprocess
+import traceback
 import tempfile
 import time
 
@@ -25,7 +27,7 @@ from ray.cluster_utils import Cluster
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 import comparison
-from common import safe_shutdown, wait_for_cluster, write_csv
+from common import safe_shutdown, session_dirs, wait_for_cluster, write_csv
 from plots import pyplot
 from plotting.plot_04_owner_failure_throughput import draw
 from suite_runner import run_process
@@ -87,6 +89,44 @@ def remote_types():
     return Owner, Borrower
 
 
+def log_tail(path, limit=65536):
+    """Read a bounded tail even when native logs are large."""
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - limit))
+        return stream.read(limit)
+
+
+def save_failure(args, cluster, root, state):
+    """Best-effort evidence capture before cluster and marker cleanup."""
+    target = Path(args.single_output_json).parent / "diagnostics" / Path(
+        args.single_output_json).stem
+    target.mkdir(parents=True, exist_ok=True)
+    state["settings"] = vars(args)
+    state["status"] = "failed"
+    state["ray_commit"] = getattr(ray, "__commit__", "unknown")
+    # Write the original exception first, even if a subsequent log copy fails.
+    (target / "failure.json").write_text(json.dumps(state, indent=2, default=str) + "\n")
+    manifest = []
+    paths = [(path, target / "markers" / path.name) for path in root.glob("*.starts")]
+    if cluster is not None:
+        for number, session in enumerate(sorted(session_dirs(cluster))):
+            for path in sorted((session / "logs").glob("*")):
+                if path.is_file() and (path.suffix == ".err" or
+                                      path.name.startswith(("python-core-worker-", "raylet."))):
+                    paths.append((path, target / f"session_{number}" / path.name))
+    for source, destination in paths:
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(log_tail(source))
+            manifest.append({"source": str(source), "saved": str(destination),
+                             "tail_limit_bytes": 65536})
+        except OSError as exc:
+            manifest.append({"source": str(source), "copy_error": str(exc)})
+    (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"Failure diagnostics: {target}", file=sys.stderr, flush=True)
+
+
 def single(args):
     method = args.single_method
     variant = ("disabled" if method == "disabled" else
@@ -94,6 +134,10 @@ def single(args):
                comparison.SUCCESSION_VARIANT_FOR_K[args.k])
     cluster = None
     events = []
+    evidence = {}
+    ids = []
+    failure_time = None
+    phase = "cluster setup"
     with tempfile.TemporaryDirectory(prefix="ray_owner_failure_") as directory:
         root = Path(directory)
         try:
@@ -114,6 +158,7 @@ def single(args):
             borrowers = [Borrower.options(
                 num_cpus=0, resources={f"failure_borrower_{i}": 0.01}).remote()
                 for i in range(2)]
+            phase = "object creation and export"
             ids, held = ray.get(owner.create.remote(
                 executor.node_id, borrowers, args.tasks, directory, args.payload_bytes,
                 args.case_timeout_seconds * 2), timeout=args.setup_timeout_seconds)
@@ -122,7 +167,7 @@ def single(args):
             deadline = time.monotonic() + args.setup_timeout_seconds
             groups = args.tasks // args.k
             expected = (4 if method == "succession" else 2) * groups
-            evidence = {}
+            phase = "protection setup"
             while time.monotonic() < deadline:
                 started = all((root / f"{i}.starts").exists() for i in range(args.tasks))
                 evidence = ray.get(owner.profile.remote(), timeout=10)
@@ -143,14 +188,19 @@ def single(args):
                 raise TimeoutError(f"Original starts / R=2 W=2 protection incomplete: {evidence}")
 
             def consume(index, start, deadline):
-                calls = [b.read.remote(index, args.request_timeout_seconds) for b in borrowers]
-                left = max(0.01, deadline - time.monotonic())
                 try:
+                    calls = [b.read.remote(index, args.request_timeout_seconds) for b in borrowers]
+                    left = max(0.01, deadline - time.monotonic())
                     replies = ray.get(calls, timeout=left)
                 except ray.exceptions.GetTimeoutError:
                     events.append({"elapsed_seconds": time.monotonic() - start,
                                    "index": index, "ok": False, "error": "observation timeout"})
                     return False
+                except ray.exceptions.RayError as exc:
+                    events.append({"elapsed_seconds": time.monotonic() - start,
+                                   "index": index, "ok": False,
+                                   "error": f"{type(exc).__name__}: {exc}"})
+                    raise
                 ok = all(r["ok"] and r["id"] == ids[index]
                          and r["index"] == index and r["bytes"] == args.payload_bytes
                          for r in replies)
@@ -159,6 +209,7 @@ def single(args):
                                "error": "" if ok else repr(replies)})
                 return ok
 
+            phase = "pre-failure reads"
             start = time.monotonic()
             for i in range(args.before_tasks):
                 (root / f"{i}.release").touch()
@@ -169,7 +220,9 @@ def single(args):
             # All unfinished original gates remain closed, including after owner death.
             failure_time = time.monotonic() - start
             failure_wall_ns = time.time_ns()
+            phase = "owner termination"
             ray.kill(owner, no_restart=True)
+            phase = "post-failure reads"
             deadline = time.monotonic() + args.after_seconds
             for i in range(args.before_tasks, args.tasks):
                 if time.monotonic() >= deadline:
@@ -178,6 +231,7 @@ def single(args):
                 time.sleep(args.read_interval_seconds)
             observation_end = time.monotonic() - start
             after = [e for e in events if e["index"] >= args.before_tasks]
+            phase = "replay validation"
             replay_counts = {}
             for i in range(args.before_tasks, args.tasks):
                 lines = (root / f"{i}.starts").read_text().splitlines()
@@ -202,6 +256,16 @@ def single(args):
                 "ray_commit": getattr(ray, "__commit__", "unknown"),
             }
             Path(args.single_output_json).write_text(json.dumps(result, indent=2) + "\n")
+        except Exception:
+            state = {"phase": phase, "traceback": traceback.format_exc(),
+                     "events": events, "object_ids": ids,
+                     "failure_seconds": failure_time, "protection_profile": evidence}
+            try:
+                save_failure(args, cluster, root, state)
+            except Exception as diagnostic_error:
+                print(f"Could not finish saving diagnostics: {diagnostic_error}",
+                      file=sys.stderr, flush=True)
+            raise
         finally:
             safe_shutdown(ray, cluster)
 
@@ -298,11 +362,23 @@ def main():
                         "after_seconds", "request_timeout_seconds", "setup_timeout_seconds",
                         "case_timeout_seconds"):
                 options += ["--" + key.replace("_", "-"), str(getattr(args, key))]
-            run_process([sys.executable, "-u", str(Path(__file__).resolve()), "_single",
-                         "--single-method", method, "--single-trial", str(trial),
-                         "--single-output-json", str(out / (name + ".json")), *options],
-                        log_path=out / (name + ".log"), timeout=args.case_timeout_seconds,
-                        env=comparison.b58.child_env(profiling=True))
+            try:
+                run_process([sys.executable, "-u", str(Path(__file__).resolve()), "_single",
+                             "--single-method", method, "--single-trial", str(trial),
+                             "--single-output-json", str(out / (name + ".json")), *options],
+                            log_path=out / (name + ".log"), timeout=args.case_timeout_seconds,
+                            env=comparison.b58.child_env(profiling=True))
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                print(f"Failed case: {name}; child log tail:", file=sys.stderr, flush=True)
+                try:
+                    print(log_tail(out / (name + ".log")).decode(errors="replace"),
+                          file=sys.stderr, flush=True)
+                except OSError as exc:
+                    print(f"Could not read child log: {exc}", file=sys.stderr)
+                print(f"Check {out / 'diagnostics' / name} if captured by the child. "
+                      "A forced termination may prevent capture.", file=sys.stderr, flush=True)
+                raise
+
     plot(out, args.bucket_seconds)
 
 
