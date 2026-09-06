@@ -7,11 +7,8 @@ confidence bands or latency-to-durable-protection measurements.
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
-FIXED = "#0072B2"
-SUCCESSION = "#D55E00"
-DISABLED = "#555555"
+from plot_settings import ERROR_BARS
 
 
 def pyplot():
@@ -66,113 +63,77 @@ def require_complete_blocks(rows: list[dict], variants: list[str]) -> None:
         raise ValueError("At least two complete paired repetitions are required")
 
 
-def _style(axes):
-    for ax in axes:
-        ax.grid(axis="y", alpha=0.22)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.tick_params(labelsize=10)
+def apply_axis(ax, settings, *, ticks=None, labels=None):
+    """Apply presentation after drawing; explicit settings win over data defaults."""
+    for dimension in ("x", "y"):
+        scale = settings[dimension + "scale"]
+        if scale is not None:
+            getattr(ax, "set_" + dimension + "scale")(
+                scale, **settings[dimension + "scale_kwargs"])
+        positions = settings[dimension + "ticks"]
+        tick_labels = settings[dimension + "ticklabels"]
+        if dimension == "x" and positions is None:
+            positions = ticks
+            if tick_labels is None:
+                tick_labels = labels
+        if tick_labels is not None and positions is None:
+            raise ValueError(f"{dimension}ticklabels requires explicit {dimension}ticks")
+        if positions is not None:
+            if tick_labels is not None and len(positions) != len(tick_labels):
+                raise ValueError(f"{dimension}ticks and {dimension}ticklabels must have equal lengths")
+            getattr(ax, "set_" + dimension + "ticks")(positions, labels=tick_labels)
+        getattr(ax, "set_" + dimension + "label")(
+            settings[dimension + "label"], fontsize=settings["label_fontsize"])
+        ax.tick_params(axis=dimension, labelrotation=settings[dimension + "rotation"])
+        # Apply limits last: setting ticks can otherwise expand the view limits.
+        limits = settings[dimension + "lim"]
+        if limits is not None:
+            getattr(ax, "set_" + dimension + "lim")(limits)
+    ax.set_title(settings["title"], fontsize=settings["title_fontsize"])
+    if settings["tick_fontsize"] is not None:
+        ax.tick_params(labelsize=settings["tick_fontsize"])
+    if settings["grid"] is None:
+        ax.grid(False)
+    else:
+        ax.grid(True, **settings["grid"])
+    for spine in settings["hide_spines"]:
+        ax.spines[spine].set_visible(False)
+    if settings["legend"] is not None:
+        ax.legend(**settings["legend"])
 
 
-def _series(ax, x, rows, metric, label, color, marker="o", linestyle="-"):
+def series(ax, x, rows, metric, style):
+    """Draw the supplied means/CIs without recalculating statistics."""
     means = [float(row[metric + "_mean"]) for row in rows]
     errors = [float(row[metric + "_ci95"]) for row in rows]
     if not all(math.isfinite(v) for v in means + errors):
-        raise ValueError(f"Missing finite mean/95% CI for {label}: {metric}")
-    ax.errorbar(x, means, yerr=errors, label=label, color=color,
-                marker=marker, linestyle=linestyle, linewidth=1.8,
-                markersize=5, capsize=3)
+        raise ValueError(f"Missing finite mean/95% CI for {style['label']}: {metric}")
+    ax.errorbar(x, means, yerr=errors, **(ERROR_BARS | style))
 
 
-def _save(plt, fig, output: Path):
-    for extension in ("png", "pdf"):
-        path = output.with_suffix("." + extension)
-        fig.savefig(path, dpi=200, bbox_inches="tight")
+def finish(plt, fig, out, settings, **context):
+    """Format annotations and save the configured formats, then close the figure."""
+    if settings["title"]:
+        fig.suptitle(settings["title"].format(**context), **settings["title_kwargs"])
+    if settings["footer"]:
+        fig.text(*settings["footer_position"], settings["footer"].format(**context),
+                 **settings["footer_kwargs"])
+    fig.tight_layout(**settings["tight_layout"])
+    filename = settings["filename"].format(**context)
+    for extension in settings["formats"]:
+        path = out / (filename + "." + extension)
+        fig.savefig(path, dpi=settings["dpi"], **settings["savefig"])
         print(f"Plot: {path}", flush=True)
     plt.close(fig)
 
 
-def plot_k(rows, summaries, paired, out: Path, variants, fixed_for_k, succession_for_k):
-    require_complete_blocks(rows, variants)
-    payloads = {int(row["payload_bytes"]) for row in rows}
-    if len(payloads) != 1:
-        raise ValueError("B59 plot contains mixed object sizes; use separate output directories")
-    payload = next(iter(payloads))
-    plt = pyplot()
-    ks = sorted(fixed_for_k)
-    x = list(range(len(ks)))
-    for padding in sorted({int(row["task_spec_padding_bytes"]) for row in rows}):
-        sm = {row["variant"]: row for row in summaries
-              if int(row["task_spec_padding_bytes"]) == padding}
-        pr = {row["variant"]: row for row in paired
-              if int(row["task_spec_padding_bytes"]) == padding}
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4.8))
-        _series(axes[0], x, [sm["disabled"]] * len(ks), "throughput_rps",
-                "Disabled (shared reference)", DISABLED, marker="", linestyle="--")
-        for mapping, label, color in (
-            (fixed_for_k, "Fixed-R", FIXED),
-            (succession_for_k, "Succession", SUCCESSION),
-        ):
-            _series(axes[0], x, [sm[mapping[k]] for k in ks],
-                    "throughput_rps", label, color)
-            _series(axes[1], x, [pr[mapping[k]] for k in ks],
-                    "throughput_overhead_pct_vs_disabled", label, color)
-        axes[1].axhline(0, color=DISABLED, linestyle="--", label="Disabled")
-        for ax in axes:
-            ax.set_xticks(x, [str(k) for k in ks])
-            ax.set_xlabel("Frontier group size K")
-            ax.legend(fontsize=9)
-        axes[0].set_ylabel("Application throughput (tasks/s)")
-        axes[0].set_ylim(bottom=0)
-        axes[1].set_ylabel("Throughput overhead versus disabled (%)")
-        _style(axes)
-        fig.suptitle(
-            f"Fixed-R and Succession across K — object {size_label(payload)}, "
-            f"TaskSpec padding {size_label(padding)}", fontsize=12)
-        fig.text(0.5, 0.01,
-                 f"R=2, W=2 · {sm['disabled']['repetitions']} repetitions · profiling OFF · bars: pointwise 95% CIs\n"
-                 "Overhead is paired within repetition; disabled is one shared reference, not a K sweep.",
-                 ha="center", fontsize=9)
-        fig.tight_layout(rect=(0, 0.10, 1, 0.94))
-        _save(plt, fig, out / f"fixed_vs_succession_k_padding_{padding}")
+# Keep existing callers stable. Imports are lazy to avoid circular imports with
+# the per-benchmark layout modules, which use the shared helpers above.
+def plot_k(rows, summaries, paired, out, variants, fixed_for_k, succession_for_k):
+    from plot_frontier import plot
+    return plot(rows, summaries, paired, out, variants, fixed_for_k, succession_for_k)
 
 
-def plot_sizes(rows, summaries, paired, out: Path, variants):
-    require_complete_blocks(rows, variants)
-    plt = pyplot()
-    sizes = sorted({int(row["payload_bytes"]) for row in rows})
-    if len({int(row["task_spec_padding_bytes"]) for row in rows}) != 1:
-        raise ValueError("Object-size sweep must keep TaskSpec padding fixed")
-    padding = int(rows[0]["task_spec_padding_bytes"])
-    sm = {(int(row["payload_bytes"]), row["variant"]): row for row in summaries}
-    pr = {(int(row["payload_bytes"]), row["variant"]): row for row in paired}
-    styles = (
-        ("disabled", "Disabled", DISABLED, "s", "--"),
-        ("fixed_r", "Fixed-R K=1", FIXED, "o", "--"),
-        ("fixed_k32", "Fixed-R K=32", FIXED, "o", "-"),
-        ("succession_k1", "Succession K=1", SUCCESSION, "^", "--"),
-        ("succession_k32", "Succession K=32", SUCCESSION, "^", "-"),
-    )
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    for variant, label, color, marker, linestyle in styles:
-        _series(axes[0], sizes, [sm[size, variant] for size in sizes],
-                "throughput_rps", label, color, marker, linestyle)
-        _series(axes[1], sizes, [pr[size, variant] for size in sizes],
-                "throughput_overhead_pct_vs_disabled", label, color, marker, linestyle)
-    for ax in axes:
-        ax.set_xscale("log", base=2)
-        ax.set_xticks(sizes, [size_label(size) for size in sizes], rotation=25)
-        ax.set_xlabel("Returned object payload size")
-        ax.legend(fontsize=9)
-    axes[0].set_ylabel("Application throughput (tasks/s)")
-    axes[0].set_ylim(bottom=0)
-    axes[1].set_ylabel("Throughput overhead versus same-size disabled (%)")
-    _style(axes)
-    fig.suptitle(
-        f"Object-size effect — fixed TaskSpec padding {size_label(padding)}", fontsize=13)
-    fig.text(0.5, 0.01,
-             f"R=2, W=2 · K=1/32 · {sm[sizes[0], 'disabled']['repetitions']} repetitions · profiling OFF · bars: pointwise 95% CIs\n"
-             "Each overhead uses the disabled run at the same object size and repetition.",
-             ha="center", fontsize=9)
-    fig.tight_layout(rect=(0, 0.12, 1, 0.94))
-    _save(plt, fig, out / "object_size_comparison")
+def plot_sizes(rows, summaries, paired, out, variants):
+    from plot_object_sizes import plot
+    return plot(rows, summaries, paired, out, variants)

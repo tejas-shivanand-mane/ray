@@ -20,6 +20,106 @@ tracked historical result snapshots have been removed. Git history retains them.
 New results are ignored by Git; this change does not run a cleanup of your local
 untracked results.
 
+## Editing plots without rerunning benchmarks
+
+Start with **`_support/plot_settings.py`**. It contains three clearly named
+sections: `FRONTIER` (01), `OBJECT_SIZES` (02), and `OWNER_FAILURE` (04).
+Each has figure size, title/footer, output filename/formats/DPI, layout spacing,
+and a settings dictionary for each panel. The `axis()` function at the top
+lists all available axis settings and their shared defaults.
+
+| Change | Setting |
+| --- | --- |
+| Axis labels and panel title | `xlabel`, `ylabel`, `title` |
+| Tick positions and displayed text | `xticks` / `xticklabels`, `yticks` / `yticklabels` |
+| Tick rotation | `xrotation`, `yrotation` |
+| Axis limits | `xlim`, `ylim`, e.g. `(0, 3000)` |
+| Linear/log scales | `xscale`, `yscale`; use `xscale_kwargs` for the log base |
+| Font sizes | `label_fontsize`, `title_fontsize`, `tick_fontsize` |
+| Legend position, columns, font, frame | `legend={"loc": "upper right", "ncol": 1, "fontsize": 9, "frameon": False}` |
+| Hide legend or grid | `legend=None` or `grid=None` |
+| Colors, names, markers, line styles | The corresponding `*_SERIES` dictionary |
+| Error-bar cap size and line width | `ERROR_BARS`; individual series can override these |
+| Figure size, resolution, file type | `figsize` (inches), `dpi`, `formats` |
+| Figure spacing | `tight_layout`, e.g. `{"rect": (0, 0.12, 1, 0.94), "w_pad": 3}` |
+| Global font family and other Matplotlib defaults | `RC_PARAMS` |
+
+Set ticks/labels/limits to `None` to use the automatic or data-derived defaults.
+An explicit tick list replaces the default positions; labels must have the same
+length as the positions. Set ticks to `[]` to hide them. Explicit limits apply
+after ticks, so tick changes cannot silently widen a requested axis range.
+Changing ticks or limits changes only the display, not which runs are analyzed.
+
+For example, add these arguments to **both** `axis(...)` calls in
+`OBJECT_SIZES` to customize the x axis:
+
+```python
+xlabel="Object size",
+xticks=[1024, 16384, 262144, 1048576],
+xticklabels=["1 KiB", "16 KiB", "256 KiB", "1 MiB"],
+xrotation=0,
+label_fontsize=12,
+tick_fontsize=11,
+```
+
+Keep the existing `xscale="log", xscale_kwargs={"base": 2}` if you want
+spacing proportional to log object size. For linear spacing, set
+`xscale="linear", xscale_kwargs={}` (the log-only `base` argument must be removed).
+Tick labels alone do not change the scale.
+
+Tick coordinates differ between plots:
+
+| Panel | Coordinates to put in `xticks` |
+| --- | --- |
+| 01, both panels | Positions `0, 1, 2, 3, 4, 5` for the usual K values `1, 2, 4, 8, 16, 32` |
+| 02, both panels | Object sizes in **bytes**, e.g. `1024`, `1048576` |
+| 04, throughput | Seconds relative to owner kill, e.g. `[-5, 0, 5, 10, 20]` |
+| 04, recovery bars | `0, 1, 2` for disabled, Fixed-R, Succession |
+
+For example, in 01 use `xticks=[0, 2, 5]` and
+`xticklabels=["1", "4", "32"]` to show only those three tick labels.
+All six measured K values still contribute plotted points.
+
+For larger layout changes, each benchmark has a short drawing module:
+
+| File under `_support/` | Responsibility |
+| --- | --- |
+| `plot_frontier.py` | 01: K comparison layout |
+| `plot_object_sizes.py` | 02: object-size layout |
+| `plot_owner_failure.py` | 04: failure timeline and recovery bars |
+| `plots.py` | Shared validation, axis formatting, error bars, and saving |
+
+Benchmark 03 currently produces profiling JSON/CSV/logs and native stack data;
+it has no Matplotlib figures to customize. Correctness benchmarks 05–06 have
+no plot settings.
+
+After editing settings, regenerate figures from saved results:
+
+```bash
+python gossip_benchmarks/01_frontier_performance.py plot \
+    --output-dir gossip_benchmarks/results/59_recovery_frontier_fixed_vs_succession_performance
+
+python gossip_benchmarks/02_object_size_performance.py plot \
+    --output-dir gossip_benchmarks/results/object_sizes_upto_1mib
+
+python gossip_benchmarks/04_owner_failure_throughput.py plot \
+    --output-dir PATH_TO_SAVED_OWNER_FAILURE_RUN
+```
+
+These commands do not execute benchmark cases. The existing figures are replaced;
+choose a different `filename` in the settings to keep multiple visual versions.
+01 filenames support `{padding}`; titles/footers in 01 support
+`{payload_label}`, `{padding_label}`, and `{repetitions}`; 02 supports
+`{padding_label}` and `{repetitions}`. Set a title/footer to `""` to hide it.
+If you change the displayed statistics or remove CIs in a layout module, update
+the annotation accordingly.
+
+02's `--exclude-object-sizes` remains available and does not alter saved raw,
+configuration, or summary/paired CSV files. 04's existing replot command also
+regenerates derived bucket/summary CSVs; its trial JSON stays intact.
+`--bucket-seconds` changes 04's aggregation, not just its tick spacing; use the
+same bucket width when making appearance-only comparisons.
+
 ## 1. Full K comparison
 
 ```bash

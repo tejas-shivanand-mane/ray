@@ -27,6 +27,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import comparison
 from common import safe_shutdown, wait_for_cluster, write_csv
 from plots import pyplot
+from plot_owner_failure import draw
 from suite_runner import run_process
 
 HERE = Path(__file__).resolve().parent
@@ -206,13 +207,10 @@ def single(args):
 
 
 def plot(out, bucket_seconds):
-    plt = pyplot()
     files = sorted(out.glob("trial_*_*.json"))
     if not files:
         raise FileNotFoundError(f"No saved owner-failure runs in {out}")
     runs = [json.loads(path.read_text()) for path in files]
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    colors = dict(zip(METHODS, ("#555555", "#0072B2", "#D55E00")))
     rows = []
     summary = []
     for run in runs:
@@ -230,29 +228,7 @@ def plot(out, bucket_seconds):
                          "seconds_from_failure": (left + right) / 2,
                          "throughput_rps": count / coverage,
                          "observed_seconds": coverage})
-    for method in METHODS:
-        selected = [r for r in rows if r["method"] == method]
-        xs = sorted({r["seconds_from_failure"] for r in selected})
-        means = [sum(r["throughput_rps"] for r in selected if r["seconds_from_failure"] == x)
-                 / sum(r["seconds_from_failure"] == x for r in selected) for x in xs]
-        axes[0].plot(xs, means, marker="o", color=colors[method], label=method)
-        selected_runs = [r for r in runs if r["method"] == method]
-        if selected_runs:
-            fractions = [100 * r["post_failure_successes"] / (r["tasks"] - r["before_tasks"])
-                         for r in selected_runs]
-            axes[1].bar(method, sum(fractions) / len(fractions), color=colors[method])
-    axes[0].axvline(0, color="black", linestyle="--", label="Owner kill")
-    axes[0].set(xlabel="Seconds relative to owner kill",
-                ylabel="Successful unique-object reads / s",
-                title="Paced finite backlog; curve ends when observation ends")
-    axes[0].legend()
-    axes[1].set(ylabel="Unfinished objects recovered (%)", ylim=(0, 105),
-                title="Same ObjectIDs; both borrowers succeed")
-    fig.suptitle("Owner-worker failure, R=2 W=2; diagnostic, not steady-state throughput")
-    fig.tight_layout()
-    for suffix in (".png", ".pdf"):
-        fig.savefig(out / ("owner_failure" + suffix), dpi=180, bbox_inches="tight")
-    plt.close(fig)
+    draw(rows, runs, out, METHODS)
     write_csv(out / "owner_failure_buckets.csv", rows)
     write_csv(out / "owner_failure_summary.csv", summary)
     for run in runs:
