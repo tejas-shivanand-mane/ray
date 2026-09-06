@@ -78,8 +78,8 @@ def draw(rows, runs, out, methods):
         # Add inset/secondary axes, annotations, or modify any artist here.
 
         # 9. Exports. Change filenames, formats and savefig options directly.
-        png = out / "owner_failure.png"
-        pdf = out / "owner_failure.pdf"
+        png = out / "04_owner_failure_throughput.png"
+        pdf = out / "04_owner_failure_throughput.pdf"
         fig.savefig(png, dpi=180, bbox_inches="tight")
         fig.savefig(pdf, dpi=180, bbox_inches="tight")
         print(f"Plot: {png}", flush=True)

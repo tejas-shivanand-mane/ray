@@ -103,7 +103,7 @@ def draw(x, data, out, context):
         # Example: ax_throughput.annotate("Note", xy=(x[0], data["disabled"]["throughput"][0]))
 
         # 9. Exports: edit each savefig call independently or add other formats.
-        basename = f"fixed_vs_succession_k_padding_{context['padding']}"
+        basename = f"01_frontier_performance_padding_{context['padding']}"
         png = out / (basename + ".png")
         pdf = out / (basename + ".pdf")
         fig.savefig(png, dpi=200, bbox_inches="tight")

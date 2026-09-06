@@ -35,11 +35,19 @@ now written directly into these files.
 
 | Benchmark | File under `gossip_benchmarks/plotting/` |
 | --- | --- |
-| 01: K comparison | `plot_frontier.py` |
-| 02: object-size comparison | `plot_object_sizes.py` |
-| 04: owner failure | `plot_owner_failure.py` |
-| 07: borrower counts | `plot_borrowers.py` |
-| 08: R/W counts | `plot_replication.py` |
+| 01: K comparison | `plot_01_frontier_performance.py` |
+| 02: object-size comparison | `plot_02_object_size_performance.py` |
+| 04: owner failure | `plot_04_owner_failure_throughput.py` |
+| 07: borrower counts | `plot_07_borrower_count_performance.py` |
+| 08: R/W counts | `plot_08_replication_count_performance.py` |
+
+Generated figures use the same benchmark stems:
+`01_frontier_performance_padding_<bytes>.png/.pdf`,
+`02_object_size_performance.png/.pdf`,
+`04_owner_failure_throughput.png/.pdf`,
+`07_borrower_count_performance.png/.pdf`, and
+`08_replication_count_performance.png/.pdf`.
+Existing figures with older names are left in place by replotting.
 
 03 writes profiling data/logs rather than figures. Correctness suites 05–06
 have no plots.
@@ -190,7 +198,7 @@ python gossip_benchmarks/02_object_size_performance.py \
 
 Default: 75 fresh-cluster cases. Output:
 `gossip_benchmarks/results/object_sizes/`, including
-`object_size_comparison.png` and `.pdf`, raw/summary/paired CSVs, settings,
+`02_object_size_performance.png` and `.pdf`, raw/summary/paired CSVs, settings,
 source/build provenance, and case logs.
 
 Five curves: disabled, Fixed-R K=1, Fixed-R K=32, Succession K=1, Succession K=32.
@@ -272,7 +280,7 @@ but the benchmark records observed behavior rather than drawing a forced zero.
 Protection counters are enabled for setup evidence, so this is diagnostic.
 
 Output: timestamped `results/owner_failure/`, raw events/protection/replay
-evidence in JSON, bucket/summary CSVs, `owner_failure.png` and `.pdf`.
+evidence in JSON, bucket/summary CSVs, `04_owner_failure_throughput.png` and `.pdf`.
 
 ```bash
 python gossip_benchmarks/04_owner_failure_throughput.py plot --output-dir PATH_TO_SAVED_RUN
@@ -359,7 +367,7 @@ Output directory: `results/borrower_counts/` under `gossip_benchmarks/`:
 - `borrower_count_summary.csv`: throughput and latency statistics by B/variant.
 - `borrower_count_paired.csv`: overhead relative to disabled at the **same B and
   repetition**, plus Succession's percentage speedup over Fixed-R K=32.
-- `borrower_count_comparison.png/.pdf`: throughput and paired overhead with
+- `07_borrower_count_performance.png/.pdf`: throughput and paired overhead with
   pointwise 95% Student-t intervals.
 - `run_config.json` and per-case logs: settings, source/native provenance.
   The native extension SHA-256 identifies the binary even when Ray's build
@@ -378,7 +386,7 @@ python gossip_benchmarks/07_borrower_count_performance.py \
     --output-dir gossip_benchmarks/results/borrowers_one
 ```
 
-For plot edits, edit `draw()` in `plotting/plot_borrowers.py`, then:
+For plot edits, edit `draw()` in `plotting/plot_07_borrower_count_performance.py`, then:
 
 ```bash
 python gossip_benchmarks/07_borrower_count_performance.py plot \
@@ -389,7 +397,7 @@ Replotting reads the saved journal/configuration, requires all configured cases
 to be complete, and replaces only the figures. It does not run Ray cases or
 rewrite raw/summary/paired CSVs. Tick positions are actual B values; default
 x spacing is log base 2. Larger layout changes belong in
-`plotting/plot_borrowers.py`.
+`plotting/plot_07_borrower_count_performance.py`.
 
 Implementation was manually source/diff-reviewed; no build, test, benchmark,
 lint, or plot rendering was run while preparing this benchmark.
@@ -451,7 +459,7 @@ Outputs under `gossip_benchmarks/results/replication_counts/`:
   and execution position.
 - `replication_count_summary.csv` and `replication_count_paired.csv`:
   statistics separated by R/W and method.
-- `replication_count_comparison.png/.pdf`: application throughput and paired
+- `08_replication_count_performance.png/.pdf`: application throughput and paired
   overhead across R/W.
 - `run_config.json` and case logs: settings plus source/native fingerprints.
 
@@ -460,7 +468,7 @@ configuration, source commit/content, and native binary. Use a different output
 directory to preserve another run, or `--overwrite` to replace this benchmark's
 named outputs.
 
-Edit `draw()` in `plotting/plot_replication.py` for complete control over
+Edit `draw()` in `plotting/plot_08_replication_count_performance.py` for complete control over
 this figure, then regenerate only figures:
 
 ```bash
@@ -470,7 +478,7 @@ python gossip_benchmarks/08_replication_count_performance.py plot \
 
 The saved configuration and all configured cases are validated before plotting.
 Replotting does not execute cases or rewrite CSVs. Larger layout changes belong
-in `plotting/plot_replication.py`; tick coordinates are the actual R/W values.
+in `plotting/plot_08_replication_count_performance.py`; tick coordinates are the actual R/W values.
 
 This addition was manually source/diff-reviewed only. No build, test, lint,
 benchmark, or plot rendering was run.

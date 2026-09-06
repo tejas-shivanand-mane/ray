@@ -100,7 +100,7 @@ def draw(x, data, out, context):
         # Example: ax_throughput.annotate("Note", xy=(x[0], data["disabled"]["throughput"][0]))
 
         # 9. Exports: edit each savefig call independently or add other formats.
-        basename = "object_size_comparison"
+        basename = "02_object_size_performance"
         png = out / (basename + ".png")
         pdf = out / (basename + ".pdf")
         fig.savefig(png, dpi=200, bbox_inches="tight")

@@ -18,14 +18,15 @@ import sys
 
 import comparison as b59
 from plots import pyplot
-from plotting.plot_borrowers import plot_borrowers
+from plotting.plot_07_borrower_count_performance import plot_borrowers
 from suite_runner import run_process
 
 HERE = Path(__file__).resolve().parent
 VARIANTS = ["disabled", "fixed_k32", "succession_k32"]
 OUTPUTS = (
     "borrower_count_runs.csv", "borrower_count_summary.csv", "borrower_count_paired.csv",
-    "borrower_count_comparison.png", "borrower_count_comparison.pdf", "run_config.json",
+    "borrower_count_comparison.png", "borrower_count_comparison.pdf",
+    "07_borrower_count_performance.png", "07_borrower_count_performance.pdf", "run_config.json",
 )
 
 

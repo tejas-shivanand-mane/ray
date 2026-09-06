@@ -80,10 +80,10 @@ def summary_values(rows, metric):
 
 # Entry-point adapters only. Every drawing operation lives in the named file.
 def plot_k(rows, summaries, paired, out, variants, fixed_for_k, succession_for_k):
-    from plotting.plot_frontier import plot
+    from plotting.plot_01_frontier_performance import plot
     return plot(rows, summaries, paired, out, variants, fixed_for_k, succession_for_k)
 
 
 def plot_sizes(rows, summaries, paired, out, variants):
-    from plotting.plot_object_sizes import plot
+    from plotting.plot_02_object_size_performance import plot
     return plot(rows, summaries, paired, out, variants)

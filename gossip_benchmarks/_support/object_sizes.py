@@ -26,7 +26,8 @@ BENCH59 = HERE / "comparison.py"
 VARIANTS = ["disabled", "fixed_r", "fixed_k32", "succession_k1", "succession_k32"]
 OUTPUTS = (
     "object_size_runs.csv", "object_size_summary.csv", "object_size_paired.csv",
-    "object_size_comparison.png", "object_size_comparison.pdf", "run_config.json",
+    "object_size_comparison.png", "object_size_comparison.pdf",
+    "02_object_size_performance.png", "02_object_size_performance.pdf", "run_config.json",
 )
 
 

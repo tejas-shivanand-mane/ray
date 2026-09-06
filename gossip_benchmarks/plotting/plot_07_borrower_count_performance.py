@@ -1,12 +1,12 @@
-"""Complete Matplotlib code for Benchmark 08; edit draw() in this file."""
+"""Complete Matplotlib code for Benchmark 07; edit draw() in this file."""
 from plots import pyplot, summary_values, size_label
 
 
-def plot_replication(summaries, paired, out, config):
+def plot_borrowers(summaries, paired, out, config):
     # Data preparation only: the runner already validated saved cases.
-    x = sorted(config["replication_counts"])
-    sm = {(int(row["replication_count"]), row["variant"]): row for row in summaries}
-    pr = {(int(row["replication_count"]), row["variant"]): row for row in paired}
+    x = sorted(config["borrower_counts"])
+    sm = {(int(row["borrowers_per_pipeline"]), row["variant"]): row for row in summaries}
+    pr = {(int(row["borrowers_per_pipeline"]), row["variant"]): row for row in paired}
     data = {}
     for variant in ("disabled", "fixed_k32", "succession_k32"):
         throughput, throughput_ci = summary_values(
@@ -20,7 +20,6 @@ def plot_replication(summaries, paired, out, config):
         "payload_label": size_label(config["payload_bytes"]),
         "padding_label": size_label(config["task_spec_padding_bytes"]),
         "repetitions": config["repetitions"],
-        "borrowers": config["borrowers"],
     }
     draw(x, data, out, context)
 
@@ -56,8 +55,9 @@ def draw(x, data, out, context):
                 **({"linewidth": 1.8, "markersize": 5, "capsize": 3} | style))
 
         # 4. Throughput axis: scales, ticks, formatters, labels, limits, spines.
+        ax_throughput.set_xscale("log", base=2)
         ax_throughput.set_xticks(x, context["tick_labels"], rotation=0)
-        ax_throughput.set_xlabel("Configured holder / witness count (R = W)")
+        ax_throughput.set_xlabel("Application borrowers per object")
         ax_throughput.set_ylabel("Application throughput (pipelines/s)")
         ax_throughput.set_ylim(bottom=0)  # Set limits after ticks.
         ax_throughput.grid(axis="y", alpha=0.22)
@@ -66,9 +66,10 @@ def draw(x, data, out, context):
         ax_throughput.tick_params(labelsize=10)
 
         # 5. Overhead axis: independent from the throughput axis.
+        ax_overhead.set_xscale("log", base=2)
         ax_overhead.set_xticks(x, context["tick_labels"], rotation=0)
-        ax_overhead.set_xlabel("Configured holder / witness count (R = W)")
-        ax_overhead.set_ylabel("Throughput overhead versus paired disabled (%)")
+        ax_overhead.set_xlabel("Application borrowers per object")
+        ax_overhead.set_ylabel("Throughput overhead versus same-count disabled (%)")
         ax_overhead.grid(axis="y", alpha=0.22)
         ax_overhead.spines["top"].set_visible(False)
         ax_overhead.spines["right"].set_visible(False)
@@ -78,12 +79,12 @@ def draw(x, data, out, context):
         throughput_legend = ax_throughput.legend(fontsize=9)
         overhead_legend = ax_overhead.legend(fontsize=9)
         title = fig.suptitle(
-            f"R/W effect at K=32 — object {context['payload_label']}, "
+            f"Borrower-count effect — object {context['payload_label']}, "
             f"TaskSpec padding {context['padding_label']}", fontsize=13)
         footer = fig.text(
             0.5, 0.01,
-            f"{context['borrowers']} application borrowers · fixed topology · {context['repetitions']} repetitions · profiling OFF · pointwise 95% CIs\n"
-            "R and W vary together. All borrowers must finish; durable admission can overlap completion.",
+            f"Target R=2, W=2 · K=32 · {context['repetitions']} repetitions · profiling OFF · bars: pointwise 95% CIs\n"
+            "All borrowers must consume each object. B<R may leave Succession below target R; durability is not measured.",
             ha="center", fontsize=9)
 
         # 7. Layout. Adjust spacing here, or replace tight_layout altogether.
@@ -95,7 +96,7 @@ def draw(x, data, out, context):
         # Example: ax_throughput.annotate("Note", xy=(x[0], data["disabled"]["throughput"][0]))
 
         # 9. Exports: edit each savefig call independently or add other formats.
-        basename = "replication_count_comparison"
+        basename = "07_borrower_count_performance"
         png = out / (basename + ".png")
         pdf = out / (basename + ".pdf")
         fig.savefig(png, dpi=200, bbox_inches="tight")

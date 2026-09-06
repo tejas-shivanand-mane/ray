@@ -18,14 +18,15 @@ import sys
 
 import comparison as b59
 from plots import pyplot
-from plotting.plot_replication import plot_replication
+from plotting.plot_08_replication_count_performance import plot_replication
 from suite_runner import run_process
 
 HERE = Path(__file__).resolve().parent
 VARIANTS = ["disabled", "fixed_k32", "succession_k32"]
 OUTPUTS = (
     "replication_count_runs.csv", "replication_count_summary.csv", "replication_count_paired.csv",
-    "replication_count_comparison.png", "replication_count_comparison.pdf", "run_config.json",
+    "replication_count_comparison.png", "replication_count_comparison.pdf",
+    "08_replication_count_performance.png", "08_replication_count_performance.pdf", "run_config.json",
 )
 
 
