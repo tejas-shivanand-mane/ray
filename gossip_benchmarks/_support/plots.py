@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import math
 
-from plot_settings import ERROR_BARS
-
 
 def pyplot():
     try:
@@ -63,72 +61,16 @@ def require_complete_blocks(rows: list[dict], variants: list[str]) -> None:
         raise ValueError("At least two complete paired repetitions are required")
 
 
-def apply_axis(ax, settings, *, ticks=None, labels=None):
-    """Apply presentation after drawing; explicit settings win over data defaults."""
-    for dimension in ("x", "y"):
-        scale = settings[dimension + "scale"]
-        if scale is not None:
-            getattr(ax, "set_" + dimension + "scale")(
-                scale, **settings[dimension + "scale_kwargs"])
-        positions = settings[dimension + "ticks"]
-        tick_labels = settings[dimension + "ticklabels"]
-        if dimension == "x" and positions is None:
-            positions = ticks
-            if tick_labels is None:
-                tick_labels = labels
-        if tick_labels is not None and positions is None:
-            raise ValueError(f"{dimension}ticklabels requires explicit {dimension}ticks")
-        if positions is not None:
-            if tick_labels is not None and len(positions) != len(tick_labels):
-                raise ValueError(f"{dimension}ticks and {dimension}ticklabels must have equal lengths")
-            getattr(ax, "set_" + dimension + "ticks")(positions, labels=tick_labels)
-        getattr(ax, "set_" + dimension + "label")(
-            settings[dimension + "label"], fontsize=settings["label_fontsize"])
-        ax.tick_params(axis=dimension, labelrotation=settings[dimension + "rotation"])
-        # Apply limits last: setting ticks can otherwise expand the view limits.
-        limits = settings[dimension + "lim"]
-        if limits is not None:
-            getattr(ax, "set_" + dimension + "lim")(limits)
-    ax.set_title(settings["title"], fontsize=settings["title_fontsize"])
-    if settings["tick_fontsize"] is not None:
-        ax.tick_params(labelsize=settings["tick_fontsize"])
-    if settings["grid"] is None:
-        ax.grid(False)
-    else:
-        ax.grid(True, **settings["grid"])
-    for spine in settings["hide_spines"]:
-        ax.spines[spine].set_visible(False)
-    if settings["legend"] is not None:
-        ax.legend(**settings["legend"])
-
-
-def series(ax, x, rows, metric, style):
-    """Draw the supplied means/CIs without recalculating statistics."""
+def summary_values(rows, metric):
+    """Extract already-computed means/CIs; no styling or statistical changes."""
     means = [float(row[metric + "_mean"]) for row in rows]
     errors = [float(row[metric + "_ci95"]) for row in rows]
-    if not all(math.isfinite(v) for v in means + errors):
-        raise ValueError(f"Missing finite mean/95% CI for {style['label']}: {metric}")
-    ax.errorbar(x, means, yerr=errors, **(ERROR_BARS | style))
+    if not all(math.isfinite(value) for value in means + errors):
+        raise ValueError(f"Missing finite mean/95% CI for {metric}")
+    return means, errors
 
 
-def finish(plt, fig, out, settings, **context):
-    """Format annotations and save the configured formats, then close the figure."""
-    if settings["title"]:
-        fig.suptitle(settings["title"].format(**context), **settings["title_kwargs"])
-    if settings["footer"]:
-        fig.text(*settings["footer_position"], settings["footer"].format(**context),
-                 **settings["footer_kwargs"])
-    fig.tight_layout(**settings["tight_layout"])
-    filename = settings["filename"].format(**context)
-    for extension in settings["formats"]:
-        path = out / (filename + "." + extension)
-        fig.savefig(path, dpi=settings["dpi"], **settings["savefig"])
-        print(f"Plot: {path}", flush=True)
-    plt.close(fig)
-
-
-# Keep existing callers stable. Imports are lazy to avoid circular imports with
-# the per-benchmark layout modules, which use the shared helpers above.
+# Entry-point adapters only. Every drawing operation lives in the named file.
 def plot_k(rows, summaries, paired, out, variants, fixed_for_k, succession_for_k):
     from plot_frontier import plot
     return plot(rows, summaries, paired, out, variants, fixed_for_k, succession_for_k)

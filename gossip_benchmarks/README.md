@@ -22,85 +22,104 @@ tracked historical result snapshots have been removed. Git history retains them.
 New results are ignored by Git; this change does not run a cleanup of your local
 untracked results.
 
-## Editing plots without rerunning benchmarks
+## Editing plots: complete Matplotlib control
 
-Start with **`_support/plot_settings.py`**. It contains five clearly named
-sections: `FRONTIER` (01), `OBJECT_SIZES` (02), `OWNER_FAILURE` (04), and
-`BORROWER_COUNTS` (07), plus `REPLICATION_COUNTS` (08).
-Each has figure size, title/footer, output filename/formats/DPI, layout spacing,
-and a settings dictionary for each panel. The `axis()` function at the top
-lists all available axis settings and their shared defaults.
+Open the file for the benchmark and edit its **`draw()` function**.
+Each file contains all figure creation, drawing, axis formatting, legends,
+annotations, spacing, and export calls for that benchmark. There is no shared
+appearance settings schema or rendering helper applying formatting afterward.
+The former `plot_settings.py` has been removed; its committed defaults are
+now written directly into these files.
 
-| Change | Setting |
+| Benchmark | File under `gossip_benchmarks/_support/` |
 | --- | --- |
-| Axis labels and panel title | `xlabel`, `ylabel`, `title` |
-| Tick positions and displayed text | `xticks` / `xticklabels`, `yticks` / `yticklabels` |
-| Tick rotation | `xrotation`, `yrotation` |
-| Axis limits | `xlim`, `ylim`, e.g. `(0, 3000)` |
-| Linear/log scales | `xscale`, `yscale`; use `xscale_kwargs` for the log base |
-| Font sizes | `label_fontsize`, `title_fontsize`, `tick_fontsize` |
-| Legend position, columns, font, frame | `legend={"loc": "upper right", "ncol": 1, "fontsize": 9, "frameon": False}` |
-| Hide legend or grid | `legend=None` or `grid=None` |
-| Colors, names, markers, line styles | The corresponding `*_SERIES` dictionary |
-| Error-bar cap size and line width | `ERROR_BARS`; individual series can override these |
-| Figure size, resolution, file type | `figsize` (inches), `dpi`, `formats` |
-| Figure spacing | `tight_layout`, e.g. `{"rect": (0, 0.12, 1, 0.94), "w_pad": 3}` |
-| Global font family and other Matplotlib defaults | `RC_PARAMS` |
+| 01: K comparison | `plot_frontier.py` |
+| 02: object-size comparison | `plot_object_sizes.py` |
+| 04: owner failure | `plot_owner_failure.py` |
+| 07: borrower counts | `plot_borrowers.py` |
+| 08: R/W counts | `plot_replication.py` |
 
-Set ticks/labels/limits to `None` to use the automatic or data-derived defaults.
-An explicit tick list replaces the default positions; labels must have the same
-length as the positions. Set ticks to `[]` to hide them. Explicit limits apply
-after ticks, so tick changes cannot silently widen a requested axis range.
-Changing ticks or limits changes only the display, not which runs are analyzed.
+03 writes profiling data/logs rather than figures. Correctness suites 05–06
+have no plots.
 
-For example, add these arguments to **both** `axis(...)` calls in
-`OBJECT_SIZES` to customize the x axis:
+Each drawing function is organized in this order:
+
+1. **Figure defaults:** a local `plt.rc_context` for any rcParams.
+2. **Figure and axes:** direct `plt.subplots` calls. Replace these with
+   GridSpec, subfigures, another panel arrangement, or additional axes.
+3. **Curves/error bars/bars:** direct `ax.errorbar`, `ax.plot`, or
+   `ax.bar` calls. Styles are ordinary Matplotlib keyword arguments;
+   edit calls or split the loop to make each curve/panel different.
+4. **First axis:** direct scale, tick, label, limit, grid and spine calls.
+5. **Second axis:** independent formatting calls.
+6. **Legends, titles and annotations:** ordinary Matplotlib artists.
+7. **Layout:** edit or replace `tight_layout`; use `subplots_adjust` if preferred.
+8. **Final custom edits:** add any Matplotlib operations here. No subsequent
+   helper resets labels, ticks, limits, or layout.
+9. **Saving:** independent PNG/PDF `savefig` calls. Edit filenames,
+   transparency, DPI, bounding boxes, metadata, formats, or add more exports.
+
+All axes and artist handles are accessible in that function:
+`fig`, `ax_throughput`, `ax_overhead` (or `ax_recovery`),
+`throughput_artists`, and the legend/title/footer handles.
+Add secondary axes, insets, custom locators/formatters, hatching, shaded regions,
+broken-axis layouts, or entirely different plot types directly in the file.
+You do not need to add support to another module first.
+
+For example, in Benchmark 02's final-custom-edits section:
 
 ```python
-xlabel="Object size",
-xticks=[1024, 16384, 262144, 1048576],
-xticklabels=["1 KiB", "16 KiB", "256 KiB", "1 MiB"],
-xrotation=0,
-label_fontsize=12,
-tick_fontsize=11,
+from matplotlib.ticker import MultipleLocator, StrMethodFormatter
+
+ax_throughput.set_xticks(
+    [1024, 16384, 262144, 1048576],
+    ["1 KiB", "16 KiB", "256 KiB", "1 MiB"],
+    rotation=0,
+)
+ax_throughput.set_xlabel("Object size", fontsize=14, labelpad=10)
+ax_throughput.set_ylim(0, 3200)
+ax_throughput.yaxis.set_major_locator(MultipleLocator(500))
+ax_throughput.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+ax_throughput.tick_params(axis="both", direction="in", length=6, width=1.2)
+ax_throughput.spines["left"].set_linewidth(1.5)
+
+# Edit a specific curve and its error-bar artists independently.
+curve = throughput_artists["succession_k32"]
+curve.lines[0].set_linewidth(3)
+for cap in curve.lines[1]:
+    cap.set_color("black")
+for bars in curve.lines[2]:
+    bars.set_alpha(0.4)
+
+throughput_legend.remove()
+throughput_legend = ax_throughput.legend(
+    loc="upper right", frameon=False, fontsize=11,
+)
 ```
 
-Keep the existing `xscale="log", xscale_kwargs={"base": 2}` if you want
-spacing proportional to log object size. For linear spacing, set
-`xscale="linear", xscale_kwargs={}` (the log-only `base` argument must be removed).
-Tick labels alone do not change the scale.
+Coordinates are:
 
-Tick coordinates differ between plots:
-
-| Panel | Coordinates to put in `xticks` |
+| Plot | X coordinates |
 | --- | --- |
-| 01, both panels | Positions `0, 1, 2, 3, 4, 5` for the usual K values `1, 2, 4, 8, 16, 32` |
-| 02, both panels | Object sizes in **bytes**, e.g. `1024`, `1048576` |
-| 04, throughput | Seconds relative to owner kill, e.g. `[-5, 0, 5, 10, 20]` |
-| 04, recovery bars | `0, 1, 2` for disabled, Fixed-R, Succession |
-| 07, both panels | Actual borrower counts, e.g. `1, 2, 4, 8, 16` |
-| 08, both panels | Equal R/W values: `1, 2, 3` |
+| 01 | Positions 0–5 for the usual K=1,2,4,8,16,32 |
+| 02 | Object sizes in bytes; default scale is log base 2 |
+| 04 timeline | Seconds relative to owner kill |
+| 04 recovery bars | Positions 0,1,2 for disabled, Fixed-R, Succession |
+| 07 | Actual borrower counts; default scale is log base 2 |
+| 08 | Actual equal R/W values, 1,2,3 |
 
-For example, in 01 use `xticks=[0, 2, 5]` and
-`xticklabels=["1", "4", "32"]` to show only those three tick labels.
-All six measured K values still contribute plotted points.
+Set limits after ticks, since Matplotlib may expand limits when setting ticks.
+If you change subplot arrangement, also update the named axes and later layout
+calls. When changing statistics displayed or removing error bars, update the
+figure's explanatory text to match.
 
-For larger layout changes, each benchmark has a short drawing module:
+The first part of each file prepares plotting arrays from the supplied results;
+`draw()` owns appearance. Shared `plots.py` only loads Matplotlib,
+formats size text, validates/extracts data, and routes existing entry points.
+Aggregation, benchmark execution and saved-data schemas stay in their existing
+runner modules.
 
-| File under `_support/` | Responsibility |
-| --- | --- |
-| `plot_frontier.py` | 01: K comparison layout |
-| `plot_object_sizes.py` | 02: object-size layout |
-| `plot_owner_failure.py` | 04: failure timeline and recovery bars |
-| `plot_borrowers.py` | 07: borrower-count throughput and overhead |
-| `plot_replication.py` | 08: R/W throughput and overhead |
-| `plots.py` | Shared validation, axis formatting, error bars, and saving |
-
-Benchmark 03 currently produces profiling JSON/CSV/logs and native stack data;
-it has no Matplotlib figures to customize. Correctness benchmarks 05–06 have
-no plot settings.
-
-After editing settings, regenerate figures from saved results:
+After editing, use the same saved-result commands:
 
 ```bash
 python gossip_benchmarks/01_frontier_performance.py plot \
@@ -111,23 +130,18 @@ python gossip_benchmarks/02_object_size_performance.py plot \
 
 python gossip_benchmarks/04_owner_failure_throughput.py plot \
     --output-dir PATH_TO_SAVED_OWNER_FAILURE_RUN
+
+python gossip_benchmarks/07_borrower_count_performance.py plot \
+    --output-dir gossip_benchmarks/results/borrower_counts
+
+python gossip_benchmarks/08_replication_count_performance.py plot \
+    --output-dir gossip_benchmarks/results/replication_counts
 ```
 
-These commands do not execute benchmark cases. The existing figures are replaced;
-choose a different `filename` in the settings to keep multiple visual versions.
-01 filenames support `{padding}`; titles/footers in 01 support
-`{payload_label}`, `{padding_label}`, and `{repetitions}`; 02 supports
-`{padding_label}` and `{repetitions}`. 07 supports `{payload_label}`,
-`{padding_label}`, and `{repetitions}`. 08 adds `{borrowers}` to these same
-placeholders. Set a title/footer to `""` to hide it.
-If you change the displayed statistics or remove CIs in a layout module, update
-the annotation accordingly.
-
-02's `--exclude-object-sizes` remains available and does not alter saved raw,
-configuration, or summary/paired CSV files. 04's existing replot command also
-regenerates derived bucket/summary CSVs; its trial JSON stays intact.
-`--bucket-seconds` changes 04's aggregation, not just its tick spacing; use the
-same bucket width when making appearance-only comparisons.
+These commands do not run benchmark cases. Existing figures are replaced unless
+you change the export filenames. 02 still supports `--exclude-object-sizes`.
+04 also regenerates derived bucket/summary CSVs, as before; its trial JSON stays
+intact. Its `--bucket-seconds` changes aggregation, not merely tick spacing.
 
 ## 1. Full K comparison
 
@@ -362,8 +376,7 @@ python gossip_benchmarks/07_borrower_count_performance.py \
     --output-dir gossip_benchmarks/results/borrowers_one
 ```
 
-For plot edits, change `BORROWER_COUNTS` / `BORROWER_COUNT_SERIES` in
-`_support/plot_settings.py`, then:
+For plot edits, edit `draw()` in `_support/plot_borrowers.py`, then:
 
 ```bash
 python gossip_benchmarks/07_borrower_count_performance.py plot \
@@ -445,9 +458,8 @@ configuration, source commit/content, and native binary. Use a different output
 directory to preserve another run, or `--overwrite` to replace this benchmark's
 named outputs.
 
-Change `REPLICATION_COUNTS` / `REPLICATION_COUNT_SERIES` in
-`_support/plot_settings.py` for labels, ticks, limits, styles, and exports.
-Then regenerate only figures:
+Edit `draw()` in `_support/plot_replication.py` for complete control over
+this figure, then regenerate only figures:
 
 ```bash
 python gossip_benchmarks/08_replication_count_performance.py plot \
