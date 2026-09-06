@@ -150,14 +150,27 @@ def write_outputs(out, rows):
     return summaries, paired
 
 
-def plot_saved(out):
+def plot_saved(out, exclude_sizes=None):
     config = json.loads((out / "run_config.json").read_text())
-    rows = b59.read_csv(out / "object_size_runs.csv")
+    excluded = set(exclude_sizes or [])
+    unknown = excluded - set(config["object_sizes"])
+    if unknown:
+        raise ValueError(f"Excluded sizes are not in the saved configuration: {sorted(unknown)}")
+    selected = [size for size in config["object_sizes"] if size not in excluded]
+    if not selected:
+        raise ValueError("At least one object size must remain for plotting")
+    # Filtering affects only the in-memory plot view. Preserve the complete
+    # raw journal, configuration and summary CSVs for later analysis/resume.
+    config = {**config, "object_sizes": selected}
+    rows = [row for row in b59.read_csv(out / "object_size_runs.csv")
+            if int(row["payload_bytes"]) not in excluded]
     seen = validate_rows(rows, config)
     expected = len(config["object_sizes"]) * len(VARIANTS) * config["repetitions"]
     if len(seen) != expected:
         raise ValueError(f"Only {len(seen)}/{expected} cases complete; resume before plotting")
-    summaries, paired = write_outputs(out, rows)
+    summaries, paired = aggregate(rows)
+    if excluded:
+        print("Plot excludes: " + ", ".join(size_label(size) for size in sorted(excluded)))
     plot_sizes(rows, summaries, paired, out, VARIANTS)
     print("\nFinal object-size comparison (application throughput):")
     sm = {(int(row["payload_bytes"]), row["variant"]): row for row in summaries}
@@ -274,6 +287,8 @@ def parser():
     p.add_argument("--object-sizes", type=parse_size, nargs="+",
                    default=[1024, 16384, 262144, 1048576, 4194304],
                    help="Returned object bytes, e.g. 1KiB 16KiB 256KiB 1MiB 4MiB")
+    p.add_argument("--exclude-object-sizes", type=parse_size, nargs="+",
+                   help="Plot only: omit saved sizes without changing any CSV or configuration")
     p.add_argument("--task-spec-padding", type=b59.b58.parse_padding,
                    default=b59.b58.SpecPadding("1KiB", 1024))
     p.add_argument("--repetitions", type=int, default=3)
@@ -299,8 +314,10 @@ def main():
     p = parser()
     args = p.parse_args()
     if args.command == "plot":
-        plot_saved(args.output_dir.resolve())
+        plot_saved(args.output_dir.resolve(), args.exclude_object_sizes)
         return
+    if args.exclude_object_sizes:
+        p.error("--exclude-object-sizes is only supported with the plot command")
     if args.repetitions < 2:
         p.error("--repetitions must be at least 2")
     if len(set(args.object_sizes)) != len(args.object_sizes):

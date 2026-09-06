@@ -78,6 +78,17 @@ settings and provenance.
 python gossip_benchmarks/02_object_size_performance.py plot
 ```
 
+To omit 4 MiB from the saved plots without rerunning any cases:
+
+```bash
+python gossip_benchmarks/02_object_size_performance.py plot \
+    --exclude-object-sizes 4MiB
+```
+
+This regenerates the PNG/PDF and prints the comparison for the remaining sizes.
+Raw results, configuration, and summary/paired CSVs retain every measured size.
+Use `plot` without exclusions to restore the full-size plots.
+
 ## 3. Profiling
 
 ```bash
