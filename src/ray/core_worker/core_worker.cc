@@ -7113,6 +7113,39 @@ void CoreWorker::HandleRecoverTaskOutput(rpc::RecoverTaskOutputRequest request,
     reply->set_result(rpc::RecoverTaskOutputReply::RETRY_LIMIT_EXCEEDED);
     break;
 
+  case PreparationResult::ALREADY_OWNED: {
+    // The first request already registered this task's replay on this worker.
+    // Return its existing deterministic reference without consuming a retry,
+    // touching reference counts, or submitting a second execution.
+    TaskSpecification existing_task(std::move(replay_task_proto));
+    if (request.return_index() >= existing_task.NumReturns()) {
+      reply->set_result(rpc::RecoverTaskOutputReply::REPLAY_FAILED);
+      break;
+    }
+    const ObjectID return_id = existing_task.ReturnId(request.return_index());
+    if (!reference_counter_->OwnedByUs(return_id)) {
+      // The result may have gone out of scope since replay registration.
+      // Do not recreate a task from a stale recovery request.
+      reply->set_result(rpc::RecoverTaskOutputReply::REPLAY_FAILED);
+      break;
+    }
+    auto *ref = reply->mutable_replacement_ref();
+    ref->set_object_id(return_id.Binary());
+    ref->mutable_owner_address()->CopyFrom(rpc_address_);
+    ref->set_call_site("existing recovery replay");
+    auto *metadata = ref->mutable_recovery_metadata();
+    metadata->set_task_id(request.task_id());
+    metadata->set_return_index(request.return_index());
+    metadata->mutable_manifest()->CopyFrom(latest_manifest);
+    if (existing_task.TensorTransport().has_value()) {
+      ref->set_tensor_transport(*existing_task.TensorTransport());
+    }
+    reply->set_result(rpc::RecoverTaskOutputReply::RECOVERED);
+    RAY_LOG(INFO).WithField(return_id)
+        << "Reusing locally owned recovery return";
+    break;
+  }
+
   case PreparationResult::READY:
     break;
   }

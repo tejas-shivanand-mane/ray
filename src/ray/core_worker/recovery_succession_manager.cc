@@ -3111,7 +3111,8 @@ RecoverySuccessionManager::PrepareTaskReplay(
 
   if (lineage_task_spec == nullptr ||
       lineage_task_spec->task_id() != task_id.Binary() ||
-      !IsEligibleTask(*lineage_task_spec)) {
+      !IsEligibleTask(*lineage_task_spec) ||
+      request.return_index() >= static_cast<uint32_t>(lineage_task_spec->num_returns())) {
     return ReplayPreparationResult::TASK_NOT_FOUND;
   }
 
@@ -3182,13 +3183,6 @@ RecoverySuccessionManager::PrepareTaskReplay(
     }
   }
 
-  const int32_t max_recovery_attempts = state.manifest.max_recovery_attempts();
-
-  if (max_recovery_attempts >= 0 &&
-      state.manifest.recovery_attempt() >= static_cast<uint32_t>(max_recovery_attempts)) {
-    return ReplayPreparationResult::RETRY_LIMIT_EXCEEDED;
-  }
-
   bool self_is_holder = false;
 
   for (const rpc::RecoveryHolder &holder : state.manifest.succession()) {
@@ -3200,6 +3194,22 @@ RecoverySuccessionManager::PrepareTaskReplay(
 
   if (!self_is_holder) {
     return ReplayPreparationResult::WRONG_HOLDER;
+  }
+
+  // RegisterOwnedTask records all static returns synchronously before the replay
+  // is submitted. Concurrent/late requesters must follow that acting owner,
+  // rather than register the same deterministic returns and TaskID again.
+  // Keep witness, manifest, tombstone and holder checks above this fast path.
+  if (state.owned_num_returns > 0) {
+    task_spec->CopyFrom(*lineage_task_spec);
+    return ReplayPreparationResult::ALREADY_OWNED;
+  }
+
+  const int32_t max_recovery_attempts = state.manifest.max_recovery_attempts();
+
+  if (max_recovery_attempts >= 0 &&
+      state.manifest.recovery_attempt() >= static_cast<uint32_t>(max_recovery_attempts)) {
+    return ReplayPreparationResult::RETRY_LIMIT_EXCEEDED;
   }
 
   state.manifest.set_recovery_attempt(state.manifest.recovery_attempt() + 1);

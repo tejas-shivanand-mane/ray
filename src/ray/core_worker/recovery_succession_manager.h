@@ -533,6 +533,7 @@ class RecoverySuccessionManager {
 
   enum class ReplayPreparationResult {
     READY,
+    ALREADY_OWNED,
     WITNESS_CONFIRMATION_REQUIRED,
     TASK_NOT_FOUND,
     MANIFEST_STALE,
