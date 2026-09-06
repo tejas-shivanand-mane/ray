@@ -27,7 +27,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import comparison
 from common import safe_shutdown, wait_for_cluster, write_csv
 from plots import pyplot
-from plot_owner_failure import draw
+from plotting.plot_owner_failure import draw
 from suite_runner import run_process
 
 HERE = Path(__file__).resolve().parent

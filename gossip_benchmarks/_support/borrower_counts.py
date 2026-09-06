@@ -18,7 +18,7 @@ import sys
 
 import comparison as b59
 from plots import pyplot
-from plot_borrowers import plot_borrowers
+from plotting.plot_borrowers import plot_borrowers
 from suite_runner import run_process
 
 HERE = Path(__file__).resolve().parent

@@ -15,7 +15,8 @@ repository root using your rebuilt Ray Python environment. Plotting requires
 | `07_borrower_count_performance.py` | Disabled vs Fixed-R K=32 and Succession K=32 across application borrower counts, including B=1 < R/W |
 | `08_replication_count_performance.py` | Disabled vs Fixed-R K=32 and Succession K=32 at R=W=1,2,3; fixed borrower count and topology |
 
-`_support/` contains shared workload/plot code and isolated correctness fixtures;
+`plotting/` contains the editable benchmark-specific plot files.
+`_support/` contains workload code, shared plot utilities and isolated correctness fixtures;
 these are implementation modules, not additional experiments to choose from.
 The old standalone experiments, patch utility scripts, phase directory, and
 tracked historical result snapshots have been removed. Git history retains them.
@@ -24,14 +25,15 @@ untracked results.
 
 ## Editing plots: complete Matplotlib control
 
-Open the file for the benchmark and edit its **`draw()` function**.
+Open the file for the benchmark in **`gossip_benchmarks/plotting/`** and edit
+its **`draw()` function**.
 Each file contains all figure creation, drawing, axis formatting, legends,
 annotations, spacing, and export calls for that benchmark. There is no shared
 appearance settings schema or rendering helper applying formatting afterward.
 The former `plot_settings.py` has been removed; its committed defaults are
 now written directly into these files.
 
-| Benchmark | File under `gossip_benchmarks/_support/` |
+| Benchmark | File under `gossip_benchmarks/plotting/` |
 | --- | --- |
 | 01: K comparison | `plot_frontier.py` |
 | 02: object-size comparison | `plot_object_sizes.py` |
@@ -376,7 +378,7 @@ python gossip_benchmarks/07_borrower_count_performance.py \
     --output-dir gossip_benchmarks/results/borrowers_one
 ```
 
-For plot edits, edit `draw()` in `_support/plot_borrowers.py`, then:
+For plot edits, edit `draw()` in `plotting/plot_borrowers.py`, then:
 
 ```bash
 python gossip_benchmarks/07_borrower_count_performance.py plot \
@@ -387,7 +389,7 @@ Replotting reads the saved journal/configuration, requires all configured cases
 to be complete, and replaces only the figures. It does not run Ray cases or
 rewrite raw/summary/paired CSVs. Tick positions are actual B values; default
 x spacing is log base 2. Larger layout changes belong in
-`_support/plot_borrowers.py`.
+`plotting/plot_borrowers.py`.
 
 Implementation was manually source/diff-reviewed; no build, test, benchmark,
 lint, or plot rendering was run while preparing this benchmark.
@@ -458,7 +460,7 @@ configuration, source commit/content, and native binary. Use a different output
 directory to preserve another run, or `--overwrite` to replace this benchmark's
 named outputs.
 
-Edit `draw()` in `_support/plot_replication.py` for complete control over
+Edit `draw()` in `plotting/plot_replication.py` for complete control over
 this figure, then regenerate only figures:
 
 ```bash
@@ -468,7 +470,7 @@ python gossip_benchmarks/08_replication_count_performance.py plot \
 
 The saved configuration and all configured cases are validated before plotting.
 Replotting does not execute cases or rewrite CSVs. Larger layout changes belong
-in `_support/plot_replication.py`; tick coordinates are the actual R/W values.
+in `plotting/plot_replication.py`; tick coordinates are the actual R/W values.
 
 This addition was manually source/diff-reviewed only. No build, test, lint,
 benchmark, or plot rendering was run.

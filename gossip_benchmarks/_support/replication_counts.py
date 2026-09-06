@@ -18,7 +18,7 @@ import sys
 
 import comparison as b59
 from plots import pyplot
-from plot_replication import plot_replication
+from plotting.plot_replication import plot_replication
 from suite_runner import run_process
 
 HERE = Path(__file__).resolve().parent

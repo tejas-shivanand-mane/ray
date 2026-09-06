@@ -7,6 +7,14 @@ confidence bands or latency-to-durable-protection measurements.
 from __future__ import annotations
 
 import math
+import sys
+from pathlib import Path
+
+# Child processes execute files in _support directly. Make the sibling plotting
+# package importable there as well as through the public benchmark entry points.
+_benchmark_dir = str(Path(__file__).resolve().parent.parent)
+if _benchmark_dir not in sys.path:
+    sys.path.insert(0, _benchmark_dir)
 
 
 def pyplot():
@@ -72,10 +80,10 @@ def summary_values(rows, metric):
 
 # Entry-point adapters only. Every drawing operation lives in the named file.
 def plot_k(rows, summaries, paired, out, variants, fixed_for_k, succession_for_k):
-    from plot_frontier import plot
+    from plotting.plot_frontier import plot
     return plot(rows, summaries, paired, out, variants, fixed_for_k, succession_for_k)
 
 
 def plot_sizes(rows, summaries, paired, out, variants):
-    from plot_object_sizes import plot
+    from plotting.plot_object_sizes import plot
     return plot(rows, summaries, paired, out, variants)
