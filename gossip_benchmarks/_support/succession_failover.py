@@ -724,6 +724,11 @@ def run_concurrent_recovery(
             f"PASS={int(passed)}"
         )
 
+        if error1:
+            print(f"    Requester 1 error: {error1}")
+        if error2:
+            print(f"    Requester 2 error: {error2}")
+
         return add_method_columns(row, METHOD)
 
     finally:
@@ -917,7 +922,10 @@ def run(args: argparse.Namespace) -> None:
         Path(args.output_dir)
         / "recovery_correctness_suite.csv"
     )
-    write_csv(output, rows)
+    # Cases have different measurements; include every field, including fields
+    # present only in a failed-case row. Missing values remain empty in the CSV.
+    fields = list(dict.fromkeys(key for row in rows for key in row))
+    write_csv(output, rows, fields=fields)
 
     passed = sum(int(row.get("pass", 0)) for row in rows)
 
