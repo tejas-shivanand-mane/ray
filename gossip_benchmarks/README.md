@@ -275,8 +275,12 @@ submits a new workload. The head/GCS, executor and both borrower nodes survive. 
 Ray nodes on one physical host; the injected failure removes the dedicated
 owner node, not the host.
 
-Time zero is immediately before node termination. The default 60-second
-post-failure observation budget includes node-removal time; reads begin as soon
+The plot starts at time zero immediately before the first pre-failure gate is
+released (after cluster/protection setup). The x-axis is time since simulation
+start, in seconds. Throughput bins are recomputed from saved elapsed read events;
+colored vertical lines mark each trial's actual owner failure time. The default 60-second
+post-failure observation budget begins immediately before node termination and
+includes node-removal time; reads begin as soon
 as removal returns, without waiting for GCS to mark the node dead. The run
 verifies node death before saving a successful result. JSON records the failure
 type, node ID, removal-completion time and final node-death confirmation time

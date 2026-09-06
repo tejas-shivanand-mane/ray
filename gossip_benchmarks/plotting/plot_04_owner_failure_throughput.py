@@ -7,10 +7,10 @@ def prepare_data(rows, runs, methods):
     data = {}
     for method in methods:
         selected = [r for r in rows if r["method"] == method]
-        xs = sorted({r["seconds_from_failure"] for r in selected})
+        xs = sorted({r["seconds_from_start"] for r in selected})
         means = [
-            sum(r["throughput_rps"] for r in selected if r["seconds_from_failure"] == x)
-            / sum(r["seconds_from_failure"] == x for r in selected)
+            sum(r["throughput_rps"] for r in selected if r["seconds_from_start"] == x)
+            / sum(r["seconds_from_start"] == x for r in selected)
             for x in xs
         ]
         selected_runs = [r for r in runs if r["method"] == method]
@@ -64,11 +64,22 @@ def draw(rows, runs, out, methods):
                 recovery_artists[method] = ax_recovery.bar(
                     position, data[method]["recovery_pct"], width=0.8,
                     color=style["color"], label=style["label"])
-        kill_line = ax_throughput.axvline(
-            0, color="black", linestyle="--", label=f"{failure_label} failure")
+        # Failure occurs at a slightly different elapsed time in each run.
+        # Draw each recorded time; do not imply a common failure at time zero.
+        kill_lines = {}
+        for method in methods:
+            selected_runs = [r for r in runs if r["method"] == method]
+            for index, run in enumerate(selected_runs):
+                kill_lines[(method, run["trial"])] = ax_throughput.axvline(
+                    run["failure_seconds"], color=styles[method]["color"],
+                    linestyle=":", linewidth=1, alpha=0.65,
+                    label=(f"{styles[method]['label']} failure"
+                           if index == 0 else "_nolegend_"))
+
 
         # 4. Timeline axis. Add locators, formatters, limits, scales, etc. here.
-        ax_throughput.set_xlabel(f"Seconds relative to {failure_label.lower()} failure")
+        ax_throughput.set_xlabel("Time since simulation start (s)")
+        ax_throughput.set_xlim(left=0)
         ax_throughput.set_ylabel("Throughput (objects/s)")
         ax_throughput.set_title("Paced finite backlog; curve ends when observation ends")
         ax_throughput.grid(False)

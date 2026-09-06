@@ -304,16 +304,16 @@ def plot(out, bucket_seconds):
     for run in runs:
         summary.append({key: value for key, value in run.items()
                         if key not in ("events", "replay_counts", "protection_profile")})
-        lo = math.floor(-run["failure_seconds"] / bucket_seconds)
-        hi = math.ceil((run["observation_end_seconds"] - run["failure_seconds"]) / bucket_seconds)
-        for bucket in range(lo, hi):
+        # Bin from the start of the read phase, using saved absolute elapsed
+        # timestamps. Rebinning avoids shifting failure-aligned bucket means.
+        hi = math.ceil(run["observation_end_seconds"] / bucket_seconds)
+        for bucket in range(hi):
             left, right = bucket * bucket_seconds, (bucket + 1) * bucket_seconds
-            coverage = min(right, run["observation_end_seconds"] - run["failure_seconds"]) - max(
-                left, -run["failure_seconds"])
-            count = sum(e["ok"] and left <= e["elapsed_seconds"] - run["failure_seconds"] < right
+            coverage = min(right, run["observation_end_seconds"]) - left
+            count = sum(e["ok"] and left <= e["elapsed_seconds"] < right
                         for e in run["events"])
             rows.append({"method": run["method"], "trial": run["trial"],
-                         "seconds_from_failure": (left + right) / 2,
+                         "seconds_from_start": (left + right) / 2,
                          "throughput_rps": count / coverage,
                          "observed_seconds": coverage})
     draw(rows, runs, out, METHODS)
