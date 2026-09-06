@@ -152,3 +152,30 @@ BORROWER_COUNT_SERIES = {
     "succession_k32": {"label": "Succession K=32", "color": COLORS["succession"],
                        "marker": "^", "linestyle": "-"},
 }
+
+# Benchmark 08: x coordinates are the actual equal R/W values (1,2,3).
+REPLICATION_COUNTS = {
+    "figsize": (13, 5),
+    "formats": ("png", "pdf"), "dpi": 200,
+    "filename": "replication_count_comparison",
+    "savefig": {"bbox_inches": "tight"},
+    "title": "R/W effect at K=32 — object {payload_label}, TaskSpec padding {padding_label}",
+    "title_kwargs": {"fontsize": 13},
+    "footer": "{borrowers} application borrowers · fixed topology · {repetitions} repetitions · profiling OFF · pointwise 95% CIs\n"
+              "R and W vary together. All borrowers must finish; durable admission can overlap completion.",
+    "footer_position": (0.5, 0.01),
+    "footer_kwargs": {"ha": "center", "fontsize": 9},
+    "tight_layout": {"rect": (0, 0.12, 1, 0.94)},
+    "throughput": axis(xlabel="Configured holder / witness count (R = W)",
+                       ylabel="Application throughput (pipelines/s)", ylim=(0, None)),
+    "overhead": axis(xlabel="Configured holder / witness count (R = W)",
+                     ylabel="Throughput overhead versus paired disabled (%)"),
+}
+REPLICATION_COUNT_SERIES = {
+    "disabled": {"label": "Disabled", "color": COLORS["disabled"],
+                 "marker": "s", "linestyle": "--"},
+    "fixed_k32": {"label": "Fixed-R K=32", "color": COLORS["fixed_r"],
+                  "marker": "o", "linestyle": "-"},
+    "succession_k32": {"label": "Succession K=32", "color": COLORS["succession"],
+                       "marker": "^", "linestyle": "-"},
+}

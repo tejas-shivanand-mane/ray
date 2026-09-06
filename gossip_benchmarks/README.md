@@ -1,6 +1,6 @@
 # Recovery benchmark suite
 
-Seven public commands replace the old numbered/phase experiments. Run from the
+Eight public commands replace the old numbered/phase experiments. Run from the
 repository root using your rebuilt Ray Python environment. Plotting requires
 `matplotlib`. No command builds Ray, changes kernel settings, or invokes sudo.
 
@@ -13,6 +13,7 @@ repository root using your rebuilt Ray Python environment. Plotting requires
 | `05_succession_correctness.py` | Succession admission, owner failure, commit gap, provisional confirmation, appends, failover, concurrency, retries, late borrowers |
 | `06_fixed_r_correctness.py` | Fixed-R owner/node failure, grouping/rollover, lifecycle/cleanup, concurrent claims, witness failure/stall, acting-owner handoff |
 | `07_borrower_count_performance.py` | Disabled vs Fixed-R K=32 and Succession K=32 across application borrower counts, including B=1 < R/W |
+| `08_replication_count_performance.py` | Disabled vs Fixed-R K=32 and Succession K=32 at R=W=1,2,3; fixed borrower count and topology |
 
 `_support/` contains shared workload/plot code and isolated correctness fixtures;
 these are implementation modules, not additional experiments to choose from.
@@ -23,9 +24,9 @@ untracked results.
 
 ## Editing plots without rerunning benchmarks
 
-Start with **`_support/plot_settings.py`**. It contains four clearly named
+Start with **`_support/plot_settings.py`**. It contains five clearly named
 sections: `FRONTIER` (01), `OBJECT_SIZES` (02), `OWNER_FAILURE` (04), and
-`BORROWER_COUNTS` (07).
+`BORROWER_COUNTS` (07), plus `REPLICATION_COUNTS` (08).
 Each has figure size, title/footer, output filename/formats/DPI, layout spacing,
 and a settings dictionary for each panel. The `axis()` function at the top
 lists all available axis settings and their shared defaults.
@@ -78,6 +79,7 @@ Tick coordinates differ between plots:
 | 04, throughput | Seconds relative to owner kill, e.g. `[-5, 0, 5, 10, 20]` |
 | 04, recovery bars | `0, 1, 2` for disabled, Fixed-R, Succession |
 | 07, both panels | Actual borrower counts, e.g. `1, 2, 4, 8, 16` |
+| 08, both panels | Equal R/W values: `1, 2, 3` |
 
 For example, in 01 use `xticks=[0, 2, 5]` and
 `xticklabels=["1", "4", "32"]` to show only those three tick labels.
@@ -91,6 +93,7 @@ For larger layout changes, each benchmark has a short drawing module:
 | `plot_object_sizes.py` | 02: object-size layout |
 | `plot_owner_failure.py` | 04: failure timeline and recovery bars |
 | `plot_borrowers.py` | 07: borrower-count throughput and overhead |
+| `plot_replication.py` | 08: R/W throughput and overhead |
 | `plots.py` | Shared validation, axis formatting, error bars, and saving |
 
 Benchmark 03 currently produces profiling JSON/CSV/logs and native stack data;
@@ -115,7 +118,8 @@ choose a different `filename` in the settings to keep multiple visual versions.
 01 filenames support `{padding}`; titles/footers in 01 support
 `{payload_label}`, `{padding_label}`, and `{repetitions}`; 02 supports
 `{padding_label}` and `{repetitions}`. 07 supports `{payload_label}`,
-`{padding_label}`, and `{repetitions}`. Set a title/footer to `""` to hide it.
+`{padding_label}`, and `{repetitions}`. 08 adds `{borrowers}` to these same
+placeholders. Set a title/footer to `""` to hide it.
 If you change the displayed statistics or remove CIs in a layout module, update
 the annotation accordingly.
 
@@ -374,3 +378,85 @@ x spacing is log base 2. Larger layout changes belong in
 
 Implementation was manually source/diff-reviewed; no build, test, benchmark,
 lint, or plot rendering was run while preparing this benchmark.
+
+
+## 8. Replication-count effect: R=W=1,2,3
+
+```bash
+python gossip_benchmarks/08_replication_count_performance.py \
+    --rw-values 1 2 3 \
+    --repetitions 3 --warmup-seconds 5 --duration-seconds 30
+```
+
+Compare disabled, Fixed-R K=32, and Succession K=32 while varying **R and W
+together**. R is the target number of non-owner lineage holders; W is the
+configured witness count. This sweep does not isolate the cost of changing
+only R or only W.
+
+Default: **27 fresh-cluster cases**, profiling OFF. Application fan-out stays
+at **three borrowers** at every R/W value. Each case also has the same **eight
+local Ray nodes**: head/owner, producer/executor, three distinct borrower nodes,
+and three additional witness-capable nodes. Only the configured R/W changes;
+the extra witness-capable nodes remain present at R/W=1 and 2. Three configured
+witness-capable nodes do not mean W is forced to three.
+
+Object payload and separate TaskSpec padding are both 1 KiB; burst size is 32,
+in-flight producer pipelines 128, and timed duration 30 seconds. Every borrower
+must consume the correct result before a pipeline counts as completed.
+No failures are injected, and holder admission can overlap application
+completion. Having at least R borrower candidates is not a measurement of
+achieved durable coverage.
+
+Disabled is rerun in every R/W/repetition block with recovery OFF and the
+same topology. Its row's R/W identifies the comparison block, not active
+replication. Overheads use that block's disabled run; Succession vs Fixed-R
+ratios are also paired within the block. Three repetitions balance both
+variant positions and, for the full three-value sweep, R/W block positions.
+Printed results and CSVs include means, CVs, pointwise 95% Student-t intervals,
+and the equal-K method comparison. Six repetitions give two balanced cycles.
+
+Use `--borrowers N` to choose a different **fixed** fan-out for the whole sweep.
+The default of three supplies enough downstream candidates for the largest R.
+One borrower is allowed if deliberately studying B<R; in that case Succession
+can remain below its target R and these are not equal-achieved-durability
+comparisons. Physical-host failure independence is not established by this
+local multi-node benchmark.
+
+The existing runtime has some optimized paths specialized for R=2/W=2.
+This benchmark uses the current implementation unchanged, including its general
+paths at other R/W values. Differences can reflect both replication cost and
+which implementation paths apply. No Frontier algorithm change is made.
+Only this benchmark opts into varying R/W; benchmarks 01–07 keep their existing
+R=2/W=2 behavior.
+
+Outputs under `gossip_benchmarks/results/replication_counts/`:
+
+- `replication_count_runs.csv`: completed-case journal including R, W, fixed
+  borrower count, provisioned witness-node count, completion/latency counts,
+  and execution position.
+- `replication_count_summary.csv` and `replication_count_paired.csv`:
+  statistics separated by R/W and method.
+- `replication_count_comparison.png/.pdf`: application throughput and paired
+  overhead across R/W.
+- `run_config.json` and case logs: settings plus source/native fingerprints.
+
+Repeat the same command to resume interrupted runs. Resume requires matching
+configuration, source commit/content, and native binary. Use a different output
+directory to preserve another run, or `--overwrite` to replace this benchmark's
+named outputs.
+
+Change `REPLICATION_COUNTS` / `REPLICATION_COUNT_SERIES` in
+`_support/plot_settings.py` for labels, ticks, limits, styles, and exports.
+Then regenerate only figures:
+
+```bash
+python gossip_benchmarks/08_replication_count_performance.py plot \
+    --output-dir gossip_benchmarks/results/replication_counts
+```
+
+The saved configuration and all configured cases are validated before plotting.
+Replotting does not execute cases or rewrite CSVs. Larger layout changes belong
+in `_support/plot_replication.py`; tick coordinates are the actual R/W values.
+
+This addition was manually source/diff-reviewed only. No build, test, lint,
+benchmark, or plot rendering was run.

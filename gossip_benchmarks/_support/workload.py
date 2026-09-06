@@ -2,7 +2,8 @@
 """Shared fresh-cluster workload used by performance experiments.
 
 Two borrowers by default; the borrower sweep explicitly varies this count.
-R=2/W=2. Timed completion is application completion; admission can overlap it."""
+R=2/W=2 by default; Benchmark 08 explicitly opts into its R/W sweep.
+Timed completion is application completion; admission can overlap it."""
 from __future__ import annotations
 
 import argparse
@@ -137,19 +138,24 @@ def case_config(variant: str, holders: int, witnesses: int, profiling: bool) -> 
 
 
 def start_cluster(args: argparse.Namespace, variant: str, profiling: bool, *,
-                  borrower_count: int = 2) -> tuple[Cluster, str]:
-    if args.holders != 2:
-        raise ValueError("The shared workload requires --holders=2")
+                  borrower_count: int = 2, replication_sweep: bool = False,
+                  witness_nodes: int | None = None) -> tuple[Cluster, str]:
+    allowed = (1, 2, 3) if replication_sweep else (2,)
+    if args.holders not in allowed:
+        raise ValueError(f"This workload requires --holders in {allowed}")
     if args.witness_count != args.holders:
         raise ValueError("--witness-count must equal --holders")
     if borrower_count < 1:
         raise ValueError("Need at least one application borrower")
+    witness_nodes = args.witness_count if witness_nodes is None else witness_nodes
+    if witness_nodes < args.witness_count:
+        raise ValueError("Not enough witness-capable nodes for configured W")
     cluster = Cluster()
     cluster.add_node(num_cpus=0, _system_config=case_config(variant, args.holders, args.witness_count, profiling), include_dashboard=False)
     producer = cluster.add_node(num_cpus=args.cpus_per_node, resources={"producer_node": 1})
     for i in range(borrower_count):
         cluster.add_node(num_cpus=args.cpus_per_node, resources={f"borrower_node_{i}": 1})
-    for i in range(args.witness_count):
+    for i in range(witness_nodes):
         cluster.add_node(num_cpus=0, resources={f"witness_node_{i}": 1})
     return cluster, producer.node_id
 
@@ -265,13 +271,17 @@ def run_window(*, produce: Any, borrowers: list[Any], strategy: Any, padding: tu
     }
 
 
-def single_perf(args: argparse.Namespace, *, borrower_count: int = 2) -> dict[str, Any]:
+def single_perf(args: argparse.Namespace, *, borrower_count: int = 2,
+                replication_sweep: bool = False,
+                witness_nodes: int | None = None) -> dict[str, Any]:
     cluster = None
+    witness_nodes = args.witness_count if witness_nodes is None else witness_nodes
     try:
         cluster, producer_node = start_cluster(
-            args, args.single_variant, False, borrower_count=borrower_count)
+            args, args.single_variant, False, borrower_count=borrower_count,
+            replication_sweep=replication_sweep, witness_nodes=witness_nodes)
         ray.init(address=cluster.address, log_to_driver=False, include_dashboard=False)
-        wait_for_cluster(ray, 1 + 1 + borrower_count + args.witness_count, args.cluster_timeout_seconds)
+        wait_for_cluster(ray, 1 + 1 + borrower_count + witness_nodes, args.cluster_timeout_seconds)
         produce, Borrower = remote_types()
         borrowers = [Borrower.options(resources={f"borrower_node_{i}": 0.01}, num_cpus=0).remote() for i in range(borrower_count)]
         ray.get([b.ping.remote() for b in borrowers])
