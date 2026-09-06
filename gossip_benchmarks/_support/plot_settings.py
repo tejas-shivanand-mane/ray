@@ -123,3 +123,32 @@ OWNER_FAILURE_SERIES = {
 }
 OWNER_KILL_LINE = {"color": "black", "linestyle": "--", "label": "Owner kill"}
 OWNER_BAR = {"width": 0.8}
+
+# Benchmark 07: tick positions are actual application borrower counts.
+BORROWER_COUNTS = {
+    "figsize": (13, 5),
+    "formats": ("png", "pdf"), "dpi": 200,
+    "filename": "borrower_count_comparison",
+    "savefig": {"bbox_inches": "tight"},
+    "title": "Borrower-count effect — object {payload_label}, TaskSpec padding {padding_label}",
+    "title_kwargs": {"fontsize": 13},
+    "footer": "Target R=2, W=2 · K=32 · {repetitions} repetitions · profiling OFF · bars: pointwise 95% CIs\n"
+              "All borrowers must consume each object. B<R may leave Succession below target R; durability is not measured.",
+    "footer_position": (0.5, 0.01),
+    "footer_kwargs": {"ha": "center", "fontsize": 9},
+    "tight_layout": {"rect": (0, 0.12, 1, 0.94)},
+    "throughput": axis(xlabel="Application borrowers per object",
+                       ylabel="Application throughput (pipelines/s)", ylim=(0, None),
+                       xscale="log", xscale_kwargs={"base": 2}),
+    "overhead": axis(xlabel="Application borrowers per object",
+                     ylabel="Throughput overhead versus same-count disabled (%)",
+                     xscale="log", xscale_kwargs={"base": 2}),
+}
+BORROWER_COUNT_SERIES = {
+    "disabled": {"label": "Disabled", "color": COLORS["disabled"],
+                 "marker": "s", "linestyle": "--"},
+    "fixed_k32": {"label": "Fixed-R K=32", "color": COLORS["fixed_r"],
+                  "marker": "o", "linestyle": "-"},
+    "succession_k32": {"label": "Succession K=32", "color": COLORS["succession"],
+                       "marker": "^", "linestyle": "-"},
+}

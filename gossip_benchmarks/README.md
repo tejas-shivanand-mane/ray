@@ -1,6 +1,6 @@
 # Recovery benchmark suite
 
-Six public commands replace the old numbered/phase experiments. Run from the
+Seven public commands replace the old numbered/phase experiments. Run from the
 repository root using your rebuilt Ray Python environment. Plotting requires
 `matplotlib`. No command builds Ray, changes kernel settings, or invokes sudo.
 
@@ -12,6 +12,7 @@ repository root using your rebuilt Ray Python environment. Plotting requires
 | `04_owner_failure_throughput.py` | Owner-worker failure: time-binned successful reads and fraction of unfinished objects recovered, against disabled |
 | `05_succession_correctness.py` | Succession admission, owner failure, commit gap, provisional confirmation, appends, failover, concurrency, retries, late borrowers |
 | `06_fixed_r_correctness.py` | Fixed-R owner/node failure, grouping/rollover, lifecycle/cleanup, concurrent claims, witness failure/stall, acting-owner handoff |
+| `07_borrower_count_performance.py` | Disabled vs Fixed-R K=32 and Succession K=32 across application borrower counts, including B=1 < R/W |
 
 `_support/` contains shared workload/plot code and isolated correctness fixtures;
 these are implementation modules, not additional experiments to choose from.
@@ -22,8 +23,9 @@ untracked results.
 
 ## Editing plots without rerunning benchmarks
 
-Start with **`_support/plot_settings.py`**. It contains three clearly named
-sections: `FRONTIER` (01), `OBJECT_SIZES` (02), and `OWNER_FAILURE` (04).
+Start with **`_support/plot_settings.py`**. It contains four clearly named
+sections: `FRONTIER` (01), `OBJECT_SIZES` (02), `OWNER_FAILURE` (04), and
+`BORROWER_COUNTS` (07).
 Each has figure size, title/footer, output filename/formats/DPI, layout spacing,
 and a settings dictionary for each panel. The `axis()` function at the top
 lists all available axis settings and their shared defaults.
@@ -75,6 +77,7 @@ Tick coordinates differ between plots:
 | 02, both panels | Object sizes in **bytes**, e.g. `1024`, `1048576` |
 | 04, throughput | Seconds relative to owner kill, e.g. `[-5, 0, 5, 10, 20]` |
 | 04, recovery bars | `0, 1, 2` for disabled, Fixed-R, Succession |
+| 07, both panels | Actual borrower counts, e.g. `1, 2, 4, 8, 16` |
 
 For example, in 01 use `xticks=[0, 2, 5]` and
 `xticklabels=["1", "4", "32"]` to show only those three tick labels.
@@ -87,6 +90,7 @@ For larger layout changes, each benchmark has a short drawing module:
 | `plot_frontier.py` | 01: K comparison layout |
 | `plot_object_sizes.py` | 02: object-size layout |
 | `plot_owner_failure.py` | 04: failure timeline and recovery bars |
+| `plot_borrowers.py` | 07: borrower-count throughput and overhead |
 | `plots.py` | Shared validation, axis formatting, error bars, and saving |
 
 Benchmark 03 currently produces profiling JSON/CSV/logs and native stack data;
@@ -110,7 +114,8 @@ These commands do not execute benchmark cases. The existing figures are replaced
 choose a different `filename` in the settings to keep multiple visual versions.
 01 filenames support `{padding}`; titles/footers in 01 support
 `{payload_label}`, `{padding_label}`, and `{repetitions}`; 02 supports
-`{padding_label}` and `{repetitions}`. Set a title/footer to `""` to hide it.
+`{padding_label}` and `{repetitions}`. 07 supports `{payload_label}`,
+`{padding_label}`, and `{repetitions}`. Set a title/footer to `""` to hide it.
 If you change the displayed statistics or remove CIs in a layout module, update
 the annotation accordingly.
 
@@ -283,3 +288,89 @@ These are broad regression suites, not a proof or an exhaustive fault-state
 enumeration. The new arrangement and fixture adaptations still need execution
 on your system. No local build, test, benchmark or plot execution was performed
 when this consolidation was prepared.
+
+## 7. Borrower-count effect, including fewer borrowers than R/W
+
+Compare **disabled**, **Fixed-R K=32**, and **Succession K=32** with a configurable
+number B of application borrowers per producer object. Default counts are
+**1, 2, 4, 8, 16**; R=2 and W=2 remain fixed, including at B=1.
+
+```bash
+python gossip_benchmarks/07_borrower_count_performance.py \
+    --borrower-counts 1 2 4 8 16 \
+    --repetitions 3 --warmup-seconds 5 --duration-seconds 30
+```
+
+Default: **45 fresh-cluster cases**, profiling OFF, object payload 1 KiB, separate
+TaskSpec padding 1 KiB, burst size 32, and 128 in-flight producer pipelines.
+All three variants use the same application workload at a given B.
+Three repetitions balance each variant across the three execution positions
+within each borrower count. Use six repetitions for two full cycles; this
+does not guarantee narrow confidence intervals.
+
+**What B=1 means:** it is one real downstream application borrower, not two
+borrowers disguised as one, and neither R nor W is lowered. The executor is not
+automatically admitted as a Succession holder: the current implementation admits
+downstream borrower candidates. With fewer than R borrowers, Succession can
+remain below its target R while Fixed-R retains its witness-holder replication
+policy. This measures the application cost of each policy under low fan-out;
+it must not be presented as a comparison at equal achieved durability.
+No extra holder admissions or dummy application consumers are forced.
+
+The owner exports every object directly to each borrower. A pipeline counts as
+complete only after **all B borrowers return the correct object value**. The
+denominator is producer pipelines, not individual borrower reads: one pipeline
+at B=16 includes sixteen consumes. In-flight producer count stays fixed, so
+outstanding borrower calls grow with B. Completion can overlap holder admission;
+this benchmark does not measure durable coverage or recovery.
+
+Topology is one head/owner node, one producer/executor node, B distinct borrower
+nodes, and two additional witness nodes (**B+4 logical Ray nodes**, for every
+variant). All are created locally by Ray's Cluster helper. R/W do not grow with B,
+but local process count, configured CPU resources, and memory footprint do.
+Node-distinct placement is not a claim of distinct physical machines. Higher B
+therefore measures fan-out under this topology, not pure borrower metadata cost
+on a fixed-size cluster. Existing 01/02 defaults remain two borrowers.
+
+Output directory: `results/borrower_counts/` under `gossip_benchmarks/`:
+
+- `borrower_count_runs.csv`: every completed case, completion/latency counts,
+  actual borrower count, target holders/witnesses, and variant execution position.
+- `borrower_count_summary.csv`: throughput and latency statistics by B/variant.
+- `borrower_count_paired.csv`: overhead relative to disabled at the **same B and
+  repetition**, plus Succession's percentage speedup over Fixed-R K=32.
+- `borrower_count_comparison.png/.pdf`: throughput and paired overhead with
+  pointwise 95% Student-t intervals.
+- `run_config.json` and per-case logs: settings, source/native provenance.
+  The native extension SHA-256 identifies the binary even when Ray's build
+  commit is a placeholder; it does not recover the missing build commit.
+
+Completed cases are journaled after each success. Repeat the identical run
+command to resume. Settings, source commit/content, and native binary must match.
+Use a fresh `--output-dir` to retain another run; `--overwrite` starts again
+by removing only this benchmark's named outputs in the selected directory.
+
+To run only the below-R case:
+
+```bash
+python gossip_benchmarks/07_borrower_count_performance.py \
+    --borrower-counts 1 \
+    --output-dir gossip_benchmarks/results/borrowers_one
+```
+
+For plot edits, change `BORROWER_COUNTS` / `BORROWER_COUNT_SERIES` in
+`_support/plot_settings.py`, then:
+
+```bash
+python gossip_benchmarks/07_borrower_count_performance.py plot \
+    --output-dir gossip_benchmarks/results/borrower_counts
+```
+
+Replotting reads the saved journal/configuration, requires all configured cases
+to be complete, and replaces only the figures. It does not run Ray cases or
+rewrite raw/summary/paired CSVs. Tick positions are actual B values; default
+x spacing is log base 2. Larger layout changes belong in
+`_support/plot_borrowers.py`.
+
+Implementation was manually source/diff-reviewed; no build, test, benchmark,
+lint, or plot rendering was run while preparing this benchmark.
