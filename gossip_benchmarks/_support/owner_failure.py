@@ -1,8 +1,8 @@
-"""Paced reads of distinct pre-owned objects across a real owner-worker failure.
+"""Paced reads of distinct pre-owned objects across a real owner-node failure.
 
 A finite backlog is created and exported directly by its owner to two independent
 borrowers. Original executions block on per-object gates. A small prefix is
-released and consumed before failure. The owner worker is killed; the remaining
+released and consumed before failure. The owner node is terminated ungracefully; the remaining
 gates stay closed, so successful same-ObjectID reads require recovery replay.
 This diagnostic is not steady-state producer throughput and is not Benchmark 01.
 """
@@ -137,6 +137,8 @@ def single(args):
     evidence = {}
     ids = []
     failure_time = None
+    owner_node_id = None
+    node_removal_finished = None
     phase = "cluster setup"
     with tempfile.TemporaryDirectory(prefix="ray_owner_failure_") as directory:
         root = Path(directory)
@@ -146,6 +148,7 @@ def single(args):
             config["object_timeout_milliseconds"] = 500
             cluster.add_node(num_cpus=0, _system_config=config, include_dashboard=False)
             owner_node = cluster.add_node(num_cpus=0, resources={"failure_owner": 1})
+            owner_node_id = owner_node.node_id
             executor = cluster.add_node(num_cpus=max(4, math.ceil(args.tasks / 10) + 1))
             for i in range(2):
                 cluster.add_node(num_cpus=4, resources={f"failure_borrower_{i}": 1})
@@ -220,10 +223,13 @@ def single(args):
             # All unfinished original gates remain closed, including after owner death.
             failure_time = time.monotonic() - start
             failure_wall_ns = time.time_ns()
-            phase = "owner termination"
-            ray.kill(owner, no_restart=True)
+            phase = "owner-node termination"
+            # Start the observation clock at failure injection, not after node
+            # removal or failure detection. The head/GCS and executor survive.
+            deadline = start + failure_time + args.after_seconds
+            cluster.remove_node(owner_node, allow_graceful=False)
+            node_removal_finished = time.monotonic() - start
             phase = "post-failure reads"
-            deadline = time.monotonic() + args.after_seconds
             for i in range(args.before_tasks, args.tasks):
                 if time.monotonic() >= deadline:
                     break
@@ -240,9 +246,25 @@ def single(args):
             for event in after:
                 if event["ok"] and replay_counts[str(event["index"])] < 1:
                     raise RuntimeError("Post-failure success lacked an observed recovery replay")
+            # Verify the intended node failure without delaying the start of
+            # post-failure reads. This timestamp is a final confirmation, not
+            # a measurement of when GCS first detected the failure.
+            phase = "owner-node death verification"
+            verification_deadline = time.monotonic() + args.setup_timeout_seconds
+            while True:
+                node_records = [n for n in ray.nodes() if n["NodeID"] == owner_node_id]
+                if node_records and all(not n["Alive"] for n in node_records):
+                    break
+                if time.monotonic() >= verification_deadline:
+                    raise TimeoutError("Owner node was not confirmed dead in GCS")
+                time.sleep(0.1)
+            node_death_confirmed = time.monotonic() - start
             first = next((e["elapsed_seconds"] - failure_time for e in after if e["ok"]), None)
             result = {
                 "method": method, "k": args.k, "trial": args.single_trial,
+                "failure_type": "owner_node", "owner_node_id": owner_node_id,
+                "node_removal_finished_seconds": node_removal_finished,
+                "node_death_confirmed_seconds": node_death_confirmed,
                 "tasks": args.tasks, "before_tasks": args.before_tasks,
                 "payload_bytes": args.payload_bytes, "holders": 2, "witnesses": 2,
                 "failure_seconds": failure_time, "observation_end_seconds": observation_end,
@@ -259,7 +281,9 @@ def single(args):
         except Exception:
             state = {"phase": phase, "traceback": traceback.format_exc(),
                      "events": events, "object_ids": ids,
-                     "failure_seconds": failure_time, "protection_profile": evidence}
+                     "failure_seconds": failure_time, "protection_profile": evidence,
+                     "failure_type": "owner_node", "owner_node_id": owner_node_id,
+                     "node_removal_finished_seconds": node_removal_finished}
             try:
                 save_failure(args, cluster, root, state)
             except Exception as diagnostic_error:

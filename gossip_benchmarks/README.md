@@ -256,7 +256,7 @@ and exited-thread samples are retained. Profiling throughput is diagnostic;
 use experiment 01 or 02 for performance conclusions. Logs and raw files use
 a fresh timestamped directory under `results/profile/`.
 
-## 4. Owner failure and resumption
+## 4. Owner-node failure and resumption
 
 ```bash
 python gossip_benchmarks/04_owner_failure_throughput.py
@@ -267,10 +267,21 @@ Use `--k 32` for grouped recovery and `--trials 3` for repetitions.
 
 The actual owner creates 32 distinct objects, retains their references and
 exports them directly to two independent borrowers. Original executions are
-gated. Eight objects are released/read before the owner worker is killed;
+gated. Eight objects are released/read before the entire owner Ray node is terminated
+ungracefully (`cluster.remove_node(..., allow_graceful=False)`);
 the remaining original gates stay closed. Successful post-failure reads must
 retain the ObjectID and have an observed recovery replay. No replacement owner
-submits a new workload. The executor node survives, isolating owner failure.
+submits a new workload. The head/GCS, executor and both borrower nodes survive. These are seven logical
+Ray nodes on one physical host; the injected failure removes the dedicated
+owner node, not the host.
+
+Time zero is immediately before node termination. The default 60-second
+post-failure observation budget includes node-removal time; reads begin as soon
+as removal returns, without waiting for GCS to mark the node dead. The run
+verifies node death before saving a successful result. JSON records the failure
+type, node ID, removal-completion time and final node-death confirmation time
+(the latter is not the initial failure-detection latency). Reads remain paced
+at 0.25 seconds with a 30-second per-read timeout and a 64 KiB payload.
 
 This is **paced read throughput over a finite backlog**, not steady-state task
 production throughput. Both borrowers must succeed for an object to count.
@@ -281,6 +292,12 @@ Protection counters are enabled for setup evidence, so this is diagnostic.
 
 Output: timestamped `results/owner_failure/`, raw events/protection/replay
 evidence in JSON, bucket/summary CSVs, `04_owner_failure_throughput.png` and `.pdf`.
+Fixed-R uses a thick blue solid line with hollow squares; Succession uses a
+thin orange dashed line with smaller filled dots. Both remain visible when
+their data coincide, without shifting measured values. All style code remains
+editable in `plotting/plot_04_owner_failure_throughput.py::draw()`.
+Replotting legacy worker-failure JSON keeps the owner-worker label; it cannot
+convert an old run into a node-failure experiment. Mixed failure types are rejected.
 
 ```bash
 python gossip_benchmarks/04_owner_failure_throughput.py plot --output-dir PATH_TO_SAVED_RUN
