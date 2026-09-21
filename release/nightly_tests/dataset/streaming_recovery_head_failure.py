@@ -82,7 +82,7 @@ def run_head_failure_cases(benchmark, args):
 
 
 @contextmanager
-def local_head_failure_cluster(args):
+def local_head_failure_cluster(args, *, coordinator_cpus=1):
     if sys.platform != "linux":
         raise ValueError("The local head-failure harness requires Linux RocksDB support")
     if not 2 <= args.local_executor_nodes <= 250:
@@ -116,7 +116,7 @@ def local_head_failure_cluster(args):
             cluster_id = head.cluster_id.hex()
             session_name = head.session_name
             coordinator = cluster.add_node(
-                num_cpus=1, node_ip_address="127.0.0.3", **node_options,
+                num_cpus=coordinator_cpus, node_ip_address="127.0.0.3", **node_options,
             )
             executors = [
                 cluster.add_node(

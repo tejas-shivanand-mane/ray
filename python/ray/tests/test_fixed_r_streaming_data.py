@@ -49,17 +49,19 @@ def test_copied_return_keeps_python_and_native_aliases(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Local GCS RocksDB requires Linux")
-@pytest.mark.parametrize("mode,point", [
-    ("copy", "none"), ("fixed_r", "none"),
-    ("fixed_r_head_failure", "producer_before_output"),
-    ("fixed_r_head_failure", "producer_after_output"),
-    ("fixed_r_head_failure", "consumer"),
+@pytest.mark.parametrize("mode,point,driver_executes", [
+    ("copy", "none", False), ("fixed_r", "none", False),
+    ("fixed_r_head_failure", "producer_before_output", False),
+    ("fixed_r_head_failure", "producer_after_output", False),
+    ("fixed_r_head_failure", "consumer", False),
+    ("fixed_r_head_failure", "consumer", True),
 ])
-def test_original_backpressure_runtime_head_failure(monkeypatch, mode, point):
+def test_original_backpressure_runtime_head_failure(monkeypatch, mode, point, driver_executes):
     monkeypatch.syspath_prepend(str(
         Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
     ))
     from ray.data import DataContext
+    from ray.data._internal.execution.streaming_recovery import FixedRDataConfig
     from streaming_recovery_backpressure_dataset import run_dataset
     from streaming_recovery_head_failure import local_head_failure_cluster
 
@@ -70,11 +72,22 @@ def test_original_backpressure_runtime_head_failure(monkeypatch, mode, point):
         recovery_timeout_s=120, num_input_blocks=4, output_batches_per_input_batch=4,
         output_batch_rows=4, output_row_bytes=1024, consumer_sleep_s=0.01,
     )
-    with local_head_failure_cluster(args) as (selected, crash):
+    with local_head_failure_cluster(
+        args, coordinator_cpus=2 if driver_executes else 1,
+    ) as (selected, crash):
         context = DataContext.get_current().copy()
         context.target_max_block_size = 4096
+        config = None
+        if driver_executes:
+            # The nine-host profile places its driver on worker zero and keeps
+            # that worker available for both original execution and replay.
+            config = FixedRDataConfig(
+                selected.owner_node_id,
+                (ray.get_runtime_context().get_node_id(), *selected.executor_node_ids),
+                {}, timeout_s=120, dynamic_task_outputs=True,
+            )
         with DataContext.current(context):
-            result = run_dataset(selected, crash, {})
+            result = run_dataset(selected, crash, {}, config)
         assert result["validated_producer_rows"] == 64
         assert not result["whole_task_buffering"]
         assert not result["calibration_required"]

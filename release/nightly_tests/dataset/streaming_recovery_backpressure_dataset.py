@@ -95,7 +95,7 @@ def capture_wait_state(control):
     return result
 
 
-def run_dataset(args, crash_head, diagnostics):
+def run_dataset(args, crash_head, diagnostics, recovery_config=None):
     import backpressure_benchmark as original
 
     class Control:
@@ -177,6 +177,10 @@ def run_dataset(args, crash_head, diagnostics):
     context.fixed_r_task_recovery_output_mode = "streaming"
     context.fixed_r_task_recovery_timeout_s = timeout
     context.enable_progress_bars = False
+    if recovery_config is not None:
+        # A multi-host controller can include the surviving driver's worker in
+        # the executor pool without changing the application's Dataset code.
+        context.set_config(CONFIG_KEY, recovery_config)
     config = get_config(context)
     if args.recovery_mode == "copy":
         context.set_config(CONFIG_KEY, replace(config, mode="copy"))
