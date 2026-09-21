@@ -93,3 +93,25 @@ python -m pytest -q \
 
 The Python batch now has 52 cases and requires the Ray Data dependencies
 (including PyArrow). Passing the previous 48 cases does not validate this patch.
+
+## Worker import correction
+
+At `5d0a55bc08aed30c8fd8c486a9c4b9c1c9953665`, the user reported both native
+targets passing and 49 Python cases passing. The three Data cases initially
+lacked PyArrow. After installing the Data dependencies, the full traceback
+showed that the worker could not deserialize the transformer because its
+module-level identity function referenced the driver's unqualified pytest
+module, `test_streaming_recovery_owner_loss`. This failed before task execution
+and before the owner crash; the zero-consumed case instead timed out waiting
+for the task's attempt log.
+
+The identity transform is now local to the test so cloudpickle serializes it
+by value. The consumer-owned transformer ObjectRef and recovery assertions are
+unchanged. This Python-only correction needs no rebuild. The agent inspected
+the source but did not run tests; the three Data cases still need validation:
+
+```bash
+python -m pytest -q --tb=long \
+  python/ray/tests/test_streaming_recovery_owner_loss.py \
+  -k test_ray_data_map_task_with_retained_input_refs
+```

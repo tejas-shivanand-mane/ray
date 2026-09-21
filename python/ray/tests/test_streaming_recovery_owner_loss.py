@@ -235,10 +235,6 @@ def data_map_stream(transformer, data_context, task_context, block, attempts_pat
     yield from _map_task(transformer, data_context, task_context, block)
 
 
-def identity_blocks(blocks, ctx):
-    yield from blocks
-
-
 @pytest.mark.parametrize("consumed", [0, 1, 2])
 def test_ray_data_map_task_with_retained_input_refs(stream, consumed):
     import pyarrow as pa
@@ -248,6 +244,11 @@ def test_ray_data_map_task_with_retained_input_refs(stream, consumed):
         MapTransformer,
     )
     from ray.data.context import DataContext
+
+    # Serialize the transform by value: workers cannot import the driver's
+    # pytest module by its unqualified test_streaming_recovery_owner_loss name.
+    def identity_blocks(blocks, ctx):
+        yield from blocks
 
     start, crash, directory = stream
     block = pa.table({"value": list(range(50_000))})
