@@ -115,6 +115,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-executor-nodes", type=int, default=2)
     parser.add_argument("--local-object-store-mb", type=int, default=512)
     parser.add_argument("--recovery-timeout-s", type=float, default=180)
+    parser.add_argument(
+        "--recovery-head-timing", choices=["paused", "early", "middle", "late", "suite"],
+        default="paused",
+        help="Dataset plan: asynchronous failure after 10/50/90 percent target-stage rows",
+    )
     parser.add_argument("--recovery-output-mode", choices=["streaming", "buffered"], default="streaming")
     parser.add_argument(
         "--recovery-plan", choices=["controlled", "dataset"], default="controlled",
@@ -129,6 +134,8 @@ def parse_args() -> argparse.Namespace:
         help="Zero-based map stage whose first enrolled task gates head failure",
     )
     args = parser.parse_args()
+    if args.recovery_head_timing != "paused" and args.recovery_plan != "dataset":
+        parser.error("--recovery-head-timing requires --recovery-plan dataset")
     if args.num_scalar_cols + args.num_array_cols <= 0:
         parser.error(
             "At least one of --num-scalar-cols / --num-array-cols must be > 0."

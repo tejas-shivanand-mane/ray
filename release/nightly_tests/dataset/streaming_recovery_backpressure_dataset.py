@@ -22,7 +22,9 @@ from ray.data._internal.execution.operators.map_operator import MapOperator
 from ray.data._internal.execution.streaming_recovery import CONFIG_KEY, get_config
 
 from streaming_recovery_head_failure import local_head_failure_cluster
-from streaming_recovery_worker_dataset import snapshot
+from streaming_recovery_progress import (
+    FRACTIONS, ProgressTrigger, register_for_task_serialization, snapshot,
+)
 
 
 def capture_wait_state(control):
@@ -98,6 +100,8 @@ def capture_wait_state(control):
 def run_dataset(args, crash_head, diagnostics, recovery_config=None):
     import backpressure_benchmark as original
 
+    register_for_task_serialization()
+
     class Control:
         def __init__(self):
             self.executor = None
@@ -116,9 +120,16 @@ def run_dataset(args, crash_head, diagnostics, recovery_config=None):
     failure = args.recovery_mode == "fixed_r_head_failure"
     point = args.runtime_failure_point
     timeout = args.recovery_timeout_s
+    timing = getattr(args, "recovery_head_timing", "paused")
+    trigger = None
+    if failure and timing != "paused":
+        trigger = ProgressTrigger(
+            args.num_input_blocks * args.output_batches_per_input_batch * args.output_batch_rows,
+            timing, 0,
+        )
 
     def pause(stream):
-        if not failure or control.enrolled.is_set():
+        if not failure or trigger is not None or control.enrolled.is_set():
             return
         if stream.reader is None:
             raise ValueError("Selected task was not protected before head failure")
@@ -161,7 +172,9 @@ def run_dataset(args, crash_head, diagnostics, recovery_config=None):
                                 raise ValueError("Original producer payload changed")
                             control.validated_producer_rows += len(values)
                             size = emit(pair)
-                            if point == "producer_after_output":
+                            if trigger is not None and not trigger.ready.is_set():
+                                trigger.observe(snapshot(control))
+                            elif point == "producer_after_output":
                                 pause(stream)
                             return size
 
@@ -210,7 +223,9 @@ def run_dataset(args, crash_head, diagnostics, recovery_config=None):
         with ThreadPoolExecutor(max_workers=1) as pool:
             consuming = pool.submit(consume, dataset)
             try:
-                if failure:
+                if trigger is not None:
+                    started = trigger.inject(consuming, crash_head, diagnostics, timeout)
+                elif failure:
                     deadline = time.monotonic() + timeout
                     while not control.enrolled.wait(0.01):
                         if consuming.done():
@@ -225,6 +240,7 @@ def run_dataset(args, crash_head, diagnostics, recovery_config=None):
                         head_failure_requested=True,
                         failure_trigger=point,
                         udf_gate_enabled=False,
+                        executor_paused_for_failure=True,
                     )
                     started = time.monotonic()
                     diagnostics.update(crash_head())
@@ -272,9 +288,11 @@ def run_dataset(args, crash_head, diagnostics, recovery_config=None):
                 raise ValueError("No-failure case bypassed protection")
         recovered = {item["task_id"] for op in operators
                      for item in op["fixed_r_recovered_task_details"]}
-        if failure and control.selected_task_id not in recovered:
+        if trigger is not None:
+            trigger.validate(operators)
+        elif failure and control.selected_task_id not in recovered:
             raise ValueError("Selected protected task did not actually replay")
-        if failure and point == "producer_after_output" and control.prefix_returns < 2:
+        if failure and trigger is None and point == "producer_after_output" and control.prefix_returns < 2:
             raise ValueError("Failure did not exercise a consumed streaming prefix")
         return {
             **vars(args), **diagnostics, "operators": operators,
@@ -298,8 +316,12 @@ def run_dataset(args, crash_head, diagnostics, recovery_config=None):
 def run_recovery_cases(args):
     from benchmark import Benchmark
 
+    if args.case == "training-prefetch":
+        from streaming_recovery_training_prefetch import run_recovery_cases as run_training
+
+        return run_training(args)
     if args.case != "fast-producer-slow-consumer":
-        raise ValueError("Runtime recovery does not yet support training-prefetch/streaming_split")
+        raise ValueError(f"Unsupported runtime benchmark case: {args.case}")
     if args.recovery_mode not in ("copy", "fixed_r", "fixed_r_head_failure", "suite"):
         raise ValueError("Runtime recovery requires copy, fixed_r, fixed_r_head_failure, or suite")
     for name in ("num_input_blocks", "output_batches_per_input_batch",
@@ -315,12 +337,26 @@ def run_recovery_cases(args):
              if args.recovery_mode == "suite"
              else [(args.recovery_mode, getattr(args, "runtime_failure_point", "producer_after_output")
                     if args.recovery_mode == "fixed_r_head_failure" else "none")])
-    for mode, point in cases:
+    timing = getattr(args, "recovery_head_timing", "paused")
+    if timing != "paused":
+        phases = tuple(FRACTIONS) if timing == "suite" else (timing,)
+        if args.recovery_mode in ("suite", "fixed_r_head_failure"):
+            cases = ([("copy", "none", "paused"), ("fixed_r", "none", "paused")]
+                     if args.recovery_mode == "suite" else [])
+            cases += [("fixed_r_head_failure", "producer_after_output", phase) for phase in phases]
+        else:
+            raise ValueError("Asynchronous head timing requires fixed_r_head_failure or suite")
+    else:
+        cases = [(mode, point, "paused") for mode, point in cases]
+    for mode, point, phase in cases:
         selected = argparse.Namespace(**vars(args))
         selected.recovery_mode = mode
         selected.runtime_failure_point = point
+        selected.recovery_head_timing = phase
         diagnostics = {}
         key = f"backpressure/original_dataset/{mode}/{point}"
+        if phase != "paused":
+            key += f"/async_{phase}"
         try:
             with local_head_failure_cluster(selected) as (case_args, crash):
                 benchmark.run_fn(key, run_dataset, case_args, crash, diagnostics)

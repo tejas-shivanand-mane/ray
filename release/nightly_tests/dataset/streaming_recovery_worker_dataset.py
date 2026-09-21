@@ -20,12 +20,16 @@ from ray.data._internal.execution.execution_callback import ExecutionCallback
 from ray.data._internal.execution.operators.map_operator import MapOperator
 from ray.data._internal.execution.streaming_recovery import CONFIG_KEY, get_config
 
-from streaming_recovery_benchmark import _operator_metrics
 from streaming_recovery_head_failure import local_head_failure_cluster
 from streaming_recovery_worker_scaling import validate_block, validate_recovery_args
+from streaming_recovery_progress import (
+    FRACTIONS, ProgressTrigger, register_for_task_serialization, snapshot,
+)
 
 
 def execution_control(args):
+    register_for_task_serialization()
+
     class Control:
         def __init__(self):
             self.executor = None
@@ -34,6 +38,7 @@ def execution_control(args):
             self.resume = Event()
             self.target = None
             self.execution_error_traceback = None
+            self.trigger = None
 
         def __getstate__(self):
             # Callback classes travel in the DataContext, but the executor,
@@ -51,6 +56,14 @@ def execution_control(args):
     )
     operator_count = args.num_operators + 1
     timeout_s = args.recovery_timeout_s
+    timing = getattr(args, "recovery_head_timing", "paused")
+    if failure and timing != "paused":
+        import worker_scaling_benchmark as original
+
+        rows = original._rows_per_block(args.num_scalar_cols, args.num_array_cols)
+        control.trigger = ProgressTrigger(
+            args.num_workers * args.blocks_per_worker * rows, timing, target_index,
+        )
 
     class Capture(ExecutionCallback):
         def after_execution_fails(self, executor, error):
@@ -78,6 +91,19 @@ def execution_control(args):
 
                 def submit_then_pause(stream, *positional, **kwargs):
                     submit(stream, *positional, **kwargs)
+                    if control.trigger is not None:
+                        task = next(task for task in op.get_active_tasks()
+                                    if getattr(task, "stream", None) is stream)
+                        emit = task._emit_copied_pair
+
+                        def emit_and_observe(pair):
+                            size = emit(pair)
+                            if not control.trigger.ready.is_set():
+                                control.trigger.observe(snapshot(control))
+                            return size
+
+                        task._emit_copied_pair = emit_and_observe
+                        return
                     if not control.enrolled.is_set():
                         if stream.reader is None:
                             raise ValueError("Selected task was not protected before failure injection")
@@ -93,25 +119,6 @@ def execution_control(args):
     return control, Capture
 
 
-def snapshot(control):
-    result = []
-    for index, op in enumerate(control.operators):
-        active = []
-        for task in op.get_active_tasks():
-            stream = getattr(task, "stream", None)
-            if stream is not None and stream.reader is not None and not stream.closed:
-                active.append({
-                    "task_index": task.task_index(), "task_id": task.get_task_id().hex(),
-                    "accepted_returns": stream.next_index,
-                    "declared_returns": stream.expected_returns,
-                })
-        result.append({
-            "stage_index": index, "name": op.name, **_operator_metrics(op),
-            "active_enrolled_tasks": active,
-        })
-    return result
-
-
 def validate_accounting(args, operators, count, rows):
     if len(operators) != args.num_operators + 1:
         raise ValueError("Read/map operator accounting is incomplete")
@@ -121,7 +128,8 @@ def validate_accounting(args, operators, count, rows):
             "output_blocks": count, "output_rows": count * rows,
             "fixed_r_closed_streams": count, "fixed_r_copied_blocks": count,
         }
-        if any(op.get(key) != value for key, value in expected.items()) or op["active_enrolled_tasks"]:
+        if (any(op.get(key) != value for key, value in expected.items())
+                or op["active_enrolled_tasks"] or op["fixed_r_recovery_errors"]):
             raise ValueError(f"Read/map output or retirement mismatch: {op}")
         enrolled, survivor, copied, recovered = [op[key] for key in (
             "fixed_r_enrolled_tasks", "fixed_r_survivor_tasks",
@@ -146,7 +154,8 @@ def validate_accounting(args, operators, count, rows):
             valid = copied == 0
         if not valid:
             raise ValueError(f"Unexpected task submission ownership: {op}")
-    if args.recovery_mode == "fixed_r_head_failure":
+    if (args.recovery_mode == "fixed_r_head_failure"
+            and getattr(args, "recovery_head_timing", "paused") == "paused"):
         target = 0 if args.recovery_failure_stage == "read" else args.recovery_failure_operator + 1
         if not any(item["task_index"] == 0 for item in
                    operators[target]["fixed_r_recovered_task_details"]):
@@ -178,7 +187,11 @@ def run_dataset(args, crash_head, diagnostics):
         with ThreadPoolExecutor(max_workers=1) as pool:
             materializing = pool.submit(dataset.materialize)
             try:
-                if failure:
+                if control.trigger is not None:
+                    started = control.trigger.inject(
+                        materializing, crash_head, diagnostics, args.recovery_timeout_s,
+                    )
+                elif failure:
                     deadline = time.monotonic() + args.recovery_timeout_s
                     while not control.enrolled.wait(0.01):
                         if materializing.done():
@@ -191,6 +204,7 @@ def run_dataset(args, crash_head, diagnostics):
                         head_failure_requested=True,
                         failure_trigger="executor_paused_after_selected_task_enrollment",
                         udf_gate_enabled=False,
+                        executor_paused_for_failure=True,
                     )
                     started = time.monotonic()
                     diagnostics.update(crash_head())
@@ -198,6 +212,14 @@ def run_dataset(args, crash_head, diagnostics):
                 materialized = materializing.result(timeout=args.recovery_timeout_s)
                 if failure:
                     diagnostics["failure_request_to_materialize_s"] = time.monotonic() - started
+            except BaseException:
+                from streaming_recovery_backpressure_dataset import capture_wait_state
+
+                try:
+                    diagnostics["observation_before_shutdown"] = capture_wait_state(control)
+                except Exception as exc:
+                    diagnostics["wait_state_capture_error"] = str(exc)
+                raise
             finally:
                 control.resume.set()
                 if control.executor is not None:
@@ -220,6 +242,8 @@ def run_dataset(args, crash_head, diagnostics):
             raise ValueError("Original materialized Dataset output count mismatch")
         operators = snapshot(control)
         validate_accounting(args, operators, count, rows)
+        if control.trigger is not None:
+            control.trigger.validate(operators)
         return {
             **vars(args), **diagnostics, "operators": operators,
             "validated_output_blocks": output_blocks, "validated_output_rows": count * rows,
@@ -255,10 +279,15 @@ def run_recovery_cases(args):
         if args.recovery_mode == "suite"
         else [(args.recovery_mode, args.recovery_failure_stage)]
     )
-    for mode, stage in cases:
+    timing = getattr(args, "recovery_head_timing", "paused")
+    phases = tuple(FRACTIONS) if timing == "suite" else (timing,)
+    cases = [(mode, stage, phase) for mode, stage in cases
+             for phase in (phases if mode == "fixed_r_head_failure" else ("paused",))]
+    for mode, stage, phase in cases:
         selected = argparse.Namespace(**vars(args))
         selected.recovery_mode = mode
         selected.recovery_failure_stage = stage
+        selected.recovery_head_timing = phase
         selected.owner_node_id = None
         selected.executor_node_ids = None
         selected.producer_concurrency = args.num_workers // args.num_operators
@@ -266,6 +295,8 @@ def run_recovery_cases(args):
         key = f"worker_scaling/original_dataset/{args.num_operators}_operators/{mode}"
         if mode == "fixed_r_head_failure":
             key += f"/{stage}"
+            if phase != "paused":
+                key += f"/async_{phase}"
         try:
             with local_head_failure_cluster(selected) as (case_args, crash_head):
                 benchmark.run_fn(key, run_dataset, case_args, crash_head, diagnostics)

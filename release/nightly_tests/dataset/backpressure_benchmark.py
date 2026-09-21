@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--producer-concurrency", type=int)
     parser.add_argument("--recovery-timeout-s", type=float, default=120)
     parser.add_argument(
+        "--recovery-head-timing", choices=["paused", "early", "middle", "late", "suite"],
+        default="paused",
+        help="Runtime plan: asynchronous failure after 10/50/90 percent producer rows",
+    )
+    parser.add_argument(
         "--runtime-failure-point",
         choices=["producer_before_output", "producer_after_output", "consumer"],
         default="producer_after_output",
@@ -118,7 +123,7 @@ def run_fast_producer_slow_consumer(args: argparse.Namespace):
     return vars(args)
 
 
-def run_training_prefetch(args: argparse.Namespace):
+def build_training_prefetch(args: argparse.Namespace):
     producer = functools.partial(
         produce,
         output_batches_per_input_batch=args.output_batches_per_input_batch,
@@ -148,6 +153,11 @@ def run_training_prefetch(args: argparse.Namespace):
         )
     )
 
+    return trainers, iterators
+
+
+def run_training_prefetch(args: argparse.Namespace):
+    trainers, iterators = build_training_prefetch(args)
     ray.get(
         [
             trainers[i].train.remote(iterators[i], batch_size=args.output_batch_rows)
@@ -176,6 +186,8 @@ class Trainer:
 
 
 def main(args: argparse.Namespace):
+    if getattr(args, "recovery_head_timing", "paused") != "paused" and args.recovery_plan != "runtime":
+        raise ValueError("--recovery-head-timing requires --recovery-plan runtime")
     if args.recovery_plan == "runtime":
         from streaming_recovery_backpressure_dataset import run_recovery_cases
 

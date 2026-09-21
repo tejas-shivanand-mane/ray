@@ -4,6 +4,8 @@ Finite task-map chains support dynamic-count streaming, declared physical output
 counts, or bounded task envelopes. DataContext.enable_fixed_r_task_recovery uses
 dynamic-count streaming by default. No original protected output is exported:
 copies remain owned by the surviving coordinator.
+An optional final output splitter is supported when its coordinator and
+consumers survive; actor failures themselves are not recovered here.
 """
 
 import math
@@ -203,9 +205,17 @@ def validate_execution(dag, context):
     from ray.data._internal.execution.operators.task_pool_map_operator import (
         TaskPoolMapOperator,
     )
+    from ray.data._internal.execution.operators.output_splitter import OutputSplitter
 
     names = []
     op = dag
+    if isinstance(op, OutputSplitter) and config.automatic_outputs:
+        # streaming_split's coordinator owns the copied blocks and any ordinary
+        # slicing tasks. That actor and its driver must survive the protected
+        # owner failure. This does not add actor failure recovery.
+        if len(op.input_dependencies) != 1 or get_config(op.data_context) != config:
+            raise ValueError("Fixed-R output splitting requires a consistent recovery configuration")
+        op = op.input_dependencies[0]
     while isinstance(op, TaskPoolMapOperator):
         if (
             len(op.input_dependencies) != 1

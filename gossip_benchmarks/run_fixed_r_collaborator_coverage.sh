@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# One bounded coverage run on the 16-thread / 32-GiB development machine.
+# Use the existing ray-dev environment and its native Fixed-R source build.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+result_root="${RAY_RECOVERY_OUTPUT_DIR:-$HOME/ray-coverage}"
+mkdir -p "$result_root"
+case "$(stat -f -c %T "$result_root")" in
+  tmpfs|ramfs) echo "Set RAY_RECOVERY_OUTPUT_DIR to a disk-backed directory." >&2; exit 2 ;;
+esac
+result_dir="$(mktemp -d "$result_root/run.XXXXXX")"
+# Keep socket paths short even if the result directory has a long pathname.
+# Ray appends its session/socket directories to this root.
+export TMPDIR="${RAY_RECOVERY_TEMP_DIR:-$HOME/raytmp}"
+mkdir -p "$TMPDIR"
+case "$(stat -f -c %T "$TMPDIR")" in
+  tmpfs|ramfs) echo "Set RAY_RECOVERY_TEMP_DIR to a disk-backed directory." >&2; exit 2 ;;
+esac
+export RAY_TMPDIR="$TMPDIR"
+failed=0
+backpressure=(
+  --recovery-plan runtime --local-executor-nodes 8 --local-object-store-mb 512
+  --num-input-blocks 16 --output-batches-per-input-batch 8
+  --output-batch-rows 32 --output-row-bytes 1048576 --consumer-sleep-s 0.1
+  --recovery-timeout-s 600
+)
+worker=(
+  --worker-type tasks --num-workers 8 --blocks-per-worker 4
+  --num-scalar-cols 128 --num-array-cols 32
+  --recovery-plan dataset --recovery-output-mode streaming
+  --local-executor-nodes 8 --local-object-store-mb 512 --recovery-timeout-s 600
+)
+
+# New workload first: copy + enrolled no-failure + asynchronous producer failure.
+TEST_OUTPUT_JSON="$result_dir/training-prefetch.json" \
+python release/nightly_tests/dataset/backpressure_benchmark.py \
+  "${backpressure[@]}" --case training-prefetch --num-trainers 8 --prefetch-batches 2 \
+  --recovery-mode suite --recovery-head-timing middle || failed=1
+
+# Cover protected reads and a two-stage task map chain in one fresh-cluster suite.
+TEST_OUTPUT_JSON="$result_dir/worker-scaling-chain.json" \
+python release/nightly_tests/dataset/worker_scaling_benchmark.py \
+  "${worker[@]}" --num-operators 2 --recovery-failure-operator 1 \
+  --recovery-mode suite --recovery-head-timing early || failed=1
+
+# The original single-stage task variant uses an unbounded pool.
+TEST_OUTPUT_JSON="$result_dir/worker-scaling-single.json" \
+python release/nightly_tests/dataset/worker_scaling_benchmark.py \
+  "${worker[@]}" --num-operators 1 --recovery-failure-operator 0 \
+  --recovery-mode fixed_r_head_failure --recovery-failure-stage map \
+  --recovery-head-timing middle || failed=1
+
+# Do not repeat the already-passing backpressure baselines or paused injections.
+TEST_OUTPUT_JSON="$result_dir/backpressure-async.json" \
+python release/nightly_tests/dataset/backpressure_benchmark.py \
+  "${backpressure[@]}" --case fast-producer-slow-consumer \
+  --recovery-mode fixed_r_head_failure --recovery-head-timing suite || failed=1
+
+python - "$result_dir" "$result_root/coverage.json" <<'PY' || failed=1
+import json
+from pathlib import Path
+import sys
+
+directory = Path(sys.argv[1])
+summary = {"result_directory": str(directory), "cases": {}, "missing_results": []}
+for name in ("training-prefetch", "worker-scaling-chain", "worker-scaling-single", "backpressure-async"):
+    path = directory / (name + ".json")
+    if not path.exists():
+        summary["missing_results"].append(name)
+        continue
+    try:
+        summary["cases"].update(json.loads(path.read_text()))
+    except (ValueError, OSError) as exc:
+        summary["missing_results"].append(f"{name}: {exc}")
+summary["failed_cases"] = [key for key, value in summary["cases"].items()
+                           if value.get("validation_status") != "passed"]
+summary["validation_status"] = (
+    "passed" if len(summary["cases"]) == 11 and not summary["failed_cases"]
+    and not summary["missing_results"] else "failed"
+)
+output = Path(sys.argv[2])
+temporary = output.with_suffix(".json.tmp")
+temporary.write_text(json.dumps(summary, indent=2))
+temporary.replace(output)
+for key, value in summary["cases"].items():
+    print(f"{value.get('validation_status', 'missing'):>7}  {key}")
+print(f"Combined result: {output}")
+sys.exit(0 if summary["validation_status"] == "passed" else 1)
+PY
+printf 'Individual results: %s\n' "$result_dir"
+exit "$failed"

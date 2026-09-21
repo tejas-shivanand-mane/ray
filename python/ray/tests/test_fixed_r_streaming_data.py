@@ -149,3 +149,58 @@ def test_wait_state_capture_does_not_poll_or_lock_consumers(monkeypatch):
     assert state["retained_return_indices"] == [1]
     assert state["wait_reason"] == "waiting_for_metadata_ref"
     assert observation["thread_stacks"]
+
+
+def test_async_progress_never_waits_and_requires_actual_replay(monkeypatch):
+    from concurrent.futures import Future
+
+    monkeypatch.syspath_prepend(str(
+        Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
+    ))
+    from streaming_recovery_progress import ProgressTrigger
+
+    trigger = ProgressTrigger(100, "middle", 0)
+
+    def unexpected_wait(*args, **kwargs):
+        raise AssertionError("The executor must not wait for the failure controller")
+
+    monkeypatch.setattr(trigger.ready, "wait", unexpected_wait)
+    observed = [{"output_rows": 50, "active_enrolled_tasks": [{"task_id": "t"}]}]
+    trigger.observe(observed)
+    assert trigger.ready.is_set()
+    assert not trigger.observation["executor_paused_for_failure"]
+    with pytest.raises(ValueError, match="no protected task replayed"):
+        trigger.validate([{"fixed_r_recovered_task_details": []}])
+    # A signal alone cannot turn a missed failure into a successful recovery.
+    missed = ProgressTrigger(100, "late", 0)
+    missed.observe([{"output_rows": 100, "active_enrolled_tasks": [{"task_id": "t"}]}])
+    finished = Future()
+    finished.set_result(None)
+    with pytest.raises(ValueError, match="Dataset finished before"):
+        missed.inject(finished, unexpected_wait, {}, 1)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Local GCS RocksDB requires Linux")
+def test_training_prefetch_preserves_equal_split_and_original_trainer(monkeypatch):
+    monkeypatch.syspath_prepend(str(
+        Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
+    ))
+    from streaming_recovery_training_prefetch import run_dataset
+    from streaming_recovery_head_failure import local_head_failure_cluster
+
+    args = SimpleNamespace(
+        case="training-prefetch", recovery_plan="runtime", recovery_mode="fixed_r",
+        recovery_head_timing="paused", local_executor_nodes=2, local_object_store_mb=150,
+        owner_node_id=None, executor_node_ids=None, producer_concurrency=2,
+        recovery_timeout_s=120, num_input_blocks=3, output_batches_per_input_batch=3,
+        output_batch_rows=1, output_row_bytes=1024, consumer_sleep_s=0.01,
+        num_trainers=2, prefetch_batches=1, disable_locality_hints=False,
+    )
+    with local_head_failure_cluster(args, coordinator_cpus=0) as (selected, crash):
+        result = run_dataset(selected, crash, {})
+    assert result["validated_producer_rows"] == 9
+    assert result["validated_consumed_rows"] == 8
+    assert result["equal_split_dropped_rows"] == 1
+    assert [item["rows"] for item in result["trainer_splits"].values()] == [4, 4]
+    assert result["operators"][0]["fixed_r_enrolled_tasks"] == 3
+    assert result["original_trainer_method"]
