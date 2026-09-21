@@ -476,6 +476,9 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         self._pair_start = 0
         self._cancelled_ref = None
         self._copied_return_indices = set()
+        self._recovery_wait_reason = "submitted"
+        self._recovery_last_progress_s = time.monotonic()
+        self._recovery_pair_ready_ids = []
 
     def get_task_id(self):
         return self.stream.task_id
@@ -485,6 +488,10 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             return self._cancelled_ref
         if not self._pending_meta_ref.is_nil():
             return self._pending_meta_ref
+        self._recovery_wait_reason = (
+            "waiting_for_block_ref_or_eof" if self._pending_block_ref.is_nil()
+            else "waiting_for_metadata_ref"
+        )
         return self.stream.waitable()
 
     def _cancel(self, force):
@@ -502,8 +509,11 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         # temporary original refs/values must leave scope before release/recovery.
         refs = [self._pending_block_ref, self._pending_meta_ref]
         ready, _ = ray.wait(refs, num_returns=2, timeout=0, fetch_local=True)
+        self._recovery_pair_ready_ids = [ref.hex() for ref in ready]
         if len(ready) != 2:
+            self._recovery_wait_reason = "waiting_for_pair_payload"
             return None
+        self._recovery_wait_reason = "copying_pair"
         block, metadata = ray.get(refs, timeout=0)
         copied = ray.put(block)
         # Reject contained refs/tensor transport before any export to Data.
@@ -513,6 +523,7 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         return copied, metadata
 
     def _finish(self, error=None):
+        self._recovery_wait_reason = "closing_stream"
         self.stream.close()
         self._clear_pair()
         self._task_error = error
@@ -520,11 +531,14 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         # Original refs never enter the threaded metadata fetcher. All emitted
         # copies are independent, so completion can fire synchronously.
         self.mark_done()
+        self._recovery_wait_reason = "finished"
 
     def _emit_copied_pair(self, copied_pair):
         copied_ref, metadata = copied_pair
         size = self.produce_block(copied_ref, metadata, owns_blocks=False)
         self.stream.stats["fixed_r_copied_blocks"] += 1
+        self._recovery_wait_reason = "output_delivered"
+        self._recovery_last_progress_s = time.monotonic()
         return size
 
     def _release_copied_pair(self):
@@ -561,6 +575,7 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             self._release_unused_copies()
             if self._pending_block_ref.is_nil():
                 self._pair_start = self.stream.next_index
+                self._recovery_wait_reason = "waiting_for_block_ref_or_eof"
                 try:
                     ref = self.stream.poll()
                 except StopIteration:
@@ -571,6 +586,7 @@ class StreamingRecoveryDataOpTask(DataOpTask):
                 self._pending_block_ref = ref
                 del ref
             if self._pending_meta_ref.is_nil():
+                self._recovery_wait_reason = "waiting_for_metadata_ref"
                 try:
                     ref = self.stream.poll()
                 except StopIteration as exc:
@@ -584,6 +600,7 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             try:
                 copied_pair = self._copy_pair_if_ready()
             except ray.exceptions.GetTimeoutError:
+                self._recovery_wait_reason = "pair_get_timeout"
                 return 0
             if copied_pair is None:
                 return 0
@@ -597,7 +614,10 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             # No original output was exported, no metadata background get was
             # submitted, and synchronous gets have settled before reaching here.
             # Previously emitted copies and their downstream users can continue.
+            self._recovery_wait_reason = "recovering"
             self.stream.recover()
+            self._recovery_wait_reason = "replay_attached"
+            self._recovery_last_progress_s = time.monotonic()
             self.stream.stats["fixed_r_recovered_task_details"].append({
                 "task_index": self.task_index(),
                 "task_id": self.stream.task_id.hex(),

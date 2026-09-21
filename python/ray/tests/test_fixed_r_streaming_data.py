@@ -82,3 +82,57 @@ def test_original_backpressure_runtime_head_failure(monkeypatch, mode, point):
             assert result["original_head_processes_exited"]
             if point == "producer_after_output":
                 assert result["consumed_returns_before_failure"] >= 2
+
+
+def test_wait_state_capture_does_not_poll_or_lock_consumers(monkeypatch):
+    import json
+
+    monkeypatch.syspath_prepend(str(
+        Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
+    ))
+    import streaming_recovery_backpressure_dataset as harness
+
+    def unexpected_call(*args, **kwargs):
+        raise AssertionError("Diagnostics must not poll streams or make Ray calls")
+
+    class Consumer:
+        _phase = "replaying"
+        _next_index = 2
+        _retained = {1: None}
+        phase = property(unexpected_call)
+        next_index = property(unexpected_call)
+
+    reader = SimpleNamespace(
+        consumer=Consumer(), _pending_read=None, _recovery_required=False,
+        get_waitable=unexpected_call,
+    )
+    stream = SimpleNamespace(
+        reader=reader, task_id=SimpleNamespace(hex=lambda: "task-id"),
+        closed=False, next_index=2,
+    )
+    task = SimpleNamespace(
+        stream=stream, task_index=lambda: 0,
+        _pending_block_ref=None, _pending_meta_ref=None,
+        _copied_return_indices={0, 1},
+        _recovery_wait_reason="waiting_for_metadata_ref",
+        get_waitable=unexpected_call,
+    )
+
+    class Operator:
+        name = "producer"
+
+        def get_active_tasks(self):
+            return [task]
+
+    control = SimpleNamespace(operators=[Operator()], executor=None)
+    monkeypatch.setattr(harness, "snapshot", lambda control: [{"name": "producer"}])
+    monkeypatch.setattr(ray, "wait", unexpected_call)
+    monkeypatch.setattr(ray, "get", unexpected_call)
+    observation = harness.capture_wait_state(control)
+    json.dumps(observation)
+    assert observation["captured_before_shutdown"]
+    state = observation["operators"][0]["task_wait_states"][0]
+    assert state["consumer_phase"] == "replaying"
+    assert state["retained_return_indices"] == [1]
+    assert state["wait_reason"] == "waiting_for_metadata_ref"
+    assert observation["thread_stacks"]

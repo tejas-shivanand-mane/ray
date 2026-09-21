@@ -158,3 +158,49 @@ bash gossip_benchmarks/validate_fixed_r_streaming_datasets.sh --benchmarks-only
 `--benchmarks-only` skips native and Python regression stages; the default script
 still runs the full batch. No standalone benchmark-suite results have been
 reported yet for this streaming update.
+
+## First original backpressure suite result
+
+The subsequently supplied `backpressure.json` reports four passes and one timeout:
+
+| Case | Status | Total seconds | Protected tasks replayed |
+| --- | --- | ---: | ---: |
+| Copy | Passed | 56.54 | 0 |
+| Fixed-R without failure | Passed | 81.93 | 0 |
+| Head failure before producer output | Passed | 56.73 | 1 producer |
+| Head failure after producer output | Passed | 51.70 | 4 producers |
+| Head failure at consumer enrollment | Timed out | Not reported | 4 producers + 1 consumer |
+
+Each passing case validates 4,096 producer rows (4 GiB logical payload), 32 final
+outputs, 48 finished tasks and 48 closed streams, with no task/recovery errors.
+The after-output failure follows delivery of one block/metadata pair and uses
+unknown counts, original UDFs, normal shaping and no whole-task buffering.
+Spilling occurred: 1.2502, 4.3756, 1.5002 and 2.1252 reported GB respectively.
+Failure cases switch later submissions to surviving coordinator ownership;
+their shorter durations are not evidence that failure improves performance.
+
+In the failed case, all five enrolled tasks entered replay successfully, but
+only four final outputs were observed before timeout. The existing final
+snapshot was captured after shutdown: its four closed producer streams and zero
+finished producer tasks describe cancellation, not successful completion. The
+exact cause of the stall is not established by this file.
+
+The diagnostic follow-up captures local thread stacks, pending block/metadata
+IDs, last pair readiness, retained indices, replay phase, output/submission
+backpressure flags, queues and cached resource usage **before shutdown**. It
+does not poll streams, call Ray/GCS APIs, acquire consumer locks, increase the
+timeout, or change recovery/scheduling decisions. It is a concurrent observation,
+not an atomic state snapshot. The assistant did not run tests or benchmarks.
+
+No native rebuild is needed. Pull and rerun just the failed case, with the same
+data sizes and 180-second timeout:
+
+```bash
+bash gossip_benchmarks/validate_fixed_r_streaming_datasets.sh --backpressure-consumer-only
+```
+
+The result is saved separately as
+`/tmp/fixed-r-streaming-datasets/backpressure-consumer.json` (or under
+`RAY_RECOVERY_OUTPUT_DIR`). This preserves the original suite result. Direct
+benchmark invocation also accepts `--runtime-failure-point consumer` with
+`--recovery-plan runtime --recovery-mode fixed_r_head_failure`.

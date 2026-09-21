@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--producer-concurrency", type=int)
     parser.add_argument("--recovery-timeout-s", type=float, default=120)
     parser.add_argument(
+        "--runtime-failure-point",
+        choices=["producer_before_output", "producer_after_output", "consumer"],
+        default="producer_after_output",
+        help="Failure point for a single runtime fixed_r_head_failure case",
+    )
+    parser.add_argument(
         "--local-executor-nodes", type=int, default=0,
         help="Create a local test cluster with this many two-CPU executor nodes",
     )
