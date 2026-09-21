@@ -1,9 +1,13 @@
 from typing import TYPE_CHECKING, Callable, List, Optional
+from dataclasses import replace
+
+import ray
 
 if TYPE_CHECKING:
     from ray.data._internal.execution.block_ref_counter import BlockRefCounter
 
 from ray.data._internal.execution.interfaces import (
+    BlockEntry,
     ExecutionOptions,
     PhysicalOperator,
     RefBundle,
@@ -60,6 +64,26 @@ class InputDataBuffer(PhysicalOperator):
             )
             self._is_input_initialized = True
             self._initialize_metadata()
+        from ray.data._internal.execution.streaming_recovery import get_config
+
+        recovery = get_config(self.data_context)
+        if recovery is not None and recovery.buffered_task_outputs:
+            # Protect root ownership before dispatch, including read recipes,
+            # externally supplied blocks, and materialized Dataset inputs.
+            retained = []
+            for bundle in self._input_data:
+                entries = []
+                for entry in bundle.blocks:
+                    local_ref = ray.put(ray.get(entry.ref, timeout=recovery.timeout_s))
+                    ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs(
+                        [local_ref]
+                    )
+                    entries.append(BlockEntry(local_ref, entry.metadata))
+                retained.append(replace(
+                    bundle, blocks=entries, owns_blocks=False,
+                    _cached_object_meta=None, _cached_preferred_locations=None,
+                ))
+            self._input_data = retained
         # InputDataBuffer does not take inputs from other operators,
         # so we record input metrics here
         for bundle in self._input_data:

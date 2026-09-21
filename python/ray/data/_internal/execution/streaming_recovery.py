@@ -1,12 +1,13 @@
 """Experimental Fixed-R Data execution with coordinator-owned output copies.
 
-Only finite task-map chains with declared physical output counts are supported.
-No original protected output is exported: copy one block/metadata pair before
-emitting it, then release the original refs. This deliberately adds a data copy.
+Finite task-map chains support either declared physical output counts or bounded
+task envelopes selected by DataContext.enable_fixed_r_task_recovery. No original
+protected output is exported: copies remain owned by the surviving coordinator.
 """
 
 import math
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Tuple, Union
 
@@ -48,6 +49,11 @@ class FixedRDataConfig:
     synchronous task UDFs and ``batch_size=None`` (one input block per task).
     Counts then include empty output batches; an empty input block bypasses the
     UDF under normal Dataset semantics, so callers must account for that too.
+
+    ``buffered_task_outputs`` instead protects each finite task as one bounded
+    envelope, including read tasks and zero/multiple physical blocks. It uses
+    no operator-name/count declarations and snapshots output before advancing
+    the UDF. This mode trades within-task streaming for bounded buffering.
     """
 
     owner_node_id: str
@@ -56,6 +62,8 @@ class FixedRDataConfig:
     mode: str = "fixed_r"
     timeout_s: float = 60
     preserve_batch_output_blocks: bool = False
+    buffered_task_outputs: bool = False
+    max_task_output_bytes: int = 256 * 1024**2
 
     @property
     def executor_node_ids(self):
@@ -81,7 +89,16 @@ class FixedRDataConfig:
             or self.timeout_s <= 0
         ):
             raise ValueError("Fixed-R Data timeout must be finite and positive")
-        if not isinstance(self.expected_blocks, dict) or not self.expected_blocks:
+        if type(self.buffered_task_outputs) is not bool:
+            raise ValueError("buffered_task_outputs must be a bool")
+        if self.buffered_task_outputs and (
+            self.preserve_batch_output_blocks or self.expected_blocks
+            or type(self.max_task_output_bytes) is not int or self.max_task_output_bytes <= 0
+        ):
+            raise ValueError("Buffered recovery requires a positive byte limit and no block declarations")
+        if not isinstance(self.expected_blocks, dict) or (
+            not self.expected_blocks and not self.buffered_task_outputs
+        ):
             raise ValueError("Declare expected_blocks for every task-map operator")
         for name, count in self.expected_blocks.items():
             if (
@@ -113,6 +130,33 @@ class FixedRDataConfig:
 
 def get_config(context):
     config = context.get_config(CONFIG_KEY)
+    if context.enable_fixed_r_task_recovery:
+        if config is None:
+            from ray._common.constants import HEAD_NODE_RESOURCE_NAME
+
+            nodes = [node for node in ray.nodes() if node["Alive"]]
+            heads = [node["NodeID"] for node in nodes
+                     if HEAD_NODE_RESOURCE_NAME in node["Resources"]]
+            coordinator = ray.get_runtime_context().get_node_id()
+            if len(heads) != 1 or coordinator == heads[0]:
+                raise ValueError("Fixed-R task recovery requires a surviving non-head Dataset coordinator")
+            executors = tuple(sorted(
+                node["NodeID"] for node in nodes
+                if node["NodeID"] not in (heads[0], coordinator)
+                and node["Resources"].get("CPU", 0) > 0
+            ))
+            if len(executors) < 2:
+                raise ValueError("Fixed-R task recovery requires at least two surviving CPU executor nodes")
+            config = FixedRDataConfig(
+                heads[0], executors, {}, timeout_s=context.fixed_r_task_recovery_timeout_s,
+                buffered_task_outputs=True,
+                max_task_output_bytes=context.fixed_r_task_recovery_max_output_bytes,
+            )
+            context.set_config(CONFIG_KEY, config)
+        if not isinstance(config, FixedRDataConfig) or not config.buffered_task_outputs:
+            raise ValueError("Automatic task recovery cannot use declared-count recovery configuration")
+        # Retention is a runtime responsibility in this mode, not a UDF change.
+        context.eager_free = False
     if config is not None:
         if not isinstance(config, FixedRDataConfig):
             raise ValueError(f"{CONFIG_KEY} must contain FixedRDataConfig")
@@ -148,13 +192,19 @@ def validate_execution(dag, context):
         op = op.input_dependencies[0]
     if not isinstance(op, InputDataBuffer):
         raise ValueError("Fixed-R Data supports only InputDataBuffer -> task-map chains")
-    if len(names) != len(set(names)) or set(names) != set(config.expected_blocks):
+    if config.buffered_task_outputs and not names:
+        # materialize() creates a new InputData-only Dataset from independent
+        # coordinator-owned copies. It remains readable after owner-head loss.
+        return
+    if not config.buffered_task_outputs and (
+        len(names) != len(set(names)) or set(names) != set(config.expected_blocks)
+    ):
         raise ValueError(
             f"Declare each physical operator exactly once: actual={names}, "
             f"declared={list(config.expected_blocks)}"
         )
     alive = _owner_alive(config)
-    if config.mode == "fixed_r" and not alive:
+    if config.mode == "fixed_r" and not alive and not config.buffered_task_outputs:
         raise ValueError("The protected owner must be alive when Dataset execution starts")
 
 
@@ -250,6 +300,16 @@ def submit_stream(
     config, producer, args, kwargs, options, expected_blocks, stats, *, task_index=0
 ):
     owner_alive = _owner_alive(config)
+    if config.buffered_task_outputs:
+        # Retain independent local inputs, including read recipes and inputs
+        # originating outside this executor. Native validation below still
+        # rejects contained ObjectRefs and other unsupported dependencies.
+        def retain(value):
+            return (ray.put(ray.get(value, timeout=config.timeout_s))
+                    if isinstance(value, ray.ObjectRef) else value)
+
+        args = tuple(retain(value) for value in args)
+        kwargs = {key: retain(value) for key, value in kwargs.items()}
     inputs = tuple(
         value for value in (*args, *kwargs.values())
         if isinstance(value, ray.ObjectRef)
@@ -405,6 +465,12 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         # copies are independent, so completion can fire synchronously.
         self.mark_done()
 
+    def _emit_copied_pair(self, copied_pair):
+        copied_ref, metadata = copied_pair
+        size = self.produce_block(copied_ref, metadata, owns_blocks=False)
+        self.stream.stats["fixed_r_copied_blocks"] += 1
+        return size
+
     def on_data_ready(self, max_bytes_to_read, metadata_fetcher):
         self._track_task_output_backpressure(max_bytes_to_read)
         if self.has_finished or max_bytes_to_read == 0:
@@ -440,13 +506,10 @@ class StreamingRecoveryDataOpTask(DataOpTask):
                 return 0
             self._clear_pair()
             self.stream.release_pair(self._pair_start)
-            copied_ref, metadata = copied_pair
             # Let distributed reference counting retire copies. Data's
             # owns_blocks=True permits explicit free even if an exported alias
             # remains live; it is distinct from native coordinator ownership.
-            size = self.produce_block(copied_ref, metadata, owns_blocks=False)
-            self.stream.stats["fixed_r_copied_blocks"] += 1
-            return size  # At most one complete block per scheduling pass.
+            return self._emit_copied_pair(copied_pair)
         except (StreamingRecoveryRequired, ray.exceptions.OwnerDiedError):
             # No original output was exported, no metadata background get was
             # submitted, and synchronous gets have settled before reaching here.
@@ -460,3 +523,114 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         except Exception as exc:
             self._finish(error=exc)
             raise
+
+
+_BUFFERED_TASK_MARKER = b"ray-data-fixed-r-buffered-task-v1"
+
+
+def buffered_map_task(map_transformer, data_context, ctx, *blocks, **kwargs):
+    """Publish a finite task atomically without a user-declared block count.
+
+    This deliberately buffers output, not an implementation of unbounded
+    streaming recovery. The normal map/read transformer and block shaping run
+    unchanged. The native protocol sees exactly two returns for every task,
+    including a task producing no blocks. Errors publish no successful result.
+    """
+    from ray.data.block import BlockAccessor
+    from ray import cloudpickle
+    from ray.data._internal.execution.operators.map_operator import _map_task
+
+    config = get_config(data_context)
+    limit = config.max_task_output_bytes
+    outputs = []
+    size = 0
+    produced = _map_task(map_transformer, data_context, ctx, *blocks, **kwargs)
+    try:
+        while True:
+            try:
+                block = next(produced)
+            except StopIteration:
+                break
+            size += BlockAccessor.for_block(block).size_bytes() + 64
+            if size > limit:
+                raise ValueError(
+                    "Fixed-R task output exceeds fixed_r_task_recovery_max_output_bytes; "
+                    "reduce task size or explicitly raise the buffer limit"
+                )
+            # Snapshot before resuming the generator, like normal Ray yield
+            # serialization. A UDF may reuse/mutate its batch buffer on its next
+            # iteration. Keep real objects in the envelope (not opaque pickled
+            # bytes), so contained references remain visible to Ray validation.
+            block = cloudpickle.loads(cloudpickle.dumps(block))
+            try:
+                metadata = next(produced)
+            except StopIteration as exc:
+                raise StreamingRecoveryCountError("Task ended between block and metadata") from exc
+            # Account for metadata and empty blocks too. This bounds retained
+            # payload, not the UDF's own allocations or total process RSS.
+            size += len(metadata)
+            if size > limit:
+                raise ValueError(
+                    "Fixed-R task output exceeds fixed_r_task_recovery_max_output_bytes; "
+                    "reduce task size or explicitly raise the buffer limit"
+                )
+            outputs.append((block, metadata))
+    finally:
+        produced.close()
+    yield outputs
+    yield _BUFFERED_TASK_MARKER
+
+
+class BufferedRecoveryDataOpTask(StreamingRecoveryDataOpTask):
+    """Unpack a protected finite result into normal coordinator-owned blocks."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._copied_outputs = deque()
+
+    def get_waitable(self):
+        if self._copied_outputs:
+            return self._copied_outputs[0][0]
+        return super().get_waitable()
+
+    def _copy_pair_if_ready(self):
+        refs = [self._pending_block_ref, self._pending_meta_ref]
+        ready, _ = ray.wait(refs, num_returns=2, timeout=0, fetch_local=True)
+        if len(ready) != 2:
+            return None
+        outputs, marker = ray.get(refs, timeout=0)
+        if marker != _BUFFERED_TASK_MARKER or not isinstance(outputs, list):
+            raise StreamingRecoveryCountError("Invalid protected task envelope")
+        copies = []
+        for item in outputs:
+            if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[1], bytes):
+                raise StreamingRecoveryCountError("Invalid protected block/metadata pair")
+            ref = ray.put(item[0])
+            ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs([ref])
+            copies.append((ref, item[1]))
+        return copies
+
+    def _emit_copied_pair(self, copies):
+        self._copied_outputs.extend(copies)
+        if not self._copied_outputs:
+            return 0
+        return super()._emit_copied_pair(self._copied_outputs.popleft())
+
+    def on_data_ready(self, max_bytes_to_read, metadata_fetcher):
+        if self._copied_outputs:
+            self._track_task_output_backpressure(max_bytes_to_read)
+            if max_bytes_to_read == 0:
+                return 0
+            try:
+                return super()._emit_copied_pair(self._copied_outputs.popleft())
+            except Exception as exc:
+                self._copied_outputs.clear()
+                self._finish(error=exc)
+                raise
+        return super().on_data_ready(max_bytes_to_read, metadata_fetcher)
+
+    def _cancel(self, force):
+        try:
+            super()._cancel(force)
+        finally:
+            self._copied_outputs.clear()

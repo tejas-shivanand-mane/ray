@@ -110,11 +110,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recovery-mode", default="original",
         choices=["original", "copy", "fixed_r", "fixed_r_head_failure", "suite"],
-        help="Opt-in task-UDF correctness coverage; suite uses three fresh local clusters",
+        help="Opt-in task-UDF correctness coverage; suite uses fresh local clusters",
     )
     parser.add_argument("--local-executor-nodes", type=int, default=2)
     parser.add_argument("--local-object-store-mb", type=int, default=512)
     parser.add_argument("--recovery-timeout-s", type=float, default=180)
+    parser.add_argument(
+        "--recovery-plan", choices=["controlled", "dataset"], default="controlled",
+        help="dataset uses the original range/map_batches/materialize pipeline with runtime recovery",
+    )
+    parser.add_argument(
+        "--recovery-failure-stage", choices=["read", "map"], default="map",
+        help="For the dataset recovery plan, select ReadRange or a map stage for head failure",
+    )
     parser.add_argument(
         "--recovery-failure-operator", type=int, default=0,
         help="Zero-based map stage whose first enrolled task gates head failure",
@@ -220,12 +228,40 @@ def _disable_operator_fusion() -> None:
         pass  # Already removed.
 
 
-def main(args: argparse.Namespace):
+def build_dataset(args: argparse.Namespace):
+    """The original workload, shared by normal runs and recovery validation."""
     # Keep the chained operators separate so the topology actually has
     # --num-operators operators (see the function docstring).
     if args.num_operators > 1:
         _disable_operator_fusion()
 
+    num_blocks = args.blocks_per_worker * args.num_workers
+    rows_per_block = _rows_per_block(args.num_scalar_cols, args.num_array_cols)
+    ds = ray.data.range(rows_per_block * num_blocks, override_num_blocks=num_blocks)
+    workers_per_operator = args.num_workers // args.num_operators
+    map_kwargs = {"num_cpus": 0.5}
+    if args.worker_type == "actors":
+        map_kwargs["compute"] = ray.data.ActorPoolStrategy(size=workers_per_operator)
+        udf = RealisticSchemaUDF
+        map_kwargs["fn_constructor_kwargs"] = {
+            "seed": args.seed,
+            "num_scalar_cols": args.num_scalar_cols,
+            "num_array_cols": args.num_array_cols,
+        }
+    else:
+        # Preserve the original single-stage unbounded task pool and the
+        # multi-stage concurrency cap. Recovery does not rewrite the UDF.
+        if args.num_operators > 1:
+            map_kwargs["concurrency"] = workers_per_operator
+        udf = make_realistic_schema_udf(
+            args.seed, args.num_scalar_cols, args.num_array_cols,
+        )
+    for _ in range(args.num_operators):
+        ds = ds.map_batches(udf, **map_kwargs)
+    return ds
+
+
+def main(args: argparse.Namespace):
     benchmark = Benchmark()
 
     def benchmark_fn():
@@ -235,49 +271,8 @@ def main(args: argparse.Namespace):
             args.num_array_cols,
         )
         num_rows = num_blocks * rows_per_block
-        ds = ray.data.range(num_rows, override_num_blocks=num_blocks)
-
-        # Split the total worker pool evenly across the chained operators so the
-        # cluster footprint stays the same regardless of --num-operators. With
-        # 5000 workers and 15 operators each operator gets ~333 workers, which
-        # mirrors production pipelines that pay the per-iteration cost of many
-        # ops with a moderately sized pool per op.
         workers_per_operator = args.num_workers // args.num_operators
-
-        map_kwargs = {"num_cpus": 0.5}
-        if args.worker_type == "actors":
-            map_kwargs["compute"] = ray.data.ActorPoolStrategy(
-                size=workers_per_operator
-            )
-            udf = RealisticSchemaUDF
-            map_kwargs["fn_constructor_kwargs"] = {
-                "seed": args.seed,
-                "num_scalar_cols": args.num_scalar_cols,
-                "num_array_cols": args.num_array_cols,
-            }
-        else:
-            # ``concurrency`` caps in-flight tasks per operator. Without this
-            # cap, all tasks of a single operator can fan out across the entire
-            # cluster and the next operator in the chain starves — but the goal
-            # here is N_operators sharing the pool, so each gets
-            # ``workers_per_operator`` task slots.
-            #
-            # Only apply the cap when actually chaining operators. With a single
-            # operator there's nothing to share with, and capping would diverge
-            # from the original 1-op baseline, which left ``concurrency`` unset
-            # and used Ray Data's default unbounded ``TaskPoolStrategy``.
-            if args.num_operators > 1:
-                map_kwargs["concurrency"] = workers_per_operator
-            udf = make_realistic_schema_udf(
-                args.seed,
-                args.num_scalar_cols,
-                args.num_array_cols,
-            )
-
-        for _ in range(args.num_operators):
-            ds = ds.map_batches(udf, **map_kwargs)
-
-        ds = ds.materialize()
+        ds = build_dataset(args).materialize()
         metrics = collect_dataset_stats(ds)
         metrics["runtime_env_setup"] = RuntimeEnvSetupTracker.collect()
         metrics["num_blocks"] = num_blocks
@@ -301,7 +296,10 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     args = parse_args()
     if args.recovery_mode != "original":
-        from streaming_recovery_worker_scaling import run_recovery_cases
+        if args.recovery_plan == "dataset":
+            from streaming_recovery_worker_dataset import run_recovery_cases
+        else:
+            from streaming_recovery_worker_scaling import run_recovery_cases
 
         # The recovery harness attaches the driver to the surviving coordinator.
         # Do not auto-start Ray or profiling actors before it creates that cluster.

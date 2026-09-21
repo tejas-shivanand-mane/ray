@@ -912,6 +912,13 @@ class DataContext:
         DEFAULT_DEFAULT_MAP_LOGICAL_MEMORY_ENABLED
     )
 
+    # Experimental finite task recovery. Keep normal Dataset APIs, but buffer
+    # each task's output before publishing it as one protected result. Requires
+    # a surviving non-head driver and a cluster with native Fixed-R enabled.
+    enable_fixed_r_task_recovery: bool = False
+    fixed_r_task_recovery_max_output_bytes: int = 256 * 1024**2
+    fixed_r_task_recovery_timeout_s: float = 120
+
     def __post_init__(self):
         # The additonal ray remote args that should be added to
         # the task-pool-based data tasks.

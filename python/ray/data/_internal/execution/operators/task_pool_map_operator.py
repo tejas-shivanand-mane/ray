@@ -23,7 +23,9 @@ from ray.data._internal.execution.operators.map_operator import (
 )
 from ray.data._internal.execution.operators.map_transformer import MapTransformer
 from ray.data._internal.execution.streaming_recovery import (
+    BufferedRecoveryDataOpTask,
     StreamingRecoveryDataOpTask,
+    buffered_map_task,
     get_config as get_recovery_config,
     new_metrics as new_recovery_metrics,
     submit_stream,
@@ -135,7 +137,11 @@ class TaskPoolMapOperator(MapOperator):
                 ray_remote_static_args
             )
 
-        self._map_task = cached_remote_fn(_map_task, **ray_remote_static_args)
+        task_fn = (
+            buffered_map_task if self._streaming_recovery_config is not None
+            and self._streaming_recovery_config.buffered_task_outputs else _map_task
+        )
+        self._map_task = cached_remote_fn(task_fn, **ray_remote_static_args)
 
     def _add_unique_runtime_env(
         self, ray_remote_args: Dict[str, Any]
@@ -212,11 +218,12 @@ class TaskPoolMapOperator(MapOperator):
         if config is None:
             gen = self._map_task.options(**dynamic_ray_remote_args).remote(*args, **kwargs)
         else:
-            if self.name not in config.expected_blocks:
+            if not config.buffered_task_outputs and self.name not in config.expected_blocks:
                 raise ValueError(f"No Fixed-R output count declared for {self.name!r}")
             gen = submit_stream(
                 config, self._map_task, args, kwargs, dynamic_ray_remote_args,
-                config.expected_blocks[self.name], self._streaming_recovery_metrics,
+                1 if config.buffered_task_outputs else config.expected_blocks[self.name],
+                self._streaming_recovery_metrics,
                 task_index=self._next_data_task_idx,
             )
 
@@ -233,7 +240,8 @@ class TaskPoolMapOperator(MapOperator):
             try:
                 self._submit_data_task(
                     gen, bundle, task_done_callback=task_done_callback,
-                    task_factory=StreamingRecoveryDataOpTask,
+                    task_factory=(BufferedRecoveryDataOpTask if config.buffered_task_outputs
+                                  else StreamingRecoveryDataOpTask),
                 )
             except BaseException:
                 self._current_logical_usage = self._current_logical_usage.subtract(
