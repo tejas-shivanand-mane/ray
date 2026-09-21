@@ -7,6 +7,7 @@
 #include "ray/core_worker/core_worker.h"
 
 #include "ray/common/ray_config.h"
+#include "ray/core_worker/recovery_succession_manager.h"
 #include "ray/core_worker/task_manager.h"
 #include "ray/core_worker/task_submission/normal_task_submitter.h"
 
