@@ -13,11 +13,12 @@ import ray
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="RocksDB GCS requires Linux")
-@pytest.mark.parametrize("recovery_plan,point", [
-    ("physical", "gated"), ("dataset", "gated"),
-    ("dataset", "early"), ("dataset", "middle"), ("dataset", "late"),
+@pytest.mark.parametrize("recovery_plan,point,workload", [
+    ("physical", "gated", "instrumented"), ("dataset", "gated", "instrumented"),
+    ("dataset", "early", "instrumented"), ("dataset", "middle", "instrumented"),
+    ("dataset", "late", "instrumented"), ("dataset", "middle", "original"),
 ])
-def test_backpressure_survives_head_replacement(monkeypatch, recovery_plan, point):
+def test_backpressure_survives_head_replacement(monkeypatch, recovery_plan, point, workload):
     benchmark_dir = Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
     monkeypatch.syspath_prepend(str(benchmark_dir))
     from streaming_recovery_benchmark import run_controlled
@@ -36,8 +37,17 @@ def test_backpressure_survives_head_replacement(monkeypatch, recovery_plan, poin
         output_batches_per_input_batch=3, output_batch_rows=4, output_row_bytes=64,
         consumer_sleep_s=0.05, recovery_timeout_s=120,
         recovery_plan=recovery_plan, head_failure_point=point,
+        recovery_workload=workload,
     )
     with local_head_failure_cluster(args) as (case_args, crash_head):
+        if workload == "original":
+            from ray.data import DataContext
+            from streaming_recovery_original_workload import prepare_original_workload
+
+            monkeypatch.setattr(DataContext.get_current(), "target_max_block_size", 512)
+            case_args.output_batches_per_input_batch = 8
+            prepare_original_workload(case_args)
+            assert case_args.recovery_blocks_per_producer < 8
         driver_job_id = ray.get_runtime_context().get_job_id()
         result = run_controlled(case_args, crash_owner=crash_head)
         assert ray.get_runtime_context().get_job_id() == driver_job_id
@@ -47,10 +57,16 @@ def test_backpressure_survives_head_replacement(monkeypatch, recovery_plan, poin
         assert result["original_head_node_id"] != result["replacement_head_node_id"]
         assert result["coordinator_node_id"] in result["surviving_node_ids"]
         assert result["original_head_node_id"] not in result["surviving_node_ids"]
-        expected = args.num_input_blocks * args.output_batches_per_input_batch
+        expected = args.num_input_blocks * getattr(
+            case_args, "recovery_blocks_per_producer", args.output_batches_per_input_batch,
+        )
         assert result["validated_output_blocks"] == expected
         if recovery_plan == "dataset":
-            assert result["workload_variant"] == "public_dataset_unshaped_map_batches"
+            assert result["workload_variant"] == (
+                "original_udfs_shaped_map_batches" if workload == "original"
+                else "public_dataset_unshaped_map_batches"
+            )
+            assert result["block_shaping_enabled"] == (workload == "original")
             assert result["physical_operator_names"] == [
                 "MapBatches(produce)", "MapBatches(consume)",
             ]
@@ -77,6 +93,46 @@ def test_backpressure_survives_head_replacement(monkeypatch, recovery_plan, poin
         assert not nodes[result["original_head_node_id"]]["Alive"]
         assert nodes[result["replacement_head_node_id"]]["Alive"]
         assert all(nodes[node]["Alive"] for node in result["surviving_node_ids"])
+
+
+@pytest.mark.parametrize("target_bytes", [64, 2048])
+def test_original_workload_calibrates_split_and_coalesced_blocks(monkeypatch, target_bytes):
+    benchmark_dir = Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
+    monkeypatch.syspath_prepend(str(benchmark_dir))
+    from ray.data import DataContext
+    from streaming_recovery_original_workload import (
+        original_workload_udfs, prepare_original_workload,
+    )
+    from ray.data._internal.execution.interfaces.task_context import TaskContext
+    import numpy as np
+
+    monkeypatch.setattr(DataContext.get_current(), "target_max_block_size", target_bytes)
+    args = SimpleNamespace(
+        recovery_plan="dataset", head_failure_point="middle",
+        num_input_blocks=16, output_batches_per_input_batch=3,
+        output_batch_rows=4, output_row_bytes=64, consumer_sleep_s=0,
+    )
+    prepare_original_workload(args)
+    counts = args.recovery_producer_block_rows
+    assert sum(counts) == 12
+    assert args.recovery_blocks_per_producer == len(counts)
+    if target_bytes == 64:
+        assert len(counts) > 3  # Real block splitting, beyond the UDF yield count.
+    else:
+        assert counts == [12]  # Three original yields coalesce into one block.
+
+    # The original consumer receives the shaped NumPy batch, not a fabricated
+    # one-yield-sized batch, and still runs before validation fields are added.
+    _, consume = original_workload_udfs(args)
+    monkeypatch.setattr(ray, "get_runtime_context", lambda: SimpleNamespace(
+        get_node_id=lambda: "surviving-executor",
+    ))
+    with TaskContext.current(TaskContext(7, "MapBatches(consume)")):
+        result = consume({"data": np.zeros((counts[0], 64), dtype=np.uint8)})
+    assert result == {
+        "status": ["ok"], "task_index": [7], "rows": [counts[0]],
+        "consumer_node": ["surviving-executor"],
+    }
 
 
 def test_head_failure_suite_preserves_failure_and_continues(monkeypatch):

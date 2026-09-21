@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         help="Use the public Dataset planner and iterator for declared-count recovery",
     )
     parser.add_argument(
+        "--recovery-workload", choices=["instrumented", "original"],
+        default="instrumented",
+        help="Original UDFs with normal block shaping; requires Dataset progress-triggered head failure",
+    )
+    parser.add_argument(
         "--head-failure-point", choices=["gated", "early", "middle", "late", "suite"],
         default="gated",
         help="Head failure at 10/50/90 percent output progress; suite runs all three",
@@ -163,6 +168,14 @@ class Trainer:
 def main(args: argparse.Namespace):
     benchmark = Benchmark()
 
+    if args.recovery_workload == "original" and (
+        args.recovery_mode != "fixed_r_head_failure"
+        or args.recovery_plan != "dataset" or args.head_failure_point == "gated"
+    ):
+        raise ValueError(
+            "--recovery-workload original requires fixed_r_head_failure, "
+            "--recovery-plan dataset and --head-failure-point early|middle|late|suite"
+        )
     if args.head_failure_point != "gated" and args.recovery_mode != "fixed_r_head_failure":
         raise ValueError("--head-failure-point requires --recovery-mode fixed_r_head_failure")
     if args.recovery_mode != "original":

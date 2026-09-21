@@ -38,6 +38,10 @@ FAILURE_MODES = ("fixed_r_failure", "fixed_r_head_failure")
 HEAD_FAILURE_FRACTIONS = {"early": 0.1, "middle": 0.5, "late": 0.9}
 
 
+def _blocks_per_producer(args):
+    return getattr(args, "recovery_blocks_per_producer", args.output_batches_per_input_batch)
+
+
 def head_failure_target(point, expected):
     if point not in HEAD_FAILURE_FRACTIONS:
         raise ValueError(f"Unknown progress-triggered head failure: {point}")
@@ -103,7 +107,7 @@ def validate_args(args):
         if getattr(args, "recovery_plan", "physical") != "dataset":
             raise ValueError("Progress-triggered failure requires --recovery-plan dataset")
         head_failure_target(
-            point, args.num_input_blocks * args.output_batches_per_input_batch
+            point, args.num_input_blocks * _blocks_per_producer(args)
         )
     if args.recovery_mode in FAILURE_MODES and point == "gated":
         if args.output_batches_per_input_batch < 2:
@@ -284,7 +288,7 @@ def _failure_observation(capture, progress):
 def _drain_with_progress_failure(
     args, capture, progress, drain, crash_owner, failure_metrics,
 ):
-    expected = args.num_input_blocks * args.output_batches_per_input_batch
+    expected = args.num_input_blocks * _blocks_per_producer(args)
     target = head_failure_target(args.head_failure_point, expected)
     failure_metrics.update(
         failure_trigger="validated_output_progress", failure_gate_enabled=False,
@@ -363,6 +367,12 @@ def _dataset(args, context, gate_name, capture):
     def consume(batch):
         return next(consume_blocks([batch], TaskContext.get_current()))
 
+    original_workload = getattr(args, "recovery_workload", "instrumented") == "original"
+    if original_workload:
+        from streaming_recovery_original_workload import original_workload_udfs
+
+        produce, consume = original_workload_udfs(args)
+
     class CaptureExecution(ExecutionCallback):
         def before_execution_starts(self, executor):
             operators = {op.name: op for op in executor._topology
@@ -370,6 +380,14 @@ def _dataset(args, context, gate_name, capture):
             names = ("MapBatches(produce)", "MapBatches(consume)")
             if set(operators) != set(names):
                 raise ValueError(f"Unexpected Dataset physical stages: {list(operators)}")
+            if original_workload and any(
+                op.get_additional_split_factor() != 1
+                or op.target_max_block_size_override not in (
+                    None, args.recovery_target_max_block_size,
+                )
+                for op in operators.values()
+            ):
+                raise ValueError("Planned block sizing differs from producer calibration")
             capture.operators = [operators[name] for name in names]
             capture.executor = executor
 
@@ -381,12 +399,14 @@ def _dataset(args, context, gate_name, capture):
                 for input_id in range(args.num_input_blocks)
             ])
             .map_batches(
-                produce, batch_size=None, batch_format="pyarrow",
+                produce, batch_size=None,
+                batch_format="default" if original_workload else "pyarrow",
                 compute=TaskPoolStrategy(size=args.producer_concurrency),
                 num_cpus=1, max_retries=1, retry_exceptions=False,
             )
             .map_batches(
-                consume, batch_size=None, batch_format="pyarrow",
+                consume, batch_size=None,
+                batch_format="default" if original_workload else "pyarrow",
                 compute=TaskPoolStrategy(size=1),
                 num_cpus=1, max_retries=1, retry_exceptions=False,
             )
@@ -396,6 +416,13 @@ def _dataset(args, context, gate_name, capture):
 def run_controlled(args, crash_owner=None, diagnostics=None):
     config = validate_args(args)
     public_dataset = getattr(args, "recovery_plan", "physical") == "dataset"
+    original_workload = getattr(args, "recovery_workload", "instrumented") == "original"
+    if original_workload and (
+        not public_dataset or not hasattr(args, "recovery_producer_block_rows")
+        or args.recovery_mode != "fixed_r_head_failure"
+        or getattr(args, "head_failure_point", "gated") == "gated"
+    ):
+        raise ValueError("Original workload requires calibration and Dataset progress failure")
     if public_dataset and args.recovery_mode == "ordinary":
         raise ValueError(
             "The Dataset recovery plan requires declared counts; use copy for "
@@ -406,6 +433,8 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
     if args.recovery_mode == "fixed_r_head_failure" and crash_owner is None:
         raise ValueError("Head failure requires the head replacement controller")
     context = DataContext.get_current().copy()
+    if original_workload:
+        context.target_max_block_size = args.recovery_target_max_block_size
     context.eager_free = False
     context.retried_map_errors = False
     context.max_errored_blocks = 0
@@ -415,7 +444,7 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
     recovery_config = None
     if args.recovery_mode != "ordinary":
         counts = (
-            {"MapBatches(produce)": args.output_batches_per_input_batch,
+            {"MapBatches(produce)": _blocks_per_producer(args),
              "MapBatches(consume)": 1}
             if public_dataset else config.expected_blocks
         )
@@ -423,7 +452,7 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
             config.owner_node_id, config.executor_node_ids, counts,
             "copy" if args.recovery_mode == "copy" else "fixed_r",
             args.recovery_timeout_s,
-            preserve_batch_output_blocks=public_dataset,
+            preserve_batch_output_blocks=public_dataset and not original_workload,
         )
     context.set_config(CONFIG_KEY, recovery_config)
     gate_name = "fixed-r-" + uuid.uuid4().hex if failure and not progress_failure else None
@@ -467,7 +496,7 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
                 )
                 capture.operators.append(source)
             iterator = capture.executor.execute(source)
-        expected = args.num_input_blocks * args.output_batches_per_input_batch
+        expected = args.num_input_blocks * _blocks_per_producer(args)
 
         def drain():
             # Only fetch tiny status blocks; never collect the producer's arrays.
@@ -476,6 +505,23 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
             for bundle in iterator:
                 for ref in bundle.block_refs:
                     result = ray.get(ref).to_pydict()
+                    if original_workload:
+                        expected_rows = args.recovery_producer_block_rows[
+                            output_count % _blocks_per_producer(args)
+                        ]
+                        if (
+                            result["status"] != ["ok"]
+                            or result["task_index"] != [output_count]
+                            or result["rows"] != [expected_rows]
+                            or result["consumer_node"] != [
+                                config.executor_for_task(output_count)
+                            ]
+                        ):
+                            raise ValueError(f"Original workload output mismatch at {output_count}")
+                        consumer_nodes.update(result["consumer_node"])
+                        output_count += 1
+                        progress.record(output_count)
+                        continue
                     input_id, block_index = divmod(
                         output_count, args.output_batches_per_input_batch
                     )
@@ -503,7 +549,9 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
             progress.finished_at = time.monotonic()
             return {
                 "validated_output_blocks": output_count,
-                "observed_producer_nodes": sorted(producer_nodes),
+                **({} if original_workload else {
+                    "observed_producer_nodes": sorted(producer_nodes),
+                }),
                 "observed_consumer_nodes": sorted(consumer_nodes),
             }
 
@@ -587,6 +635,13 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
             ("Produce", args.num_input_blocks, expected), ("Consume", expected, expected)
         ):
             actual = metrics[name]
+            expected_rows = (
+                args.num_input_blocks * args.output_batches_per_input_batch
+                * args.output_batch_rows
+                if name == "Produce" else expected
+            )
+            if actual["output_rows"] != expected_rows:
+                raise ValueError(f"Output row count mismatch for {name}: {actual}")
             actual_counts = (
                 actual["tasks_submitted"], actual["tasks_finished"],
                 actual["tasks_failed"], actual["output_blocks"],
@@ -637,6 +692,7 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
         return {
             **vars(args), **result, **failure_metrics, "operators": metrics,
             "workload_variant": (
+                "original_udfs_shaped_map_batches" if original_workload else
                 "public_dataset_unshaped_map_batches" if public_dataset else
                 "unshaped_physical_task_map_chain"
             ),
@@ -645,7 +701,14 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
                 recovery_config.expected_blocks if recovery_config else config.expected_blocks
             ),
             "logical_producer_payload_bytes": (
-                expected * args.output_batch_rows * args.output_row_bytes
+                args.num_input_blocks * args.output_batches_per_input_batch
+                * args.output_batch_rows * args.output_row_bytes
+            ),
+            "block_shaping_enabled": original_workload,
+            "fusion_enabled": False,
+            "output_validation": (
+                "consumer_task_indices_and_calibrated_row_counts" if original_workload
+                else "producer_input_and_batch_indices_and_row_counts"
             ),
             "coordinator_node_id": ray.get_runtime_context().get_node_id(),
         }

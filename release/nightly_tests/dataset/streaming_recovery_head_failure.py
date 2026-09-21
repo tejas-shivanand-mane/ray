@@ -31,9 +31,10 @@ def run_head_failure_cases(benchmark, args):
         if args.recovery_plan != "dataset":
             raise ValueError("Progress-triggered head failure requires --recovery-plan dataset")
         for name in points:
-            head_failure_target(
-                name, args.num_input_blocks * args.output_batches_per_input_batch
-            )
+            if getattr(args, "recovery_workload", "instrumented") != "original":
+                head_failure_target(
+                    name, args.num_input_blocks * args.output_batches_per_input_batch
+                )
     failed = []
     for name in points:
         selected = argparse.Namespace(**vars(args))
@@ -46,7 +47,13 @@ def run_head_failure_cases(benchmark, args):
         try:
             # Every point gets fresh Ray processes and a separate GCS database.
             with local_head_failure_cluster(selected) as (case_args, crash_head):
-                # Retain resolved placement even when run_controlled raises.
+                diagnostics.update(vars(case_args))
+                if getattr(case_args, "recovery_workload", "instrumented") == "original":
+                    from streaming_recovery_original_workload import prepare_original_workload
+
+                    # Outside Benchmark.run_fn: calibration is not timed workload.
+                    prepare_original_workload(case_args)
+                # Also retain calibration when timed execution raises.
                 diagnostics.update(vars(case_args))
                 benchmark.run_fn(
                     key, run_controlled, case_args, crash_owner=crash_head,
