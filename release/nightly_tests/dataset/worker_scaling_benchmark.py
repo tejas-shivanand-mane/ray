@@ -107,11 +107,25 @@ def parse_args() -> argparse.Namespace:
             "scheduling-loop duration metric is ~invariant to this."
         ),
     )
+    parser.add_argument(
+        "--recovery-mode", default="original",
+        choices=["original", "copy", "fixed_r", "fixed_r_head_failure", "suite"],
+        help="Opt-in task-UDF correctness coverage; suite uses three fresh local clusters",
+    )
+    parser.add_argument("--local-executor-nodes", type=int, default=2)
+    parser.add_argument("--local-object-store-mb", type=int, default=512)
+    parser.add_argument("--recovery-timeout-s", type=float, default=180)
+    parser.add_argument(
+        "--recovery-failure-operator", type=int, default=0,
+        help="Zero-based map stage whose first enrolled task gates head failure",
+    )
     args = parser.parse_args()
     if args.num_scalar_cols + args.num_array_cols <= 0:
         parser.error(
             "At least one of --num-scalar-cols / --num-array-cols must be > 0."
         )
+    if args.num_scalar_cols < 0 or args.num_array_cols < 0:
+        parser.error("Column counts must be nonnegative.")
     if args.num_operators < 1:
         parser.error("--num-operators must be >= 1.")
     if args.blocks_per_worker < 1:
@@ -121,6 +135,13 @@ def parse_args() -> argparse.Namespace:
             f"--num-workers ({args.num_workers}) must be >= --num-operators "
             f"({args.num_operators}) so each operator gets at least one worker."
         )
+    if args.recovery_mode != "original":
+        from streaming_recovery_worker_scaling import validate_recovery_args
+
+        try:
+            validate_recovery_args(args)
+        except ValueError as exc:
+            parser.error(str(exc))
     return args
 
 
@@ -278,6 +299,14 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
+    args = parse_args()
+    if args.recovery_mode != "original":
+        from streaming_recovery_worker_scaling import run_recovery_cases
+
+        # The recovery harness attaches the driver to the surviving coordinator.
+        # Do not auto-start Ray or profiling actors before it creates that cluster.
+        run_recovery_cases(args)
+        raise SystemExit(0)
     # ``Profiling.start()`` spawns ``_UDFPySpyProfiler`` actors on worker
     # nodes. To deserialize that actor class, the worker has to import
     # ``profiling.pyspy`` — which lives at this script's ``profiling/``
@@ -288,7 +317,6 @@ if __name__ == "__main__":
 
     _profiling_dir = os.path.dirname(os.path.abspath(_profiling_pkg.__file__))
     ray.init(runtime_env={"py_modules": benchmark_py_modules() + [_profiling_dir]})
-    args = parse_args()
 
     profiling = Profiling(outdir=SHARED_OUTDIR, num_gpu_nodes=0)
     profiling.start(
