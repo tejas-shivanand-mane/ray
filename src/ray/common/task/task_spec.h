@@ -108,20 +108,10 @@ class TaskSpecification : public MessageWrapper<rpc::TaskSpec> {
     ComputeResources();
   }
 
-  /// Return a shared immutable view of the underlying protobuf. This is used
-  /// by owner-local recovery structures that only need a stable replay recipe
-  /// and should not deep-copy a potentially large TaskSpec on registration.
-  std::shared_ptr<const rpc::TaskSpec> GetSharedMessage() const { return message_; }
-
-  /// TaskSpecification copies share the protobuf for cheap read-only access.
-  /// Detach before mutation so immutable shared snapshots (for example a
-  /// Recovery Frontier replay recipe) cannot be changed by a later retry.
-  rpc::TaskSpec &GetMutableMessage() {
-    if (!message_.unique()) {
-      message_ = std::make_shared<rpc::TaskSpec>(*message_);
-    }
-    return *message_;
-  }
+  // Keep MessageWrapper's shared mutation semantics: dependency resolution
+  // rewrites arguments through one TaskSpecification copy, and submitters
+  // dispatch another copy of that same protobuf. Recovery recipes must take
+  // their own immutable snapshot at registration instead of sharing this state.
 
   // TODO(swang): Finalize and document these methods.
   TaskID TaskId() const;

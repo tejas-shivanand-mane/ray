@@ -298,10 +298,15 @@ TEST(LocalDependencyResolverTest, TestInlineLocalDependencies) {
   TaskSpecification task;
   task.GetMutableMessage().add_args()->mutable_object_ref()->set_object_id(obj1.Binary());
   task.GetMutableMessage().add_args()->mutable_object_ref()->set_object_id(obj2.Binary());
+  // Actor queues and normal-task callbacks retain separate TaskSpecification
+  // copies. Both must observe the resolver's argument rewrite.
+  TaskSpecification queued_task = task;
   bool ok = false;
   std::promise<bool> dependencies_resolved;
-  resolver.ResolveDependencies(task, [&](Status) {
-    ok = true;
+  resolver.ResolveDependencies(task, [&, task](Status status) {
+    ok = status.ok() && task.GetDependencyIds().empty() &&
+         task.ArgDataSize(0) == data->GetData()->Size() &&
+         task.ArgDataSize(1) == data->GetData()->Size();
     dependencies_resolved.set_value(true);
   });
   ASSERT_TRUE(dependencies_resolved.get_future().get());
@@ -309,6 +314,9 @@ TEST(LocalDependencyResolverTest, TestInlineLocalDependencies) {
   ASSERT_TRUE(ok);
   ASSERT_FALSE(task.ArgByRef(0));
   ASSERT_FALSE(task.ArgByRef(1));
+  ASSERT_TRUE(queued_task.GetDependencyIds().empty());
+  ASSERT_EQ(queued_task.ArgDataSize(0), data->GetData()->Size());
+  ASSERT_EQ(queued_task.ArgDataSize(1), data->GetData()->Size());
   ASSERT_NE(task.ArgData(0), nullptr);
   ASSERT_NE(task.ArgData(1), nullptr);
   ASSERT_EQ(resolver.NumPendingTasks(), 0);
@@ -331,10 +339,15 @@ TEST(LocalDependencyResolverTest, TestInlinePendingDependencies) {
   TaskSpecification task;
   task.GetMutableMessage().add_args()->mutable_object_ref()->set_object_id(obj1.Binary());
   task.GetMutableMessage().add_args()->mutable_object_ref()->set_object_id(obj2.Binary());
+  // Actor queues and normal-task callbacks retain separate TaskSpecification
+  // copies. Both must observe the resolver's argument rewrite.
+  TaskSpecification queued_task = task;
   bool ok = false;
   std::promise<bool> dependencies_resolved;
-  resolver.ResolveDependencies(task, [&](Status) {
-    ok = true;
+  resolver.ResolveDependencies(task, [&, task](Status status) {
+    ok = status.ok() && task.GetDependencyIds().empty() &&
+         task.ArgDataSize(0) == data->GetData()->Size() &&
+         task.ArgDataSize(1) == data->GetData()->Size();
     dependencies_resolved.set_value(true);
   });
   ASSERT_EQ(resolver.NumPendingTasks(), 1);
@@ -348,6 +361,9 @@ TEST(LocalDependencyResolverTest, TestInlinePendingDependencies) {
   ASSERT_TRUE(ok);
   ASSERT_FALSE(task.ArgByRef(0));
   ASSERT_FALSE(task.ArgByRef(1));
+  ASSERT_TRUE(queued_task.GetDependencyIds().empty());
+  ASSERT_EQ(queued_task.ArgDataSize(0), data->GetData()->Size());
+  ASSERT_EQ(queued_task.ArgDataSize(1), data->GetData()->Size());
   ASSERT_NE(task.ArgData(0), nullptr);
   ASSERT_NE(task.ArgData(1), nullptr);
   ASSERT_EQ(resolver.NumPendingTasks(), 0);

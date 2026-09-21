@@ -471,7 +471,10 @@ RecoverySuccessionManager::RegisterOwnerTaskWithRecoveryFrontierLocked(
       recovery_frontier_planner_ == nullptr || task_id.IsNil()) {
     return std::nullopt;
   }
-  return recovery_frontier_planner_->RegisterTask(task_spec.GetSharedMessage());
+  // The live TaskSpecification is shared by dependency resolution and task
+  // submission. Snapshot through the value overload so later inlining/retries
+  // cannot mutate the Frontier's immutable replay recipe.
+  return recovery_frontier_planner_->RegisterTask(task_spec.GetMessage());
 }
 
 std::optional<RecoveryFrontierMembership>

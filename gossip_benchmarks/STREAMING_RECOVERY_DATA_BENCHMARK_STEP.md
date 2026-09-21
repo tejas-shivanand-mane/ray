@@ -110,6 +110,29 @@ size, not a measurement of network traffic. No-failure modes have no gate actor.
 
 ## One local validation and smoke batch
 
+The ordinary-mode hang reported after this step exposed a native task-spec
+aliasing regression. The supplied session logs show all four producer tasks
+finishing with 12 blocks, while the first consumer remains pending and its
+raylet reports an object with no in-memory or external-storage location.
+`TaskSpecification::GetMutableMessage()` detached shared protobufs, so dependency
+resolution inlined the small streamed block into its private copy. The submitter
+still dispatched the original by-reference dependency, requesting a Plasma copy
+that did not exist. This also affected actor submission's queued task copies.
+
+The correction restores shared mutation for live task specifications and takes
+an independent replay-recipe snapshot at Recovery Frontier registration. That
+snapshot remains shared within Frontier; registration now pays for a snapshot
+copy to isolate it from live task rewrites. Native regression coverage checks
+both already-ready and asynchronously resolved inline arguments through queued
+and callback-captured task copies, plus isolation of the registered recipe from
+later live mutations. No builds, tests, lint, or benchmarks were run by the agent;
+the diagnosis and patch were reviewed from source and the supplied logs.
+
+**Rebuild the native fork with your usual full-Ray build after pulling this
+correction.** A Python-only refresh is insufficient. Then run the validation
+batch below. The ordinary benchmark still uses its original block references;
+no copying workaround or larger payload was added to hide the inline path.
+
 Run in `/home/tejas/Downloads/ray` with the existing `ray-dev` environment active:
 
 ```bash

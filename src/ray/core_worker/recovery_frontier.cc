@@ -24,9 +24,9 @@ namespace ray::core {
 namespace {
 
 bool CanShareRecoveryFrontierReplayRecipe(const rpc::TaskSpec &task_spec) {
-  // The owner submission path normally reaches Frontier before any recovery
-  // state is attached. In that common case the TaskManager-owned protobuf is
-  // already exactly the replay recipe we want and can be shared directly.
+  // A caller supplying shared ownership must already have isolated the recipe
+  // from mutable live task specifications. Clean immutable recipes can be
+  // shared directly within Frontier without another snapshot copy.
   if (task_spec.has_recovery_manifest()) {
     return false;
   }
@@ -108,10 +108,9 @@ std::optional<RecoveryFrontierMembership> RecoveryFrontierGroup::AddTask(
   member.first_group_return_index = next_group_return_index_;
   member.num_returns = static_cast<uint32_t>(task_spec->num_returns());
 
-  // Benchmark 50 showed that the canonical protobuf CopyFrom is a material
-  // per-task cost. The normal owner path already has immutable shared ownership
-  // through TaskSpecification/TaskManager, so reuse it. If recovery-only fields
-  // need stripping, preserve the old semantics with a sanitized private copy.
+  // Reuse the immutable recipe supplied by registration. Live owner tasks are
+  // snapshotted before reaching this path. If recovery-only fields need
+  // stripping, sanitize a private copy without changing the supplied recipe.
   if (CanShareRecoveryFrontierReplayRecipe(*task_spec)) {
     member.task_spec = std::move(task_spec);
   } else {

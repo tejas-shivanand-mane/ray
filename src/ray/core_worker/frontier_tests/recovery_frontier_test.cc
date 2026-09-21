@@ -119,25 +119,33 @@ TEST(RecoveryFrontierTest, SharedRegistrationRemovesRecoveryManifestPrivately) {
   EXPECT_TRUE(task->has_recovery_manifest());
 }
 
-TEST(RecoveryFrontierTest, TaskSpecificationMutationDetachesSharedReplaySnapshot) {
+TEST(RecoveryFrontierTest, RegistrationSnapshotsMutableTaskSpecification) {
   // Actor tasks skip scheduling-class construction, which keeps this fixture
-  // intentionally minimal. The COW property itself is TaskSpecification-wide.
-  auto proto = std::make_shared<rpc::TaskSpec>();
+  // intentionally minimal. Live TaskSpecification copies share mutations.
+  RecoveryFrontierPlanner planner(/*group_size=*/32);
+  auto proto = std::make_shared<rpc::TaskSpec>(MakeTask('c'));
   proto->set_type(rpc::TaskType::ACTOR_TASK);
   proto->set_attempt_number(3);
   TaskSpecification task_spec(proto);
+  TaskSpecification submitted_task = task_spec;
 
-  const auto replay_snapshot = task_spec.GetSharedMessage();
-  ASSERT_EQ(replay_snapshot.get(), proto.get());
+  const auto membership = planner.RegisterTask(task_spec.GetMessage());
+  const auto *group = planner.GetGroup(membership.group_id);
+  ASSERT_NE(group, nullptr);
+  ASSERT_EQ(group->Members().size(), 1U);
+  const auto replay_snapshot = group->Members()[0].task_spec;
+  ASSERT_NE(replay_snapshot, nullptr);
+  EXPECT_NE(replay_snapshot.get(), proto.get());
   EXPECT_EQ(replay_snapshot->attempt_number(), 3);
 
   // Normal task retry logic mutates attempt_number through GetMutableMessage().
-  // A shared Frontier replay snapshot must remain at the original attempt.
+  // Live copies must see the update; the replay recipe must remain unchanged.
   task_spec.GetMutableMessage().set_attempt_number(4);
 
-  EXPECT_NE(task_spec.GetSharedMessage().get(), replay_snapshot.get());
   EXPECT_EQ(replay_snapshot->attempt_number(), 3);
   EXPECT_EQ(task_spec.GetMessage().attempt_number(), 4);
+  EXPECT_EQ(submitted_task.GetMessage().attempt_number(), 4);
+  EXPECT_EQ(proto->attempt_number(), 4);
 }
 
 TEST(RecoveryFrontierTest, SingleTaskIsImmediateLeaderForAnyK) {

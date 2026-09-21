@@ -34,10 +34,9 @@ namespace ray::core {
 /// topology amortize control-plane work across a window of fine-grained tasks.
 struct RecoveryFrontierMember {
   TaskID task_id = TaskID::Nil();
-  // The replay recipe is immutable after registration. Production owner tasks
-  // share the TaskManager-owned protobuf instead of deep-copying it here;
-  // TaskSpecification detaches on mutation. Staged append batches share the
-  // same immutable recipe safely while asynchronous publication is in flight.
+  // The replay recipe is an immutable snapshot of the live owner task.
+  // Staged append batches share this snapshot safely while asynchronous
+  // publication is in flight; live TaskSpecification mutations cannot reach it.
   std::shared_ptr<const rpc::TaskSpec> task_spec;
   uint32_t member_index = 0;
   uint32_t first_group_return_index = 0;
@@ -177,11 +176,12 @@ class RecoveryFrontierPlanner {
 
   uint32_t GroupSize() const { return group_size_; }
 
-  /// Compatibility/test path: make an owned immutable recipe from a protobuf
-  /// reference. Production owner registration should use the shared_ptr
-  /// overload below to avoid a second full TaskSpec copy.
+  /// Snapshot a mutable task into an owned immutable replay recipe. Production
+  /// owner registration uses this overload to isolate live task rewrites.
   RecoveryFrontierMembership RegisterTask(const rpc::TaskSpec &task_spec);
 
+  /// Share an already immutable recipe. The caller must not retain mutable
+  /// aliases to the supplied protobuf.
   RecoveryFrontierMembership RegisterTask(
       std::shared_ptr<const rpc::TaskSpec> task_spec);
 
