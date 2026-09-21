@@ -297,6 +297,25 @@ def plan_udf_map_op(
     )
 
     compute = get_compute(op.compute)
+    from ray.data._internal.execution.streaming_recovery import get_config
+
+    recovery_config = get_config(data_context)
+    preserve_batch_outputs = (
+        recovery_config is not None and recovery_config.preserve_batch_output_blocks
+    )
+    if preserve_batch_outputs and (
+        not isinstance(op, MapBatches)
+        or isinstance(compute, ActorPoolStrategy)
+        or isinstance(op.fn, CallableClass)
+        or _is_async_udf(op.fn)
+        or op.batch_size is not None
+        or op.min_rows_per_bundled_input is not None
+        or op.per_block_limit is not None
+    ):
+        raise ValueError(
+            "Fixed-R batch preservation requires synchronous task map_batches "
+            "with batch_size=None and no per-block limit"
+        )
     udf_is_callable_class = isinstance(op.fn, CallableClass)
     fn, init_fn = _get_udf(
         op.fn,
@@ -315,6 +334,7 @@ def plan_udf_map_op(
             zero_copy_batch=op.zero_copy_batch,
             is_udf=True,
             output_block_size_option=output_block_size_option,
+            disable_block_shaping=preserve_batch_outputs,
         )
 
     else:

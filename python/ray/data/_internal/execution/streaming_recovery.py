@@ -41,6 +41,12 @@ class FixedRDataConfig:
     ``executor_node_id`` accepts a single node ID or an ordered tuple of IDs.
     Each operator assigns task i to tuple[i % len(tuple)] with hard affinity;
     replay retains that assignment. Every listed executor must survive.
+
+    ``preserve_batch_output_blocks`` opts public ``map_batches`` into one block
+    per UDF output batch, without output coalescing or splitting. It requires
+    synchronous task UDFs and ``batch_size=None`` (one input block per task).
+    Counts then include empty output batches; an empty input block bypasses the
+    UDF under normal Dataset semantics, so callers must account for that too.
     """
 
     owner_node_id: str
@@ -48,6 +54,7 @@ class FixedRDataConfig:
     expected_blocks: Dict[str, int]
     mode: str = "fixed_r"
     timeout_s: float = 60
+    preserve_batch_output_blocks: bool = False
 
     @property
     def executor_node_ids(self):
@@ -63,6 +70,8 @@ class FixedRDataConfig:
         return nodes[task_index % len(nodes)]
 
     def validate(self):
+        if type(self.preserve_batch_output_blocks) is not bool:
+            raise ValueError("preserve_batch_output_blocks must be a bool")
         if self.mode not in ("fixed_r", "copy"):
             raise ValueError("Fixed-R Data mode must be 'fixed_r' or 'copy'")
         if (

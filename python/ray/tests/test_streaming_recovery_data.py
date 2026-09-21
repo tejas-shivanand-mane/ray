@@ -142,6 +142,61 @@ def test_public_dataset_copy_pipeline(data_cluster, mode):
     assert sum(op.metrics.extra_metrics["fixed_r_closed_streams"] for op in operators) == 2
 
 
+@pytest.mark.parametrize("mode", ["copy", "fixed_r"])
+@pytest.mark.parametrize("target_bytes", [1, 1024**3])
+def test_public_dataset_preserves_generator_blocks(data_cluster, mode, target_bytes):
+    owner_id, executor_id, _ = data_cluster
+
+    def expand(batch):
+        for index in range(3):
+            yield {"value": [batch["id"][0].as_py() * 3 + index] * 10}
+
+    def consume(batch):
+        assert batch.num_rows == 10
+        return pa.table({"value": [batch["value"][0].as_py()]})
+
+    counts = {"MapBatches(expand)": 3, "MapBatches(consume)": 1}
+    context = configured_context(owner_id, executor_id, counts, mode)
+    context.set_config(CONFIG_KEY, replace(
+        get_config(context), preserve_batch_output_blocks=True,
+    ))
+    # Exercise targets that would otherwise split or coalesce the UDF outputs.
+    context.target_max_block_size = target_bytes
+    with DataContext.current(context):
+        ds = ray.data.from_blocks([pa.table({"id": [i]}) for i in range(2)])
+        ds = ds.map_batches(expand, batch_format="pyarrow").map_batches(
+            consume, batch_format="pyarrow"
+        )
+        iterator, _, executor = ds._execute_to_iterator()
+        values = [ray.get(ref)["value"][0].as_py()
+                  for bundle in iterator for ref in bundle.block_refs]
+    assert values == list(range(6))
+    operators = {op.name: op for op in executor._topology if isinstance(op, MapOperator)}
+    for name, tasks in (("MapBatches(expand)", 2), ("MapBatches(consume)", 6)):
+        assert not operators[name].supports_fusion()
+        assert operators[name].metrics.num_tasks_finished == tasks
+        assert operators[name].metrics.extra_metrics["fixed_r_closed_streams"] == tasks
+
+
+@pytest.mark.parametrize("batch_size", [1, "auto"])
+def test_public_dataset_preservation_rejects_rebatching(data_cluster, batch_size):
+    owner_id, executor_id, _ = data_cluster
+
+    def identity(batch):
+        return batch
+
+    context = configured_context(owner_id, executor_id, {"MapBatches(identity)": 1})
+    context.set_config(CONFIG_KEY, replace(
+        get_config(context), preserve_batch_output_blocks=True,
+    ))
+    with DataContext.current(context):
+        ds = ray.data.from_blocks([pa.table({"value": [1, 2]})]).map_batches(
+            identity, batch_size=batch_size,
+        )
+        with pytest.raises(ValueError, match="batch_size=None"):
+            list(ds.iter_internal_ref_bundles())
+
+
 def test_executor_owner_loss_with_live_downstream_copy(data_cluster, tmp_path):
     owner_id, executor_id, crash = data_cluster
     context = configured_context(owner_id, executor_id, {"Produce": 3, "Consume": 1})

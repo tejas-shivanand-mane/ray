@@ -42,6 +42,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--local-object-store-mb", type=int, default=256)
     parser.add_argument(
+        "--recovery-plan", choices=["physical", "dataset"], default="physical",
+        help="Use the public Dataset planner and iterator for declared-count recovery",
+    )
+    parser.add_argument(
         "--disable-locality-hints",
         action="store_true",
         default=False,
@@ -171,6 +175,8 @@ def run_recovery_cases(benchmark, args):
 
     if args.case != "fast-producer-slow-consumer":
         raise ValueError("Controlled recovery modes support fast-producer-slow-consumer only")
+    if args.recovery_plan == "dataset" and args.recovery_mode in ("ordinary", "suite"):
+        raise ValueError("Dataset recovery supports copy, fixed_r, and both failure modes")
     if args.local_executor_nodes < 0 or args.local_object_store_mb < 80:
         raise ValueError("Local nodes must be nonnegative and object stores at least 80 MiB")
     if args.recovery_mode == "suite" and not args.local_executor_nodes:

@@ -31,6 +31,23 @@ def _create_chained_transformer(udf, n):
     return MapTransformer(transform_fns)
 
 
+@pytest.mark.parametrize("output_rows", [[], [0], [2, 0, 3]])
+def test_unshaped_batch_generator_preserves_yields(output_rows):
+    def udf(batch):
+        for rows in output_rows:
+            yield {"value": list(range(rows))}
+
+    transformer = MapTransformer([BatchMapTransformFn(
+        _generate_transform_fn_for_map_batches(udf),
+        batch_format="pandas", batch_size=None, disable_block_shaping=True,
+        output_block_size_option=OutputBlockSizeOption.of(target_max_block_size=1),
+    )])
+    outputs = transformer.apply_transform(
+        [pd.DataFrame({"input": [1]})], TaskContext(task_idx=0, op_name="test"),
+    )
+    assert [BlockAccessor.for_block(block).num_rows() for block in outputs] == output_rows
+
+
 def test_chained_transforms_release_intermediates_between_batches():
     """Test that chained transforms release intermediate refs when moving to next batch.
 

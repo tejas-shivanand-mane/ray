@@ -1,8 +1,10 @@
-"""Controlled Fixed-R variant of fast-producer-slow-consumer.
+"""Fixed-R variants of fast-producer-slow-consumer.
 
 Uses the real Data streaming executor, with explicit one-block input bundles and
 block shaping disabled. This is a workload adaptation, not the unchanged public
-Dataset benchmark. No large output stream is materialized on the driver.
+Dataset benchmark. The opt-in Dataset variant uses from_blocks/map_batches and
+the public streaming iterator, with declared counts and unshaped output batches.
+No large output stream is materialized on the driver.
 """
 
 import math
@@ -15,7 +17,9 @@ import pyarrow as pa
 import ray
 
 from ray.data import DataContext, TaskPoolStrategy
+from ray.data._internal.execution.execution_callback import ExecutionCallback
 from ray.data._internal.execution.interfaces import BlockEntry, RefBundle
+from ray.data._internal.execution.interfaces.task_context import TaskContext
 from ray.data._internal.execution.operators.input_data_buffer import InputDataBuffer
 from ray.data._internal.execution.operators.map_operator import MapOperator
 from ray.data._internal.execution.operators.map_transformer import (
@@ -223,8 +227,73 @@ def _operator_metrics(op):
     }
 
 
+def _make_execution_capture():
+    # Local class: workers do not need this benchmark module on PYTHONPATH.
+    class ExecutionCapture:
+        """Observe the driver executor without serializing it into task arguments."""
+
+        def __init__(self):
+            self.executor = None
+            self.operators = []
+
+        def __getstate__(self):
+            # Dataset contexts carry callback classes to workers. Their closure
+            # must not carry the executor, locks, actors, or owned ObjectRefs.
+            return {"executor": None, "operators": []}
+
+    return ExecutionCapture()
+
+
+def _dataset(args, context, gate_name, capture):
+    produce_blocks, consume_blocks = _transforms(args, gate_name)
+
+    # Local functions serialize by value, including the instrumented workload.
+    # Arrow preserves the validation metadata; consume_blocks also performs the
+    # original NumPy conversion before sleeping.
+    def produce(batch):
+        yield from produce_blocks([batch], TaskContext.get_current())
+
+    def consume(batch):
+        return next(consume_blocks([batch], TaskContext.get_current()))
+
+    class CaptureExecution(ExecutionCallback):
+        def before_execution_starts(self, executor):
+            operators = {op.name: op for op in executor._topology
+                         if isinstance(op, MapOperator)}
+            names = ("MapBatches(produce)", "MapBatches(consume)")
+            if set(operators) != set(names):
+                raise ValueError(f"Unexpected Dataset physical stages: {list(operators)}")
+            capture.operators = [operators[name] for name in names]
+            capture.executor = executor
+
+    context.custom_execution_callback_classes.append(CaptureExecution)
+    with DataContext.current(context):
+        return (
+            ray.data.from_blocks([
+                pa.table({"id": [input_id]})
+                for input_id in range(args.num_input_blocks)
+            ])
+            .map_batches(
+                produce, batch_size=None, batch_format="pyarrow",
+                compute=TaskPoolStrategy(size=args.producer_concurrency),
+                num_cpus=1, max_retries=1, retry_exceptions=False,
+            )
+            .map_batches(
+                consume, batch_size=None, batch_format="pyarrow",
+                compute=TaskPoolStrategy(size=1),
+                num_cpus=1, max_retries=1, retry_exceptions=False,
+            )
+        )
+
+
 def run_controlled(args, crash_owner=None):
     config = validate_args(args)
+    public_dataset = getattr(args, "recovery_plan", "physical") == "dataset"
+    if public_dataset and args.recovery_mode == "ordinary":
+        raise ValueError(
+            "The Dataset recovery plan requires declared counts; use copy for "
+            "its no-enrollment baseline, or original for the unchanged benchmark"
+        )
     failure = args.recovery_mode in FAILURE_MODES
     if args.recovery_mode == "fixed_r_head_failure" and crash_owner is None:
         raise ValueError("Head failure requires the head replacement controller")
@@ -237,41 +306,57 @@ def run_controlled(args, crash_owner=None):
     context._max_num_blocks_in_streaming_gen_buffer = 1
     recovery_config = None
     if args.recovery_mode != "ordinary":
+        counts = (
+            {"MapBatches(produce)": args.output_batches_per_input_batch,
+             "MapBatches(consume)": 1}
+            if public_dataset else config.expected_blocks
+        )
         recovery_config = FixedRDataConfig(
-            config.owner_node_id, config.executor_node_ids, config.expected_blocks,
+            config.owner_node_id, config.executor_node_ids, counts,
             "copy" if args.recovery_mode == "copy" else "fixed_r",
             args.recovery_timeout_s,
+            preserve_batch_output_blocks=public_dataset,
         )
     context.set_config(CONFIG_KEY, recovery_config)
     gate_name = "fixed-r-" + uuid.uuid4().hex if failure else None
     gate = _make_gate(gate_name, args.recovery_timeout_s) if failure else None
-    executor = StreamingExecutor(context)
+    capture = _make_execution_capture()
     try:
-        produce, consume = _transforms(args, gate_name)
-        bundles = []
-        for input_id in range(args.num_input_blocks):
-            block = pa.table({"id": [input_id]})
-            accessor = BlockAccessor.for_block(block)
-            bundles.append(RefBundle(
-                [BlockEntry(ray.put(block), accessor.get_metadata())],
-                schema=accessor.schema(), owns_blocks=False,
-            ))
-        source = InputDataBuffer(context, bundles)
-        operators = []
-        for name, fn, concurrency in (
-            ("Produce", produce, args.producer_concurrency), ("Consume", consume, 1)
-        ):
-            source = MapOperator.create(
-                MapTransformer([BlockMapTransformFn(fn, disable_block_shaping=True)]),
-                source, context, name=name, supports_fusion=False,
-                compute_strategy=TaskPoolStrategy(size=concurrency),
-                ray_remote_args={
-                    "num_cpus": 1, "max_retries": 1, "retry_exceptions": False,
-                },
-                ray_remote_args_fn=_placement(config.executor_node_ids),
-            )
-            operators.append(source)
-        iterator = executor.execute(source)
+        if public_dataset:
+            dataset = _dataset(args, context, gate_name, capture)
+
+            def iterate():
+                # Start inside drain(): this public call waits for the first
+                # output, which is deliberately blocked until head replacement.
+                yield from dataset.iter_internal_ref_bundles()
+
+            iterator = iterate()
+        else:
+            capture.executor = StreamingExecutor(context)
+            produce, consume = _transforms(args, gate_name)
+            bundles = []
+            for input_id in range(args.num_input_blocks):
+                block = pa.table({"id": [input_id]})
+                accessor = BlockAccessor.for_block(block)
+                bundles.append(RefBundle(
+                    [BlockEntry(ray.put(block), accessor.get_metadata())],
+                    schema=accessor.schema(), owns_blocks=False,
+                ))
+            source = InputDataBuffer(context, bundles)
+            for name, fn, concurrency in (
+                ("Produce", produce, args.producer_concurrency), ("Consume", consume, 1)
+            ):
+                source = MapOperator.create(
+                    MapTransformer([BlockMapTransformFn(fn, disable_block_shaping=True)]),
+                    source, context, name=name, supports_fusion=False,
+                    compute_strategy=TaskPoolStrategy(size=concurrency),
+                    ray_remote_args={
+                        "num_cpus": 1, "max_retries": 1, "retry_exceptions": False,
+                    },
+                    ray_remote_args_fn=_placement(config.executor_node_ids),
+                )
+                capture.operators.append(source)
+            iterator = capture.executor.execute(source)
         expected = args.num_input_blocks * args.output_batches_per_input_batch
 
         def drain():
@@ -324,10 +409,12 @@ def run_controlled(args, crash_owner=None):
                         arrivals = ray.get(
                             gate.snapshot.remote(), timeout=args.recovery_timeout_s
                         )
+                        operators = capture.operators
                         enrolled = [op.metrics.extra_metrics["fixed_r_enrolled_tasks"]
                                     for op in operators]
                         if (
-                            len(arrivals["Produce"]) == wave
+                            len(operators) == 2
+                            and len(arrivals["Produce"]) == wave
                             and len(arrivals["Consume"]) == 1
                             and len(operators[0].get_active_tasks()) == wave
                             and len(operators[1].get_active_tasks()) == 1
@@ -374,10 +461,13 @@ def run_controlled(args, crash_owner=None):
                     try:
                         ray.get(gate.open.remote(), timeout=args.recovery_timeout_s)
                     finally:
-                        executor.shutdown(force=True)
+                        if capture.executor is not None:
+                            capture.executor.shutdown(force=True)
         else:
             result = drain()
-        metrics = {op.name: _operator_metrics(op) for op in operators}
+        operators = capture.operators
+        metrics = {name: _operator_metrics(op)
+                   for name, op in zip(("Produce", "Consume"), operators)}
         for name, tasks, blocks in (
             ("Produce", args.num_input_blocks, expected), ("Consume", expected, expected)
         ):
@@ -408,8 +498,14 @@ def run_controlled(args, crash_owner=None):
                     raise ValueError(f"Submission/recovery count mismatch for {name}: {actual}")
         return {
             **vars(args), **result, **failure_metrics, "operators": metrics,
-            "workload_variant": "unshaped_physical_task_map_chain",
-            "declared_blocks_per_task": config.expected_blocks,
+            "workload_variant": (
+                "public_dataset_unshaped_map_batches" if public_dataset else
+                "unshaped_physical_task_map_chain"
+            ),
+            "physical_operator_names": [op.name for op in operators],
+            "declared_blocks_per_task": (
+                recovery_config.expected_blocks if recovery_config else config.expected_blocks
+            ),
             "logical_producer_payload_bytes": (
                 expected * args.output_batch_rows * args.output_row_bytes
             ),
@@ -417,7 +513,8 @@ def run_controlled(args, crash_owner=None):
         }
     finally:
         try:
-            executor.shutdown(force=True)
+            if capture.executor is not None:
+                capture.executor.shutdown(force=True)
         finally:
             if gate is not None:
                 ray.kill(gate, no_restart=True)

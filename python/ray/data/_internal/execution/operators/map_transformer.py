@@ -439,6 +439,7 @@ class BatchMapTransformFn(MapTransformFn):
         output_block_size_option: Optional[OutputBlockSizeOption] = None,
         target_batch_size_bytes: int = _DEFAULT_BATCH_SIZE_BYTES,
         should_report_custom_op_stats: bool = False,
+        disable_block_shaping: bool = False,
     ):
         super().__init__(
             batch_fn,
@@ -452,6 +453,7 @@ class BatchMapTransformFn(MapTransformFn):
         self._batch_format = batch_format
         self._zero_copy_batch = zero_copy_batch
         self._target_batch_size_bytes = target_batch_size_bytes
+        self._disable_block_shaping = disable_block_shaping
 
     def _pre_process(self, blocks: Iterable[Block]) -> Iterable[MapTransformFnData]:
         # TODO make batch-udf zero-copy by default
@@ -471,6 +473,11 @@ class BatchMapTransformFn(MapTransformFn):
         )
 
     def _post_process(self, results: Iterable[MapTransformFnData]) -> Iterable[Block]:
+        if self._disable_block_shaping:
+            # Preserve every yield, including empty batches, and do not synthesize
+            # an empty block when a generator yields nothing. Fixed-R declares
+            # this exact physical output count before submitting the task.
+            return (BlockAccessor.batch_to_block(batch) for batch in results)
         return self._shape_blocks(results)
 
     def __repr__(self) -> str:

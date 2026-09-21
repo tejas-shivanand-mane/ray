@@ -10,7 +10,8 @@ import ray
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="RocksDB GCS requires Linux")
-def test_backpressure_survives_head_replacement(monkeypatch):
+@pytest.mark.parametrize("recovery_plan", ["physical", "dataset"])
+def test_backpressure_survives_head_replacement(monkeypatch, recovery_plan):
     benchmark_dir = Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
     monkeypatch.syspath_prepend(str(benchmark_dir))
     from streaming_recovery_benchmark import run_controlled
@@ -22,6 +23,7 @@ def test_backpressure_survives_head_replacement(monkeypatch):
         local_object_store_mb=150, producer_concurrency=2, num_input_blocks=4,
         output_batches_per_input_batch=3, output_batch_rows=4, output_row_bytes=64,
         consumer_sleep_s=0.01, recovery_timeout_s=120,
+        recovery_plan=recovery_plan,
     )
     with local_head_failure_cluster(args) as (case_args, crash_head):
         driver_job_id = ray.get_runtime_context().get_job_id()
@@ -35,6 +37,11 @@ def test_backpressure_survives_head_replacement(monkeypatch):
         assert result["original_head_node_id"] not in result["surviving_node_ids"]
         assert result["validated_output_blocks"] == 12
         assert result["enrolled_at_failure"] == 3
+        if recovery_plan == "dataset":
+            assert result["workload_variant"] == "public_dataset_unshaped_map_batches"
+            assert result["physical_operator_names"] == [
+                "MapBatches(produce)", "MapBatches(consume)",
+            ]
         source = result["operators"]["Produce"]
         sink = result["operators"]["Consume"]
         assert source["fixed_r_recovered_tasks"] == 2
