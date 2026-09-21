@@ -173,10 +173,10 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
       recovery_reentry_callback(
           object_id,
           [this, object_id, owner_address, object_key](bool started) {
-            std::unique_lock<std::recursive_mutex> transition_lock(
+            std::unique_lock<std::recursive_mutex> reentry_transition_lock(
                 streaming_transition_mutex_, std::defer_lock);
             if (RayConfig::instance().enable_recovery_streaming_fixed_r()) {
-              transition_lock.lock();
+              reentry_transition_lock.lock();
             }
             {
               std::lock_guard<std::mutex> lock(recovery_owner_mutex_);
