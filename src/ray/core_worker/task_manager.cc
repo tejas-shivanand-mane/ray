@@ -525,16 +525,25 @@ Status TaskManager::AddPendingStreamingTaskForRecovery(
     const std::vector<ObjectID> &live_consumed_returns,
     rpc::ObjectReference *generator_ref) {
   const auto &proto = spec.GetMessage();
+  const bool dynamic = expected_returns == -1 &&
+                       proto.has_recovery_stream_descriptor() &&
+                       RecoveryStreamHasDynamicCount(proto.recovery_stream_descriptor());
+  if (dynamic) {
+    RAY_RETURN_NOT_OK(ValidateRecoveryStreamDescriptor(proto.recovery_stream_descriptor()));
+  }
   if (generator_ref == nullptr || proto.task_id().size() != TaskID::Size() ||
       proto.type() != rpc::TaskType::NORMAL_TASK || !spec.IsStreamingGenerator() ||
       spec.NumReturns() != 1 || spec.NumObjectsPerYield() != 1 ||
       spec.MaxRetries() == 0 || spec.MaxRetries() < -1 || spec.AttemptNumber() <= 0 ||
-      spec.TensorTransport().has_value() || expected_returns < 0 || next_index < 0 ||
-      next_index > expected_returns ||
-      (spec.NumStreamingGeneratorReturns() != 0 &&
-       spec.NumStreamingGeneratorReturns() != static_cast<uint64_t>(expected_returns)) ||
-      static_cast<uint64_t>(expected_returns) >=
-          RayConfig::instance().max_num_generator_returns()) {
+      spec.TensorTransport().has_value() || next_index < 0 ||
+      static_cast<uint64_t>(next_index) >=
+          RayConfig::instance().max_num_generator_returns() ||
+      (dynamic && proto.has_num_streaming_generator_returns()) ||
+      (!dynamic && (expected_returns < 0 || next_index > expected_returns ||
+       (spec.NumStreamingGeneratorReturns() != 0 &&
+        spec.NumStreamingGeneratorReturns() != static_cast<uint64_t>(expected_returns)) ||
+       static_cast<uint64_t>(expected_returns) >=
+           RayConfig::instance().max_num_generator_returns()))) {
     return Status::Invalid("Unsupported streaming recovery task or cursor/count");
   }
   RAY_RETURN_NOT_OK(ValidateRecoveryStreamInputs(proto, caller_address));
@@ -577,7 +586,10 @@ Status TaskManager::AddPendingStreamingTaskForRecovery(
   // fails before completion records its reports.
   rpc::TaskSpec replay_proto(proto);
   replay_proto.mutable_caller_address()->CopyFrom(caller_address);
-  replay_proto.set_num_streaming_generator_returns(expected_returns);
+  // For unknown-count replay this is a local lower bound, not a count sent to
+  // the executor. It also settles adopted prefix refs if replay fails before
+  // reporting them. Successful completion replaces it with the actual count.
+  replay_proto.set_num_streaming_generator_returns(dynamic ? next_index : expected_returns);
   TaskSpecification replay_spec(std::move(replay_proto));
   auto refs = AddPendingTaskInternal(caller_address,
                                     replay_spec,
@@ -1129,6 +1141,18 @@ bool TaskManager::FailStreamingGeneratorReplayIfInconsistent(
     }
     if (it->second.recovery_expected_returns_.has_value()) {
       expected_count = *it->second.recovery_expected_returns_;
+      if (expected_count == -1) {
+        expected_count = it->second.spec_.NumStreamingGeneratorReturns();
+        actual_count = reply.streaming_generator_return_ids_size();
+        if (actual_count >= expected_count) {
+          // The first complete replay establishes the exact count, including
+          // zero. Later reconstruction must reproduce that count exactly.
+          it->second.recovery_expected_returns_ = actual_count;
+          return false;
+        }
+        // Fewer outputs than already delivered must fail rather than hang a
+        // retained prefix ref or silently accept a shorter replay.
+      }
     } else {
       // Ordinary owner-alive reconstruction learns a nonzero expected count
       // from its first successful execution. Preserve that existing behavior.

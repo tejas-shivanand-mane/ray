@@ -32,12 +32,24 @@ bool SameManifest(const rpc::RecoveryManifest &a, const rpc::RecoveryManifest &b
 
 }  // namespace
 
+bool RecoveryStreamHasDynamicCount(const rpc::RecoveryStreamDescriptor &d) {
+  return d.version() == 2 && d.expected_returns() == -1;
+}
+
+int64_t RecoveryStreamReturnLimit(const rpc::RecoveryStreamDescriptor &d) {
+  return RecoveryStreamHasDynamicCount(d)
+             ? RayConfig::instance().max_num_generator_returns() - 1
+             : d.expected_returns();
+}
+
 Status ValidateRecoveryStreamDescriptor(const rpc::RecoveryStreamDescriptor &d) {
-  if (d.version() != 1 || d.task_id().size() != TaskID::Size() ||
+  const bool dynamic = RecoveryStreamHasDynamicCount(d);
+  if ((!dynamic && d.version() != 1) || d.task_id().size() != TaskID::Size() ||
       TaskID::FromBinary(d.task_id()).IsNil() ||
-      d.generator_id().size() != ObjectID::Size() || d.expected_returns() < 0 ||
-      static_cast<uint64_t>(d.expected_returns()) >=
-          RayConfig::instance().max_num_generator_returns() ||
+      d.generator_id().size() != ObjectID::Size() ||
+      (!dynamic && (d.expected_returns() < 0 ||
+                    static_cast<uint64_t>(d.expected_returns()) >=
+                        RayConfig::instance().max_num_generator_returns())) ||
       !ValidWorker(d.consumer_address()) || !d.has_manifest()) {
     return Status::Invalid("Invalid streaming descriptor identity, count, or consumer");
   }
@@ -93,8 +105,9 @@ Status ValidateRecoveryStreamRecipe(const rpc::TaskSpec &recipe) {
       recipe.has_tensor_transport() ||
       !SameAddress(recipe.caller_address(), d.manifest().succession(0).address()) ||
       (recipe.has_num_streaming_generator_returns() &&
-       recipe.num_streaming_generator_returns() !=
-           static_cast<uint64_t>(d.expected_returns()))) {
+       (RecoveryStreamHasDynamicCount(d) ||
+        recipe.num_streaming_generator_returns() !=
+            static_cast<uint64_t>(d.expected_returns())))) {
     return Status::Invalid("Recipe does not satisfy the bounded streaming contract");
   }
   return ValidateRecoveryStreamInputs(recipe, d.consumer_address());
@@ -164,7 +177,11 @@ Status PrepareRecoveryStreamReplay(const rpc::RecoveryStreamDescriptor &d,
   rpc::TaskSpec prepared(recipe);
   prepared.mutable_caller_address()->CopyFrom(consumer);
   prepared.set_attempt_number(1);
-  prepared.set_num_streaming_generator_returns(d.expected_returns());
+  if (RecoveryStreamHasDynamicCount(d)) {
+    prepared.clear_num_streaming_generator_returns();
+  } else {
+    prepared.set_num_streaming_generator_returns(d.expected_returns());
+  }
   auto *strategy = prepared.mutable_scheduling_strategy();
   if (strategy->has_node_affinity_scheduling_strategy() &&
       strategy->node_affinity_scheduling_strategy().soft()) {

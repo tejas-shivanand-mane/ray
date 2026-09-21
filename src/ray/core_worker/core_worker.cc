@@ -3624,7 +3624,7 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             root_detached_actor_id);
 
   TaskSpecification task_spec = std::move(builder).ConsumeAndBuild();
-  const bool enrolled_stream = task_options.recovery_stream_expected_returns >= 0;
+  const bool enrolled_stream = task_options.recovery_stream_expected_returns >= -1;
   if (enrolled_stream) {
     const Status status = PrepareRecoveryStreamSubmission(&task_spec, task_options);
     if (!status.ok()) {

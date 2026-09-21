@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -15,6 +16,11 @@
 #include "src/ray/protobuf/node_manager.pb.h"
 
 namespace ray {
+
+// Version 2 uses expected_returns=-1 for a finite stream whose count is learned
+// at EOF. Version 1 retains its exact, predeclared count contract.
+bool RecoveryStreamHasDynamicCount(const rpc::RecoveryStreamDescriptor &descriptor);
+int64_t RecoveryStreamReturnLimit(const rpc::RecoveryStreamDescriptor &descriptor);
 
 Status ValidateRecoveryStreamDescriptor(const rpc::RecoveryStreamDescriptor &descriptor);
 Status ValidateRecoveryStreamRecipe(const rpc::TaskSpec &recipe);

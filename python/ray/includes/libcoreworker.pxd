@@ -393,6 +393,7 @@ cdef extern from "ray/core_worker/core_worker.h" nogil:
         CWorkerContext &GetWorkerContext()
         void YieldCurrentFiber(CFiberEvent &coroutine_done)
 
+        c_bool TryReleaseStreamingRecoveryReturn(const CObjectID &object_id)
         unordered_map[CObjectID, pair[size_t, size_t]] GetAllReferenceCounts()
         c_string GetRecoverySuccessionProfileJson() const
         void ResetRecoverySuccessionProfile()

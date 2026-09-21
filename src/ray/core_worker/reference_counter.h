@@ -77,6 +77,10 @@ class ReferenceCounter : public ReferenceCounterInterface,
   void DrainAndShutdown(std::function<void()> shutdown) override
       ABSL_LOCKS_EXCLUDED(mutex_);
 
+  // Caller must also ensure no Python aliases share its sole ObjectRef handle.
+  bool TryReleaseStreamingRecoveryReturn(const ObjectID &object_id,
+                                         std::vector<ObjectID> *deleted) override;
+
   Status AdoptStreamingGeneratorForRecovery(
       const ObjectID &generator_id,
       const std::vector<ObjectID> &live_consumed_returns,

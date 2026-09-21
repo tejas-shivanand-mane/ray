@@ -2,7 +2,8 @@
 
 Use StreamingRecoveryReader with a StreamingRecoveryOwnerActor on another node.
 The designated consumer, driver/job, and runtime must survive. Inputs are by
-value or ready ObjectRefs owned by the consumer. Output count is finite/known,
+value or ready ObjectRefs owned by the consumer. Output count is finite, with
+-1 selecting an unknown count learned at EOF. Tasks must replay deterministically
 and there must be no earlier executor retry.
 """
 
@@ -228,7 +229,7 @@ class StreamingRecoveryConsumer:
             raise StreamingRecoveryStateError("Delivery requires a non-nil ObjectRef")
         if ref.binary() == self._generator_id:
             raise StreamingRecoveryStateError("Completion/error ref is not a yielded item")
-        if self._next_index >= self._expected_returns:
+        if self._expected_returns >= 0 and self._next_index >= self._expected_returns:
             raise StreamingRecoveryCountError("Producer exceeded the declared count")
         expected_id = _recovery_stream_return_id(self._descriptor, self._next_index)
         if ref.binary() != expected_id:
@@ -254,9 +255,11 @@ class StreamingRecoveryConsumer:
         with self._lock:
             self._check_ticket(ticket)
             self._owner_read = None
-            if self._next_index != self._expected_returns:
+            if self._expected_returns >= 0 and self._next_index != self._expected_returns:
                 self._phase = "failed"
                 raise StreamingRecoveryCountError("Producer ended before the declared count")
+            if self._expected_returns == -1:
+                self._expected_returns = self._next_index
             self._phase = "completed"
 
     def settle_failed_owner_read(self, ticket: _OwnerRead) -> None:
@@ -379,10 +382,12 @@ class StreamingRecoveryConsumer:
                 with self._lock:
                     if self._phase != "replaying":
                         raise StreamingRecoveryStateError("Replay state changed during a read")
-                    if self._next_index != self._expected_returns:
+                    if self._expected_returns >= 0 and self._next_index != self._expected_returns:
                         raise StreamingRecoveryCountError(
                             "Replay ended before the declared count"
                         )
+                    if self._expected_returns == -1:
+                        self._expected_returns = self._next_index
                     self._phase = "completed"
                 raise
             with self._lock:

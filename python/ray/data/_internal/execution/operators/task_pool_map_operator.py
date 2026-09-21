@@ -218,11 +218,11 @@ class TaskPoolMapOperator(MapOperator):
         if config is None:
             gen = self._map_task.options(**dynamic_ray_remote_args).remote(*args, **kwargs)
         else:
-            if not config.buffered_task_outputs and self.name not in config.expected_blocks:
+            if not config.automatic_outputs and self.name not in config.expected_blocks:
                 raise ValueError(f"No Fixed-R output count declared for {self.name!r}")
             gen = submit_stream(
                 config, self._map_task, args, kwargs, dynamic_ray_remote_args,
-                1 if config.buffered_task_outputs else config.expected_blocks[self.name],
+                1 if config.automatic_outputs else config.expected_blocks[self.name],
                 self._streaming_recovery_metrics,
                 task_index=self._next_data_task_idx,
             )

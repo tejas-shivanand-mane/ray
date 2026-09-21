@@ -4893,7 +4893,7 @@ void NodeManager::HandlePrepareStreamingRecovery(
     const auto id = ObjectID::FromBinary(binary);
     if (id.TaskId().Binary() != descriptor.task_id() || id.ObjectIndex() < 1 ||
         static_cast<uint64_t>(id.ObjectIndex()) >
-            static_cast<uint64_t>(descriptor.expected_returns()) + 1) {
+            static_cast<uint64_t>(RecoveryStreamReturnLimit(descriptor)) + 1) {
       send_reply_callback(Status::Invalid("Streaming return outside descriptor"),
                           nullptr,
                           nullptr);

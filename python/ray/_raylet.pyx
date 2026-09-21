@@ -179,6 +179,7 @@ from ray.includes.stream_redirection cimport (
 from ray.includes.streaming_recovery cimport (
     CRecoveryStreamDescriptor,
     ValidateRecoveryStreamDescriptor,
+    RecoveryStreamReturnLimit,
 )
 
 from ray.includes.ray_config cimport RayConfig
@@ -444,7 +445,7 @@ def _recovery_stream_return_id(bytes serialized_descriptor, int64_t index):
     if not descriptor.ParseFromString(serialized):
         raise ValueError("Malformed streaming recovery descriptor")
     check_status(ValidateRecoveryStreamDescriptor(descriptor))
-    if index < 0 or index >= descriptor.expected_returns():
+    if index < 0 or index >= RecoveryStreamReturnLimit(descriptor):
         raise ValueError("Yield index is outside the declared streaming count")
     task_id = CTaskID.FromBinary(descriptor.task_id())
     return CObjectID.FromIndex(task_id, index + 2).Binary()
@@ -5086,6 +5087,17 @@ cdef class CoreWorker:
             postincrement(it)
 
         return result
+
+    def try_release_streaming_recovery_return(self, ObjectRef ref):
+        # Keep the GIL: the Dataset caller separately checked Python aliases.
+        if not ref.in_core_worker:
+            return False
+        if CCoreWorkerProcess.GetCoreWorker().TryReleaseStreamingRecoveryReturn(ref.native()):
+            # The sole handle's native hold was released atomically. Its imminent
+            # Python deletion must not decrement that hold again.
+            ref.in_core_worker = False
+            return True
+        return False
 
     def get_all_reference_counts(self):
         cdef:

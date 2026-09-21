@@ -67,7 +67,7 @@ class InputDataBuffer(PhysicalOperator):
         from ray.data._internal.execution.streaming_recovery import get_config
 
         recovery = get_config(self.data_context)
-        if recovery is not None and recovery.buffered_task_outputs:
+        if recovery is not None and recovery.automatic_outputs:
             # Protect root ownership before dispatch, including read recipes,
             # externally supplied blocks, and materialized Dataset inputs.
             retained = []

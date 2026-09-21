@@ -93,6 +93,7 @@ def test_buffered_recovery_after_copy_before_eof(benchmark_modules, block_count)
     with benchmark_modules.local_head_failure_cluster(arguments()) as (_, crash):
         context = DataContext.get_current().copy()
         context.enable_fixed_r_task_recovery = True
+        context.fixed_r_task_recovery_output_mode = "buffered"
         metrics = new_metrics()
         stream = submit_stream(
             get_config(context), ray.remote(produce), (), {},
@@ -139,7 +140,8 @@ def test_buffered_recovery_after_copy_before_eof(benchmark_modules, block_count)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Local GCS RocksDB requires Linux")
-def test_variable_outputs_and_duplicate_names_need_no_declarations(benchmark_modules):
+@pytest.mark.parametrize("output_mode", ["buffered", "streaming"])
+def test_variable_outputs_and_duplicate_names_need_no_declarations(benchmark_modules, output_mode):
     def expand(batch):
         for value in batch["id"]:
             # Data-dependent output size, including no UDF output for id=0.
@@ -151,6 +153,7 @@ def test_variable_outputs_and_duplicate_names_need_no_declarations(benchmark_mod
     with benchmark_modules.local_head_failure_cluster(arguments("fixed_r")):
         context = DataContext.get_current().copy()
         context.enable_fixed_r_task_recovery = True
+        context.fixed_r_task_recovery_output_mode = output_mode
         context.target_max_block_size = 64
         context.enable_progress_bars = False
         with DataContext.current(context):
@@ -175,6 +178,7 @@ def test_actor_map_is_rejected_before_execution(benchmark_modules):
     with benchmark_modules.local_head_failure_cluster(arguments("fixed_r")):
         context = DataContext.get_current().copy()
         context.enable_fixed_r_task_recovery = True
+        context.fixed_r_task_recovery_output_mode = "buffered"
         with DataContext.current(context):
             ds = ray.data.range(4).map_batches(Identity, compute=ray.data.ActorPoolStrategy(1))
             with pytest.raises(ValueError, match="task-map chains"):

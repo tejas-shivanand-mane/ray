@@ -912,10 +912,12 @@ class DataContext:
         DEFAULT_DEFAULT_MAP_LOGICAL_MEMORY_ENABLED
     )
 
-    # Experimental finite task recovery. Keep normal Dataset APIs, but buffer
-    # each task's output before publishing it as one protected result. Requires
+    # Experimental finite task recovery with incremental output delivery. Requires
     # a surviving non-head driver and a cluster with native Fixed-R enabled.
     enable_fixed_r_task_recovery: bool = False
+    # "streaming" uses version-2 native recovery without declared output counts.
+    # "buffered" preserves the earlier finite-envelope validation path.
+    fixed_r_task_recovery_output_mode: str = "streaming"
     fixed_r_task_recovery_max_output_bytes: int = 256 * 1024**2
     fixed_r_task_recovery_timeout_s: float = 120
 

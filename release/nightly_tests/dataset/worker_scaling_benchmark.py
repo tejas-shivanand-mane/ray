@@ -115,6 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-executor-nodes", type=int, default=2)
     parser.add_argument("--local-object-store-mb", type=int, default=512)
     parser.add_argument("--recovery-timeout-s", type=float, default=180)
+    parser.add_argument("--recovery-output-mode", choices=["streaming", "buffered"], default="streaming")
     parser.add_argument(
         "--recovery-plan", choices=["controlled", "dataset"], default="controlled",
         help="dataset uses the original range/map_batches/materialize pipeline with runtime recovery",

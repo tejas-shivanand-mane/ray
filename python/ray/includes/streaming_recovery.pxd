@@ -14,5 +14,6 @@ cdef extern from "src/ray/protobuf/common.pb.h" namespace "ray::rpc" nogil:
         const CAddress &consumer_address() const
 
 cdef extern from "ray/common/streaming_recovery/streaming_recovery.h" namespace "ray" nogil:
+    int64_t RecoveryStreamReturnLimit(const CRecoveryStreamDescriptor &descriptor)
     CRayStatus ValidateRecoveryStreamDescriptor(
         const CRecoveryStreamDescriptor &descriptor)

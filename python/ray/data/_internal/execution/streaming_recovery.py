@@ -1,11 +1,13 @@
 """Experimental Fixed-R Data execution with coordinator-owned output copies.
 
-Finite task-map chains support either declared physical output counts or bounded
-task envelopes selected by DataContext.enable_fixed_r_task_recovery. No original
-protected output is exported: copies remain owned by the surviving coordinator.
+Finite task-map chains support dynamic-count streaming, declared physical output
+counts, or bounded task envelopes. DataContext.enable_fixed_r_task_recovery uses
+dynamic-count streaming by default. No original protected output is exported:
+copies remain owned by the surviving coordinator.
 """
 
 import math
+import sys
 import time
 import traceback
 from collections import deque
@@ -58,6 +60,10 @@ class FixedRDataConfig:
     envelope, including read tasks and zero/multiple physical blocks. It uses
     no operator-name/count declarations and snapshots output before advancing
     the UDF. This mode trades within-task streaming for bounded buffering.
+
+    ``dynamic_task_outputs`` runs normal streaming map/read tasks with unknown
+    counts. Blocks are copied and delivered incrementally; EOF supplies the final
+    count. Deterministic finite tasks and a surviving coordinator are required.
     """
 
     owner_node_id: str
@@ -67,7 +73,12 @@ class FixedRDataConfig:
     timeout_s: float = 60
     preserve_batch_output_blocks: bool = False
     buffered_task_outputs: bool = False
+    dynamic_task_outputs: bool = False
     max_task_output_bytes: int = 256 * 1024**2
+
+    @property
+    def automatic_outputs(self):
+        return self.buffered_task_outputs or self.dynamic_task_outputs
 
     @property
     def executor_node_ids(self):
@@ -95,13 +106,19 @@ class FixedRDataConfig:
             raise ValueError("Fixed-R Data timeout must be finite and positive")
         if type(self.buffered_task_outputs) is not bool:
             raise ValueError("buffered_task_outputs must be a bool")
+        if type(self.dynamic_task_outputs) is not bool:
+            raise ValueError("dynamic_task_outputs must be a bool")
+        if self.dynamic_task_outputs and (
+            self.buffered_task_outputs or self.preserve_batch_output_blocks or self.expected_blocks
+        ):
+            raise ValueError("Dynamic recovery requires normal shaping and no block declarations")
         if self.buffered_task_outputs and (
             self.preserve_batch_output_blocks or self.expected_blocks
             or type(self.max_task_output_bytes) is not int or self.max_task_output_bytes <= 0
         ):
             raise ValueError("Buffered recovery requires a positive byte limit and no block declarations")
         if not isinstance(self.expected_blocks, dict) or (
-            not self.expected_blocks and not self.buffered_task_outputs
+            not self.expected_blocks and not self.automatic_outputs
         ):
             raise ValueError("Declare expected_blocks for every task-map operator")
         for name, count in self.expected_blocks.items():
@@ -135,6 +152,8 @@ class FixedRDataConfig:
 def get_config(context):
     config = context.get_config(CONFIG_KEY)
     if context.enable_fixed_r_task_recovery:
+        if context.fixed_r_task_recovery_output_mode not in ("streaming", "buffered"):
+            raise ValueError("Fixed-R output mode must be streaming or buffered")
         if config is None:
             from ray._common.constants import HEAD_NODE_RESOURCE_NAME
 
@@ -153,12 +172,15 @@ def get_config(context):
                 raise ValueError("Fixed-R task recovery requires at least two surviving CPU executor nodes")
             config = FixedRDataConfig(
                 heads[0], executors, {}, timeout_s=context.fixed_r_task_recovery_timeout_s,
-                buffered_task_outputs=True,
+                buffered_task_outputs=context.fixed_r_task_recovery_output_mode == "buffered",
+                dynamic_task_outputs=context.fixed_r_task_recovery_output_mode == "streaming",
                 max_task_output_bytes=context.fixed_r_task_recovery_max_output_bytes,
             )
             context.set_config(CONFIG_KEY, config)
-        if not isinstance(config, FixedRDataConfig) or not config.buffered_task_outputs:
+        if not isinstance(config, FixedRDataConfig) or not config.automatic_outputs:
             raise ValueError("Automatic task recovery cannot use declared-count recovery configuration")
+        if config.dynamic_task_outputs != (context.fixed_r_task_recovery_output_mode == "streaming"):
+            raise ValueError("Fixed-R output mode conflicts with cached recovery configuration")
         # Retention is a runtime responsibility in this mode, not a UDF change.
         context.eager_free = False
     if config is not None:
@@ -196,11 +218,11 @@ def validate_execution(dag, context):
         op = op.input_dependencies[0]
     if not isinstance(op, InputDataBuffer):
         raise ValueError("Fixed-R Data supports only InputDataBuffer -> task-map chains")
-    if config.buffered_task_outputs and not names:
+    if config.automatic_outputs and not names:
         # materialize() creates a new InputData-only Dataset from independent
         # coordinator-owned copies. It remains readable after owner-head loss.
         return
-    if not config.buffered_task_outputs and (
+    if not config.automatic_outputs and (
         len(names) != len(set(names)) or set(names) != set(config.expected_blocks)
     ):
         raise ValueError(
@@ -208,7 +230,7 @@ def validate_execution(dag, context):
             f"declared={list(config.expected_blocks)}"
         )
     alive = _owner_alive(config)
-    if config.mode == "fixed_r" and not alive and not config.buffered_task_outputs:
+    if config.mode == "fixed_r" and not alive and not config.automatic_outputs:
         raise ValueError("The protected owner must be alive when Dataset execution starts")
 
 
@@ -262,14 +284,14 @@ class _DataStream:
             try:
                 ref = self.generator._next_sync(timeout_s=0)
             except StopIteration:
-                if self.next_index != self.expected_returns:
+                if self.expected_returns >= 0 and self.next_index != self.expected_returns:
                     raise StreamingRecoveryCountError("Map task ended before declared count")
                 raise
             if ref.is_nil():
                 return None
             if ref == self.generator.completed():
                 ray.get(ref)
-            if self.next_index >= self.expected_returns:
+            if self.expected_returns >= 0 and self.next_index >= self.expected_returns:
                 raise StreamingRecoveryCountError("Map task exceeded declared count")
         if ref is not None:
             self.next_index += 1
@@ -298,7 +320,7 @@ class _DataStream:
                 info = _inspect_recovery_stream_descriptor(descriptor)
                 ids = {info["generator_id"].hex()}
                 ids.update(_recovery_stream_return_id(descriptor, index).hex()
-                           for index in range(self.expected_returns))
+                           for index in range(self.next_index))
                 counts = ray._private.worker.global_worker.core_worker.get_all_reference_counts()
                 failure["native_reference_counts"] = {
                     key: value for key, value in counts.items() if key in ids
@@ -332,7 +354,7 @@ def submit_stream(
     config, producer, args, kwargs, options, expected_blocks, stats, *, task_index=0
 ):
     owner_alive = _owner_alive(config)
-    if config.buffered_task_outputs:
+    if config.automatic_outputs:
         # Retain independent local inputs, including read recipes and inputs
         # originating outside this executor. Native validation below still
         # rejects contained ObjectRefs and other unsupported dependencies.
@@ -355,7 +377,7 @@ def submit_stream(
         max_retries=1,
         retry_exceptions=False,
     )
-    count = 2 * expected_blocks
+    count = -1 if config.dynamic_task_outputs else 2 * expected_blocks
 
     def submit_from_coordinator():
         generator = producer.options(**options).remote(*args, **kwargs)
@@ -453,6 +475,7 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         self.stream = stream
         self._pair_start = 0
         self._cancelled_ref = None
+        self._copied_return_indices = set()
 
     def get_task_id(self):
         return self.stream.task_id
@@ -505,13 +528,37 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         return size
 
     def _release_copied_pair(self):
-        self.stream.release_pair(self._pair_start)
+        if self.stream.expected_returns == -1 and self.stream.reader is not None:
+            self._copied_return_indices.update((self._pair_start, self._pair_start + 1))
+            self._release_unused_copies()
+        else:
+            self.stream.release_pair(self._pair_start)
+
+    def _release_unused_copies(self):
+        if not self._copied_return_indices:
+            return
+        consumer = self.stream.reader.consumer
+        core = ray._private.worker.global_worker.core_worker
+        for index in tuple(self._copied_return_indices):
+            # Same-instance Python aliases do not increment native refcounts.
+            # With dict ownership + the getrefcount argument, exactly two means
+            # no such alias. Native eligibility additionally checks RPC-envelope
+            # nesting, separate ObjectRef instances and distributed borrowers.
+            # Keep the GIL through the check/release; original outputs are never
+            # exported by this adapter. Lingering aliases stay listed on replay.
+            if sys.getrefcount(consumer._retained[index]) != 2:
+                continue
+            if (consumer.phase == "replaying" or
+                    core.try_release_streaming_recovery_return(consumer._retained[index])):
+                consumer.release(index)
+                self._copied_return_indices.remove(index)
 
     def on_data_ready(self, max_bytes_to_read, metadata_fetcher):
         self._track_task_output_backpressure(max_bytes_to_read)
         if self.has_finished or max_bytes_to_read == 0:
             return 0
         try:
+            self._release_unused_copies()
             if self._pending_block_ref.is_nil():
                 self._pair_start = self.stream.next_index
                 try:

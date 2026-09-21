@@ -259,7 +259,7 @@ def test_invalid_recipe_fails_submission_without_killing_worker(owner, tmp_path,
     assert descriptor and not ready
 
 
-@pytest.mark.parametrize("count", [-1, True, 2**63, 1.5])
+@pytest.mark.parametrize("count", [-2, True, 2**63, 1.5])
 def test_option_rejects_invalid_count(count):
     with pytest.raises(ValueError, match="nonnegative int64"):
         task_options["_streaming_recovery"].validate(

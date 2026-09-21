@@ -80,6 +80,24 @@ class StreamingRecoveryProtocolTest : public ::testing::Test {
   rpc::TaskSpec recipe;
 };
 
+TEST_F(StreamingRecoveryProtocolTest, DynamicCountRequiresVersionTwoAndNoRecipeCount) {
+  descriptor.set_expected_returns(-1);
+  EXPECT_FALSE(ValidateRecoveryStreamDescriptor(descriptor).ok());
+  descriptor.set_version(2);
+  ASSERT_TRUE(ValidateRecoveryStreamDescriptor(descriptor).ok());
+  recipe.mutable_recovery_stream_descriptor()->CopyFrom(descriptor);
+  ASSERT_TRUE(ValidateRecoveryStreamRecipe(recipe).ok());
+  rpc::TaskSpec replay;
+  ASSERT_TRUE(PrepareRecoveryStreamReplay(
+      descriptor, descriptor.consumer_address(), Grant(), &replay).ok());
+  EXPECT_FALSE(replay.has_num_streaming_generator_returns());
+  EXPECT_EQ(replay.attempt_number(), 1);
+  recipe.set_num_streaming_generator_returns(0);
+  EXPECT_FALSE(ValidateRecoveryStreamRecipe(recipe).ok());
+  descriptor.set_expected_returns(0);
+  EXPECT_FALSE(ValidateRecoveryStreamDescriptor(descriptor).ok());
+}
+
 TEST_F(StreamingRecoveryProtocolTest, RequiresEveryDistinctAckAndConsumerReceipt) {
   RecoveryStreamInstallation install;
   ASSERT_TRUE(install.Initialize(descriptor).ok());

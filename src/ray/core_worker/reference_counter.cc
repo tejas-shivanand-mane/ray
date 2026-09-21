@@ -348,6 +348,24 @@ Status ReferenceCounter::ValidateStreamingRecoveryInputs(
   return Status::OK();
 }
 
+bool ReferenceCounter::TryReleaseStreamingRecoveryReturn(
+    const ObjectID &object_id, std::vector<ObjectID> *deleted) {
+  absl::MutexLock lock(&mutex_);
+  auto it = object_id_refs_.find(object_id);
+  if (it == object_id_refs_.end() || it->second.local_ref_count != 1) {
+    return false;
+  }
+  auto &ref = it->second;
+  // Probe deletion eligibility under the same lock as reference updates.
+  --ref.local_ref_count;
+  const bool releasable = ref.ShouldDelete(lineage_pinning_enabled_);
+  ++ref.local_ref_count;
+  if (releasable) {
+    RemoveLocalReferenceInternal(object_id, deleted);
+  }
+  return releasable;
+}
+
 Status ReferenceCounter::AdoptStreamingGeneratorForRecovery(
     const ObjectID &generator_id,
     const std::vector<ObjectID> &live_consumed_returns,

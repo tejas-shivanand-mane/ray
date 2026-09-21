@@ -563,6 +563,79 @@ TEST_F(StreamingRecoveryTest, EmptyAndBoundaryCursorsWaitForCompletion) {
   }
 }
 
+TEST_F(StreamingRecoveryTest, DynamicWitnessReplayLearnsCountAndSkipsConsumedPrefix) {
+  for (const auto &[cursor, actual] :
+       std::vector<std::pair<int64_t, int64_t>>{{0, 0}, {0, 3}, {1, 3}, {3, 3}}) {
+    auto spec = RecoverySpec();
+    auto reply = WitnessGrant(spec);
+    auto *d = reply.mutable_task_spec()->mutable_recovery_stream_descriptor();
+    d->set_version(2);
+    d->set_expected_returns(-1);
+    const auto descriptor = *d;
+    const auto consumer = descriptor.consumer_address();
+    std::vector<ObjectID> retained;
+    if (cursor > 0) {
+      retained.push_back(spec.StreamingGeneratorReturnId(0));
+      Borrow(retained.front(), descriptor.manifest().succession(0).address());
+    }
+    rpc::TaskSpec replay;
+    rpc::ObjectReference ref;
+    ASSERT_TRUE(manager_.AddPendingStreamingTaskFromWitness(
+        consumer, descriptor, reply, cursor, retained, &ref, &replay).ok());
+    EXPECT_FALSE(replay.has_num_streaming_generator_returns());
+    for (int64_t i = 0; i < actual; ++i) {
+      auto request = GetIntermediateTaskReturn(
+          i, false, spec.ReturnId(0), spec.StreamingGeneratorReturnId(i),
+          GenerateRandomBuffer(), false);
+      request.set_attempt_number(1);
+      EXPECT_EQ(manager_.HandleReportGeneratorItemReturns(request, [](Status) {}),
+                i >= cursor);
+      if (i >= cursor) {
+        ObjectID id;
+        ASSERT_TRUE(manager_.TryReadObjectRefStream(spec.ReturnId(0), &id).ok());
+        EXPECT_EQ(id, spec.StreamingGeneratorReturnId(i));
+        retained.push_back(id);
+      }
+    }
+    CompletePendingStreamingTask(TaskSpecification(replay), consumer, actual);
+    EXPECT_TRUE(manager_.StreamingGeneratorIsFinished(spec.ReturnId(0)));
+    DeleteStreamAndRelease(spec.ReturnId(0), retained);
+  }
+}
+
+TEST_F(StreamingRecoveryTest, DynamicReplayShorterThanConsumedPrefixFails) {
+  auto spec = RecoverySpec();
+  auto reply = WitnessGrant(spec);
+  auto *d = reply.mutable_task_spec()->mutable_recovery_stream_descriptor();
+  d->set_version(2);
+  d->set_expected_returns(-1);
+  const auto descriptor = *d;
+  const auto live = spec.StreamingGeneratorReturnId(1);
+  Borrow(live, descriptor.manifest().succession(0).address());
+  rpc::TaskSpec replay;
+  rpc::ObjectReference ref;
+  ASSERT_TRUE(manager_.AddPendingStreamingTaskFromWitness(
+      descriptor.consumer_address(), descriptor, reply, 2, {live}, &ref, &replay).ok());
+  CompletePendingStreamingTask(TaskSpecification(replay), descriptor.consumer_address(), 1);
+  rpc::ErrorType error;
+  const auto result = store_->GetIfExists(live);
+  ASSERT_NE(result, nullptr);
+  ASSERT_TRUE(result->IsException(&error));
+  EXPECT_EQ(error, rpc::ErrorType::STREAMING_GENERATOR_REPLAY_INCONSISTENT);
+  EXPECT_EQ(num_retries_, 0);
+  DeleteStreamAndRelease(spec.ReturnId(0), {live});
+}
+
+TEST_F(StreamingRecoveryTest, CopiedReturnReleaseRequiresSoleNativeHold) {
+  const auto id = RecoverySpec().StreamingGeneratorReturnId(0);
+  Borrow(id, GetRandomWorkerAddr());
+  reference_counter_->AddLocalReference(id, "runtime alias");
+  EXPECT_FALSE(reference_counter_->TryReleaseStreamingRecoveryReturn(id, nullptr));
+  reference_counter_->RemoveLocalReference(id, nullptr);
+  EXPECT_TRUE(reference_counter_->TryReleaseStreamingRecoveryReturn(id, nullptr));
+  EXPECT_FALSE(reference_counter_->HasReference(id));
+}
+
 TEST_F(StreamingRecoveryTest, InvalidAdoptionDoesNotMutateState) {
   auto spec = RecoverySpec();
   rpc::ObjectReference ref;

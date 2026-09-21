@@ -35,6 +35,13 @@ Status AwaitStreamRpc(Send send, Deadline deadline, Reply *reply) {
 }
 }  // namespace
 
+bool CoreWorker::TryReleaseStreamingRecoveryReturn(const ObjectID &object_id) {
+  std::vector<ObjectID> deleted;
+  const bool released = reference_counter_->TryReleaseStreamingRecoveryReturn(object_id, &deleted);
+  memory_store_->Delete(deleted);
+  return released;
+}
+
 Status CoreWorker::ValidateStreamingRecoveryInputs(
     const std::vector<ObjectID> &object_ids) const {
   return reference_counter_->ValidateStreamingRecoveryInputs(object_ids);
@@ -56,7 +63,7 @@ Status CoreWorker::RecoverStreamingTask(
   RAY_RETURN_NOT_OK(ValidateRecoveryStreamDescriptor(descriptor));
   if (descriptor.consumer_address().SerializeAsString() != rpc_address_.SerializeAsString() ||
       descriptor.manifest().job_id() != GetCurrentJobId().Binary() ||
-      next_index < 0 || next_index > descriptor.expected_returns()) {
+      next_index < 0 || next_index > RecoveryStreamReturnLimit(descriptor)) {
     return Status::Invalid("Streaming recovery requires the designated consumer and cursor");
   }
   const auto task_id = TaskID::FromBinary(descriptor.task_id());

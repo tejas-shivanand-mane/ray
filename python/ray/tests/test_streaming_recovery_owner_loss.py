@@ -77,9 +77,9 @@ def stream(surviving_cluster, tmp_path):
     readers = []
     crashed = False
 
-    def start(count=3, size=200_000, gate=None, task=producer, task_args=None):
+    def start(count=3, size=200_000, gate=None, task=producer, task_args=None, unknown_count=False):
         reader = StreamingRecoveryReader.submit(
-            owner, task, expected_returns=count,
+            owner, task, expected_returns=-1 if unknown_count else count,
             args=(count, size, str(tmp_path / "attempts"), gate)
             if task_args is None else task_args,
             resources={"replay_executor": 0.01},
@@ -120,9 +120,10 @@ def stream(surviving_cluster, tmp_path):
 
 @pytest.mark.parametrize("consumed", [0, 1, 3])
 @pytest.mark.parametrize("size", [16, 200_000])
-def test_replay_preserves_ids_cursor_and_retained_outputs(stream, consumed, size):
+@pytest.mark.parametrize("unknown_count", [False, True])
+def test_replay_preserves_ids_cursor_and_retained_outputs(stream, consumed, size, unknown_count):
     start, crash, directory = stream
-    reader = start(size=size)
+    reader = start(size=size, unknown_count=unknown_count)
     retained = [next(reader) for _ in range(consumed)]
     original_ids = [ref.binary() for ref in retained]
     if consumed == 3:
@@ -154,10 +155,11 @@ def test_replay_preserves_ids_cursor_and_retained_outputs(stream, consumed, size
     reader.close()
 
 
-def test_recovery_settles_an_outstanding_owner_read(stream):
+@pytest.mark.parametrize("unknown_count", [False, True])
+def test_recovery_settles_an_outstanding_owner_read(stream, unknown_count):
     start, crash, directory = stream
     gate = directory / "continue"
-    reader = start(gate=str(gate))
+    reader = start(gate=str(gate), unknown_count=unknown_count)
     first = next(reader)
     wait_for_condition(lambda: Path(str(gate) + ".blocked").exists(), timeout=30)
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -176,9 +178,10 @@ def test_recovery_settles_an_outstanding_owner_read(stream):
     assert (directory / "attempts").read_text().splitlines() == ["0", "1"]
 
 
-def test_empty_stream_recovery_after_original_eof(stream):
+@pytest.mark.parametrize("unknown_count", [False, True])
+def test_empty_stream_recovery_after_original_eof(stream, unknown_count):
     start, crash, directory = stream
-    reader = start(count=0)
+    reader = start(count=0, unknown_count=unknown_count)
     assert list(reader) == []
     crash()
     reader.recover()

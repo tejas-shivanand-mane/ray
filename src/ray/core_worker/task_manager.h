@@ -776,9 +776,9 @@ class TaskManager : public TaskManagerInterface {
     /// TaskSpec for tasks that cannot be retried (e.g., actor tasks), or by
     /// storing a shared_ptr to a PushTaskRequest protobuf for all tasks.
     TaskSpecification spec_;
-    // An explicit recovery contract, including a known zero-return stream.
-    // Unlike ordinary reconstruction, the new owner has no successful attempt
-    // from which to infer this count.
+    // An explicit recovery contract: exact count (including zero), or -1 until
+    // the first successful dynamic-count replay. For -1 the spec count holds
+    // the consumed-prefix lower bound, so early failure settles retained refs.
     std::optional<int64_t> recovery_expected_returns_;
     // Number of times this task may be resubmitted. If this reaches 0, then
     // the task entry may be erased.

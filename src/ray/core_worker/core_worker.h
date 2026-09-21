@@ -501,6 +501,7 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// Returns a map of all ObjectIDs currently in scope with a pair of their
   /// (local, submitted_task) reference counts. For debugging purposes.
   std::unordered_map<ObjectID, std::pair<size_t, size_t>> GetAllReferenceCounts() const;
+  bool TryReleaseStreamingRecoveryReturn(const ObjectID &object_id);
 
 
   /// Returns recovery-succession profiling counters as JSON.

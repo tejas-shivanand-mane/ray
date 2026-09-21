@@ -42,8 +42,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--local-object-store-mb", type=int, default=256)
     parser.add_argument(
-        "--recovery-plan", choices=["physical", "dataset"], default="physical",
-        help="Use the public Dataset planner and iterator for declared-count recovery",
+        "--recovery-plan", choices=["physical", "dataset", "runtime"], default="physical",
+        help="dataset uses declared counts; runtime uses automatic streaming recovery",
     )
     parser.add_argument(
         "--recovery-workload", choices=["instrumented", "original"],
@@ -88,7 +88,7 @@ def consume_slow(batch, *, sleep_s: float):
     return {"status": ["ok"]}
 
 
-def run_fast_producer_slow_consumer(args: argparse.Namespace):
+def build_fast_producer_slow_consumer(args: argparse.Namespace):
     producer = functools.partial(
         produce,
         output_batches_per_input_batch=args.output_batches_per_input_batch,
@@ -97,11 +97,15 @@ def run_fast_producer_slow_consumer(args: argparse.Namespace):
     )
     consumer = functools.partial(consume_slow, sleep_s=args.consumer_sleep_s)
 
-    ds = (
+    return (
         ray.data.from_blocks(make_inputs(args.num_input_blocks))
         .map_batches(producer)
         .map_batches(consumer, compute=ray.data.TaskPoolStrategy(size=1))
     )
+
+
+def run_fast_producer_slow_consumer(args: argparse.Namespace):
+    ds = build_fast_producer_slow_consumer(args)
     for _ in ds.iter_internal_ref_bundles():
         pass
 
@@ -166,6 +170,11 @@ class Trainer:
 
 
 def main(args: argparse.Namespace):
+    if args.recovery_plan == "runtime":
+        from streaming_recovery_backpressure_dataset import run_recovery_cases
+
+        run_recovery_cases(args)
+        return
     benchmark = Benchmark()
 
     if args.recovery_workload == "original" and (

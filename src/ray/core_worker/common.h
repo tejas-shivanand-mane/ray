@@ -119,8 +119,8 @@ struct TaskOptions {
   std::vector<FallbackOption> fallback_strategy;
   // The tensor transport (e.g., NCCL, GLOO, etc.) to use for this task.
   std::optional<std::string> tensor_transport;
-  // Explicit bounded streaming enrollment. -1 leaves ordinary submission alone.
-  int64_t recovery_stream_expected_returns = -1;
+  // -2 disables enrollment; -1 enrolls an unknown-count finite stream.
+  int64_t recovery_stream_expected_returns = -2;
   rpc::Address recovery_stream_consumer;
 };
 

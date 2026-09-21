@@ -45,7 +45,7 @@ def make_consumer():
         consumer = address()
         owner = address()
         descriptor = RecoveryStreamDescriptor(
-            version=1,
+            version=2 if count == -1 else 1,
             task_id=task_id.binary(),
             generator_id=_recovery_stream_generator_id(task_id),
             expected_returns=count,
@@ -506,3 +506,28 @@ def test_close_discards_pending_response_and_is_retryable(reader_transport, monk
     assert reader._closed
     assert reader._input_refs == ()
     assert pull.call_count == 1
+
+
+@pytest.mark.parametrize("count", [0, 1, 5])
+def test_unknown_count_is_learned_at_successful_eof(make_consumer, count):
+    state, descriptor = make_consumer(count=-1)
+    for index in range(count):
+        deliver(state, descriptor, index)
+    state.accept_owner_eof(state.begin_owner_read())
+    assert state.next_index == count
+    assert state._expected_returns == count
+    assert state.phase == "completed"
+
+
+def test_unknown_count_replay_continues_after_consumed_prefix(make_consumer):
+    state, descriptor = make_consumer(count=-1)
+    deliver(state, descriptor, 0)
+    snapshot = state.begin_recovery()
+    state.attach_replay(snapshot, ReplayReader(descriptor, [
+        output(descriptor, 1), output(descriptor, 2), StopIteration(),
+    ]))
+    assert state.read_replay().binary() == output(descriptor, 1).binary()
+    assert state.read_replay().binary() == output(descriptor, 2).binary()
+    with pytest.raises(StopIteration):
+        state.read_replay()
+    assert state.next_index == 3

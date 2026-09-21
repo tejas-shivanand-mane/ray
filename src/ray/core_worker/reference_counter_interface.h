@@ -216,6 +216,12 @@ class ReferenceCounterInterface {
     return false;
   }
 
+  /// Atomically release a sole local hold only if the reference can be deleted.
+  virtual bool TryReleaseStreamingRecoveryReturn(const ObjectID &object_id,
+                                                std::vector<ObjectID> *deleted) {
+    return false;
+  }
+
   /// Atomically register a recovery stream's completion ref and promote its
   /// still-live consumed returns. Reject conflicting ownership or omitted refs
   /// before making changes. Adds one local completion ref for the new generator

@@ -24,7 +24,7 @@ Status CoreWorker::PrepareRecoveryStreamSubmission(TaskSpecification *spec,
     return Status::Invalid("Streaming enrollment requires explicit Fixed-R streaming K=1");
   }
   rpc::RecoveryStreamDescriptor descriptor;
-  descriptor.set_version(1);
+  descriptor.set_version(options.recovery_stream_expected_returns == -1 ? 2 : 1);
   descriptor.set_task_id(spec->TaskId().Binary());
   descriptor.set_generator_id(ObjectID::FromIndex(spec->TaskId(), 1).Binary());
   descriptor.set_expected_returns(options.recovery_stream_expected_returns);

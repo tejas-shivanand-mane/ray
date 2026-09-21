@@ -1230,7 +1230,9 @@ message RecoveryManifest {
 }
 
 
-// Version 1: one finite normal streaming task, one surviving consumer, K=1.
+// Version 1: exact declared count. Version 2: expected_returns=-1, count learned
+// from successful completion. Both require deterministic finite normal tasks,
+// one surviving consumer and one owner-node failure, K=1.
 // The manifest is the immutable installation topology (recovery_attempt=0).
 // The delivery cursor and live consumed refs belong to the surviving consumer;
 // they must never be restored from this installation-time descriptor.

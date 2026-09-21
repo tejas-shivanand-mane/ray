@@ -158,6 +158,7 @@ def run_dataset(args, crash_head, diagnostics):
 
     context = DataContext.get_current().copy()
     context.enable_fixed_r_task_recovery = True
+    context.fixed_r_task_recovery_output_mode = getattr(args, "recovery_output_mode", "streaming")
     context.fixed_r_task_recovery_timeout_s = args.recovery_timeout_s
     context.enable_progress_bars = False
     config = get_config(context)
@@ -224,7 +225,8 @@ def run_dataset(args, crash_head, diagnostics):
             "validated_output_blocks": output_blocks, "validated_output_rows": count * rows,
             "physical_operator_names": [op["name"] for op in operators],
             "workload_variant": "original_range_map_batches_materialize",
-            "runtime_recovery": "bounded_finite_task_envelope",
+            "runtime_recovery": ("dynamic_count_streaming" if config.dynamic_task_outputs
+                                 else "bounded_finite_task_envelope"),
             "max_task_output_bytes": config.max_task_output_bytes,
             "user_declared_block_counts": False, "calibration_required": False,
             "benchmark_input_copies": False, "read_tasks_protected": True,

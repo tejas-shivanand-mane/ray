@@ -49,8 +49,8 @@ def _validate_streaming_recovery(value):
     if set(value) != {"expected_returns", "consumer_address"}:
         return "_streaming_recovery requires expected_returns and consumer_address"
     count = value["expected_returns"]
-    if type(count) is not int or not 0 <= count < 2**63:
-        return "Streaming expected_returns must be a nonnegative int64"
+    if type(count) is not int or not -1 <= count < 2**63:
+        return "Streaming expected_returns must be -1 (unknown) or a nonnegative int64"
     if not isinstance(value["consumer_address"], bytes) or not value["consumer_address"]:
         return "Streaming consumer_address must be serialized address bytes"
     return None
