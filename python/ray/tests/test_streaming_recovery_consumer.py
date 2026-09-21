@@ -1,6 +1,8 @@
 """Local adapter tests; no Ray cluster or distributed failure is simulated."""
 
 import pickle
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -8,6 +10,8 @@ import ray
 from ray._private.streaming_recovery import (
     StreamingRecoveryConsumer,
     StreamingRecoveryCountError,
+    StreamingRecoveryReader,
+    StreamingRecoveryRequired,
     StreamingRecoveryStateError,
 )
 from ray._raylet import (
@@ -88,6 +92,10 @@ class ReplayReader:
         )
         self.events = iter(events)
         self.timeouts = []
+        self.exhausted = False
+
+    def _stream_exhausted(self):
+        return self.exhausted
 
     def completed(self):
         return self.completion
@@ -320,3 +328,181 @@ def test_only_descriptor_is_transferable(make_consumer):
     for local_state in (state, ticket, snapshot):
         with pytest.raises(TypeError):
             pickle.dumps(local_state)
+
+
+@pytest.fixture
+def reader_transport(make_consumer, monkeypatch):
+    state, descriptor = make_consumer(count=1)
+    owner = SimpleNamespace(pull=SimpleNamespace(remote=Mock(return_value=object())))
+    consumer_address = RecoveryStreamDescriptor.FromString(descriptor).consumer_address
+    reader = StreamingRecoveryReader(
+        owner, descriptor, consumer_address.SerializeToString(),
+    )
+    reader.consumer = state
+    wait = Mock(side_effect=lambda refs, **kwargs: (refs, []))
+    get = Mock(return_value={"ref": output(descriptor, 0)})
+    monkeypatch.setattr(ray, "wait", wait)
+    monkeypatch.setattr(ray, "get", get)
+    return reader, owner.pull.remote, wait, get
+
+
+def test_poll_timeout_keeps_one_read_and_does_not_advance(reader_transport):
+    reader, pull, wait, get = reader_transport
+    wait.side_effect = lambda refs, **kwargs: ([], refs)
+    pending = reader.get_waitable()
+    ticket = reader.consumer._owner_read
+    for _ in range(3):
+        assert reader.poll_next() is None
+        assert reader.get_waitable() is pending
+        assert reader.consumer._owner_read is ticket
+    assert pull.call_count == 1
+    assert reader.consumer.next_index == 0
+    assert reader.consumer.phase == "forwarding"
+    get.assert_not_called()
+    with pytest.raises(StreamingRecoveryStateError, match="outstanding owner read"):
+        reader.recover()
+    assert not reader.consumer._recovery_started
+
+
+def test_poll_local_fetch_race_keeps_ticket(reader_transport):
+    reader, pull, _, get = reader_transport
+    get.side_effect = ray.exceptions.GetTimeoutError("not local yet")
+    pending = reader.get_waitable()
+    assert reader.poll_next() is None
+    assert reader.get_waitable() is pending
+    get.side_effect = None
+    ref = reader.poll_next()
+    assert ref == output(reader.descriptor, 0)
+    assert reader.consumer.next_index == 1
+    assert pull.call_count == 1  # No prefetch after accepting this item.
+    assert reader._pending_read is None
+
+
+def test_owner_pending_response_releases_ticket_without_consuming(reader_transport):
+    reader, pull, _, get = reader_transport
+    get.return_value = {"pending": True}
+    assert reader.poll_next() is None
+    assert reader.consumer._owner_read is None
+    assert reader.consumer.next_index == 0
+    assert reader._pending_read is None
+    get.return_value = {"ref": output(reader.descriptor, 0)}
+    assert reader.poll_next() == output(reader.descriptor, 0)
+    assert pull.call_count == 2
+
+
+def test_poll_owner_loss_requires_explicit_recovery(reader_transport, monkeypatch):
+    reader, pull, _, get = reader_transport
+    get.side_effect = ray.exceptions.RayActorError()
+    recover = Mock()
+    monkeypatch.setattr(reader.consumer, "recover", recover)
+    for _ in range(2):
+        with pytest.raises(StreamingRecoveryRequired, match="quiesce"):
+            reader.poll_next()
+    assert pull.call_count == 1
+    assert reader.consumer.next_index == 0
+    assert reader.consumer._owner_read is None
+    recover.assert_not_called()
+    assert not reader.consumer._recovery_started
+    reader.recover()
+    recover.assert_called_once_with(reader.timeout_s)
+    assert not reader._recovery_required
+
+
+def test_poll_producer_error_is_terminal(reader_transport):
+    reader, pull, _, get = reader_transport
+    get.side_effect = ValueError("producer failed")
+    with pytest.raises(ValueError, match="producer failed"):
+        reader.poll_next()
+    assert reader.consumer.phase == "failed"
+    assert reader._pending_read is None
+    with pytest.raises(StreamingRecoveryStateError, match="cannot read"):
+        reader.poll_next()
+    assert pull.call_count == 1
+    assert not reader._recovery_required
+
+
+def test_blocking_iterator_still_recovers_on_owner_loss(reader_transport, monkeypatch):
+    reader, _, _, get = reader_transport
+    get.side_effect = ray.exceptions.RayActorError()
+    ref = output(reader.descriptor, 0)
+    replay = ReplayReader(reader.descriptor, [ref])
+
+    def recover(timeout_s):
+        reader.consumer.attach_replay(reader.consumer.begin_recovery(), replay)
+
+    monkeypatch.setattr(reader.consumer, "recover", recover)
+    assert next(reader) is ref
+    assert reader.consumer.phase == "replaying"
+    assert replay.timeouts == [None]
+    assert not reader._recovery_required
+
+
+@pytest.mark.parametrize("timeout", [-1, float("inf"), float("nan"), "0"])
+def test_poll_invalid_timeout_does_not_start_read(reader_transport, timeout):
+    reader, pull, _, _ = reader_transport
+    with pytest.raises(ValueError, match="Read timeout"):
+        reader.poll_next(timeout)
+    pull.assert_not_called()
+
+
+def test_poll_early_eof_is_a_count_error(reader_transport):
+    reader, _, _, get = reader_transport
+    get.return_value = {"eof": True}
+    with pytest.raises(StreamingRecoveryCountError, match="ended before"):
+        reader.poll_next()
+    assert reader.consumer.phase == "failed"
+
+
+def test_poll_replay_preserves_timeout_and_fetches_only_completion(reader_transport):
+    reader, pull, wait, get = reader_transport
+    ref = output(reader.descriptor, 0)
+    replay = ReplayReader(reader.descriptor, [None, ref])
+    reader.consumer.attach_replay(reader.consumer.begin_recovery(), replay)
+    assert reader.get_waitable() is replay
+    assert reader.poll_next() is None
+    assert reader.consumer.next_index == 0
+    assert reader.poll_next() is ref
+    assert replay.timeouts == [0, 0]
+    wait.assert_not_called()
+    get.assert_not_called()
+    pull.assert_not_called()
+
+    replay.exhausted = True
+    assert reader.get_waitable() is replay.completed()
+    wait.side_effect = lambda refs, **kwargs: ([], refs)
+    assert reader.poll_next() is None
+    assert reader.consumer.phase == "replaying"
+    assert replay.timeouts == [0, 0]
+    wait.side_effect = lambda refs, **kwargs: (refs, [])
+    with pytest.raises(StopIteration):
+        reader.poll_next()
+    wait.assert_called_with([replay.completed()], timeout=0, fetch_local=True)
+    assert reader.consumer.phase == "completed"
+
+
+def test_close_discards_pending_response_and_is_retryable(reader_transport, monkeypatch):
+    reader, pull, _, get = reader_transport
+    pending = reader.get_waitable()
+    dependency = object()
+    reader._input_refs = (dependency,)
+    reader.owner.close = SimpleNamespace(remote=Mock(return_value=object()))
+    close = Mock(side_effect=TimeoutError("tombstone barrier"))
+    worker = SimpleNamespace(
+        check_connected=Mock(),
+        core_worker=SimpleNamespace(close_streaming_recovery=close),
+    )
+    monkeypatch.setattr(ray._private.worker, "global_worker", worker)
+    with pytest.raises(TimeoutError, match="tombstone barrier"):
+        reader.close()
+    assert not reader._closed
+    assert reader._input_refs == (dependency,)
+    assert reader._pending_read is None
+    assert reader.consumer.phase == "closed"
+    with pytest.raises(StreamingRecoveryStateError, match="closed"):
+        reader.poll_next()
+    assert all(call.args[0] is not pending for call in get.call_args_list)
+    close.side_effect = None
+    reader.close()
+    assert reader._closed
+    assert reader._input_refs == ()
+    assert pull.call_count == 1

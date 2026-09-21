@@ -28,6 +28,29 @@ class StreamingRecoveryCountError(StreamingRecoveryStateError):
     """The producer ended early or yielded beyond its declared count."""
 
 
+class StreamingRecoveryRequired(StreamingRecoveryStateError):
+    """An owner read failed; quiesce output users before explicit recovery.
+
+    This notification does not establish owner-node death. The native recovery
+    claim still checks that condition before allowing ownership adoption.
+    """
+
+
+# A synchronous owner actor must return from a read so a queued close can run,
+# even when its producer is stalled or backpressured. At most one such RPC is
+# outstanding per reader; an empty response never advances the delivery cursor.
+_OWNER_READ_TIMEOUT_S = 0.1
+
+
+def _validate_read_timeout(timeout_s):
+    if timeout_s is not None and (
+        not isinstance(timeout_s, (int, float))
+        or not math.isfinite(timeout_s)
+        or timeout_s < 0
+    ):
+        raise ValueError("Read timeout must be None or finite and nonnegative")
+
+
 def _timeout_ms(timeout_s):
     if not isinstance(timeout_s, (int, float)) or not math.isfinite(timeout_s):
         raise ValueError("Recovery timeout must be finite and positive")
@@ -95,12 +118,14 @@ class StreamingRecoveryOwner:
             self._generator.completed(), descriptor, consumer_address
         )
 
-    def next_ref(self):
-        """Read one original item only after the enrollment barrier succeeds."""
+    def next_ref(self, timeout_s=None):
+        """Read an original item, or return None if the bounded read times out."""
+        _validate_read_timeout(timeout_s)
         _, ready = self.submission()
         if not ready:
             raise StreamingRecoveryStateError("Streaming enrollment is not ready")
-        return next(self._generator)
+        ref = self._generator._next_sync(timeout_s=timeout_s)
+        return None if ref.is_nil() else ref
 
     def close(self) -> None:
         if self._generator is not None:
@@ -317,6 +342,22 @@ class StreamingRecoveryConsumer:
                             worker.core_worker.async_delete_object_ref_stream(completion)
                 raise
 
+    def replay_waitable(self):
+        """Return a local replay waitable without consuming or fetching output.
+
+        At EOF, wait on completion itself so the transport can fetch it locally
+        before a zero-timeout read. Repeated zero-timeout gets alone can cancel
+        its transfer indefinitely when the completion object is in Plasma.
+        """
+        with self._lock:
+            if self._phase == "completed":
+                raise StopIteration
+            if self._phase != "replaying" or self._reading_replay:
+                raise StreamingRecoveryStateError("A replay wait cannot start now")
+            if self._generator._stream_exhausted():
+                return self._generator.completed()
+            return self._generator
+
     def read_replay(self, timeout_s=0):
         """Return the next ref, None on timeout, or raise StopIteration at EOF.
 
@@ -429,12 +470,14 @@ class StreamingRecoveryOwnerActor:
     def confirm(self, descriptor, consumer_address):
         self.stream.confirm_receipt(descriptor, consumer_address)
 
-    def pull(self):
+    def pull(self, timeout_s=None):
         try:
-            ref = self.stream.next_ref()
+            ref = self.stream.next_ref(timeout_s=timeout_s)
         except StopIteration:
-            ray.get(self.stream._generator.completed())
+            # _next_sync already resolved completion successfully.
             return {"eof": True}
+        if ref is None:
+            return {"pending": True}
         if ref == self.stream._generator.completed():
             ray.get(ref)  # Surface producer errors, never forward completion as a yield.
         return {"ref": ref}
@@ -453,6 +496,11 @@ class StreamingRecoveryReader:
     Serialize reader operations and pause other gets/exports during recovery.
     release(index) requires all application uses/aliases of that output to end.
     close() acknowledges tombstones at every surviving selected holder.
+
+    Scheduler callers use get_waitable()/poll_next(). They must handle
+    StreamingRecoveryRequired and quiesce downstream users before recover().
+    The blocking iterator retains automatic recovery for standalone callers
+    satisfying the same quiescence contract.
     """
 
     @classmethod
@@ -520,6 +568,9 @@ class StreamingRecoveryReader:
         self.timeout_s = timeout_s
         self._closed = False
         self._input_refs = ()
+        self._pending_read = None
+        self._pending_ticket = None
+        self._recovery_required = False
 
     def __iter__(self):
         return self
@@ -531,32 +582,122 @@ class StreamingRecoveryReader:
         self.close()
 
     def __next__(self):
-        if self._closed:
+        while True:
+            try:
+                ref = self.poll_next(timeout_s=None)
+            except StreamingRecoveryRequired:
+                self.recover()
+                continue
+            if ref is not None:
+                return ref
+
+    def _check_readable(self):
+        if self._closed or self.consumer.phase == "closed":
             raise StreamingRecoveryStateError("Streaming reader is closed")
         if self.consumer.phase == "completed":
             raise StopIteration
-        if self.consumer.phase == "forwarding":
+        if self.consumer.phase not in ("forwarding", "replaying"):
+            raise StreamingRecoveryStateError("Streaming reader cannot read now")
+        if self._recovery_required:
+            raise StreamingRecoveryRequired(
+                "Owner read failed; quiesce output users and call recover()"
+            )
+
+    def get_waitable(self):
+        """Return a ray.wait-compatible handle for one pending read.
+
+        On the original path this starts at most one bounded owner RPC. Repeated
+        calls return the same handle until poll_next settles it. Request this
+        only when the caller has output budget: the owner may consume one ref
+        and return its native backpressure credit before the consumer accepts it.
+        No next read is prefetched after accepting a response.
+
+        On replay, return the native generator, or its completion ref at EOF.
+        Readiness is a hint; poll_next can still return None. No output values
+        are fetched here, and owner failure never starts recovery implicitly.
+        """
+        self._check_readable()
+        if self.consumer.phase == "replaying":
+            return self.consumer.replay_waitable()
+        if self._pending_read is None:
             ticket = self.consumer.begin_owner_read()
             try:
-                # A timeout alone would leave this read outstanding; wait for
-                # a settled actor result or failure before taking a snapshot.
-                response = ray.get(self.owner.pull.remote())
-            except ray.exceptions.RayActorError:
-                self.consumer.settle_failed_owner_read(ticket)
-                self.recover()
+                self._pending_read = self.owner.pull.remote(_OWNER_READ_TIMEOUT_S)
             except BaseException:
                 self.consumer.fail()
                 raise
-            else:
+            self._pending_ticket = ticket
+        return self._pending_read
+
+    def poll_next(self, timeout_s=0):
+        """Return one ref, None when pending, or raise StopIteration at EOF.
+
+        A timeout preserves the outstanding RPC and ticket; it is not evidence
+        of owner failure. A settled actor failure raises StreamingRecoveryRequired
+        without claiming/adopting/replaying, so a scheduler can first stop users
+        of retained outputs. Enrollment, recover(), and close() remain blocking.
+        """
+        _validate_read_timeout(timeout_s)
+        waitable = self.get_waitable()
+        if self.consumer.phase == "forwarding":
+            ticket = self._pending_ticket
+            try:
+                # Fetch only the small RPC envelope, not the nested output ref.
+                # wait(fetch_local=True) keeps a Plasma response pull alive
+                # across zero-timeout polls; get(timeout=0) alone need not.
+                ready, _ = ray.wait([waitable], timeout=timeout_s, fetch_local=True)
+                if not ready:
+                    return None
+                response = ray.get(waitable, timeout=0)
+            except ray.exceptions.GetTimeoutError:
+                return None
+            except ray.exceptions.RayActorError as exc:
+                self.consumer.settle_failed_owner_read(ticket)
+                self._pending_read = None
+                self._pending_ticket = None
+                self._recovery_required = True
+                raise StreamingRecoveryRequired(
+                    "Owner read failed; quiesce output users and call recover()"
+                ) from exc
+            except BaseException:
+                self._pending_read = None
+                self._pending_ticket = None
+                self.consumer.fail()
+                raise
+
+            self._pending_read = None
+            self._pending_ticket = None
+            try:
+                if response.get("pending"):
+                    self.consumer.settle_failed_owner_read(ticket)
+                    return None
                 if response.get("eof"):
                     self.consumer.accept_owner_eof(ticket)
                     raise StopIteration
                 return self.consumer.accept_owner_item(ticket, response["ref"])
-        return self.consumer.read_replay(timeout_s=None)
+            except StopIteration:
+                raise
+            except BaseException:
+                self.consumer.fail()
+                raise
+
+        if isinstance(waitable, ray.ObjectRef):
+            # Only EOF needs a local completion value. Ordinary replay output
+            # stays remote until its application requests the block itself.
+            ready, _ = ray.wait([waitable], timeout=timeout_s, fetch_local=True)
+            if not ready:
+                return None
+            timeout_s = 0
+        return self.consumer.read_replay(timeout_s=timeout_s)
 
     def recover(self):
         """Explicit recovery also supports retained outputs after original EOF."""
+        if self._pending_read is not None:
+            raise StreamingRecoveryStateError(
+                "Poll the outstanding owner read to settlement before recovery"
+            )
         self.consumer.recover(self.timeout_s)
+        self._recovery_required = False
 
     def release(self, index):
         self.consumer.release(index)
@@ -576,6 +717,8 @@ class StreamingRecoveryReader:
             )
         finally:
             self.consumer.close()
+            self._pending_read = None
+            self._pending_ticket = None
         # A timed-out close can be retried; it must not report durable success.
         self._closed = True
         self._input_refs = ()

@@ -12,6 +12,7 @@ from ray._common.test_utils import wait_for_condition
 from ray._private.streaming_recovery import (
     StreamingRecoveryOwnerActor,
     StreamingRecoveryReader,
+    StreamingRecoveryRequired,
     StreamingRecoveryStateError,
 )
 from ray.cluster_utils import Cluster
@@ -226,13 +227,36 @@ def test_live_owner_and_foreign_consumer_cannot_claim(stream):
 
 
 @ray.remote(num_returns="streaming", max_retries=1)
-def data_map_stream(transformer, data_context, task_context, block, attempts_path):
+def data_map_stream(
+    transformer, data_context, task_context, block, attempts_path, metadata_gate=None
+):
     from ray.data._internal.execution.operators.map_operator import _map_task
 
     attempt = ray._private.worker.global_worker.core_worker.get_current_task_attempt_number()
     with Path(attempts_path).open("a") as log:
         log.write(f"{attempt}\n")
-    yield from _map_task(transformer, data_context, task_context, block)
+    mapped = _map_task(transformer, data_context, task_context, block)
+    if metadata_gate is None:
+        yield from mapped
+        return
+    # Delay metadata on attempt 0 while preserving Ray's serialization-stat
+    # feedback into _map_task. Never collect the stream to determine its size.
+    feedback = None
+    index = 0
+    try:
+        while True:
+            try:
+                value = mapped.send(feedback)
+            except StopIteration:
+                return
+            if attempt == 0 and index == 1:
+                Path(metadata_gate + ".blocked").touch()
+                while not Path(metadata_gate).exists():
+                    time.sleep(0.01)
+            feedback = yield value
+            index += 1
+    finally:
+        mapped.close()
 
 
 @pytest.mark.parametrize("consumed", [0, 1, 2])
@@ -284,6 +308,106 @@ def test_ray_data_map_task_with_retained_input_refs(stream, consumed):
     assert metadata.num_rows == block.num_rows
     assert metadata.schema.equals(block.schema)
     assert (directory / "attempts").read_text().splitlines() == ["0", "1"]
+
+
+@pytest.mark.parametrize("action", ["resume", "owner_loss", "close"])
+def test_poll_ray_data_metadata_gap(stream, action):
+    import pyarrow as pa
+    from ray.data._internal.execution.interfaces.task_context import TaskContext
+    from ray.data._internal.execution.operators.map_transformer import (
+        BlockMapTransformFn,
+        MapTransformer,
+    )
+    from ray.data.context import DataContext
+
+    def identity_blocks(blocks, ctx):
+        yield from blocks
+
+    start, crash, directory = stream
+    gate = directory / "metadata"
+    block = pa.table({"value": list(range(50_000))})
+    inputs = (
+        ray.put(MapTransformer([
+            BlockMapTransformFn(identity_blocks, disable_block_shaping=True)
+        ])),
+        ray.put(DataContext.get_current()),
+        TaskContext(task_idx=0, op_name="FixedRDataPoll"), ray.put(block),
+        str(directory / "attempts"), str(gate),
+    )
+    reader = start(count=2, task=data_map_stream, task_args=inputs)
+    del inputs
+    try:
+        block_ref = next(reader)
+        block_id = block_ref.binary()
+        wait_for_condition(lambda: Path(str(gate) + ".blocked").exists(), timeout=30)
+        for _ in range(3):
+            pending = reader.get_waitable()
+            assert reader.get_waitable() == pending
+            assert reader.poll_next(timeout_s=0) is None
+            assert reader.consumer.next_index == 1
+
+        if action == "close":
+            # close must run behind the outstanding actor read without opening
+            # the producer gate. A blocking owner.pull would prevent this.
+            reader.close()
+            assert not gate.exists()
+            assert reader.consumer.phase == "closed"
+            with pytest.raises(StreamingRecoveryStateError, match="closed"):
+                reader.poll_next()
+            return
+
+        if action == "owner_loss":
+            crash()
+
+            def recovery_required():
+                try:
+                    assert reader.poll_next() is None
+                except StreamingRecoveryRequired:
+                    return True
+                return False
+
+            wait_for_condition(recovery_required, timeout=60)
+            assert reader.consumer.phase == "forwarding"
+            assert not reader.consumer._recovery_started
+            assert reader.consumer.next_index == 1
+            assert (directory / "attempts").read_text().splitlines() == ["0"]
+            # Only this consumer holds block_ref; no downstream task or get is
+            # using it during the explicit ownership transition.
+            gate.touch()
+            reader.recover()
+        else:
+            gate.touch()
+
+        metadata_refs = []
+
+        def metadata_ready():
+            ref = reader.poll_next()
+            if ref is None:
+                return False
+            metadata_refs.append(ref)
+            return True
+
+        wait_for_condition(metadata_ready, timeout=60)
+
+        def eof_ready():
+            try:
+                assert reader.poll_next() is None
+            except StopIteration:
+                return True
+            return False
+
+        wait_for_condition(eof_ready, timeout=60)
+        assert reader.consumer.next_index == 2
+        assert block_ref.binary() == block_id
+        recovered, serialized_metadata = ray.get([block_ref, metadata_refs[0]], timeout=60)
+        assert recovered.equals(block)
+        metadata = pickle.loads(serialized_metadata)
+        assert metadata.num_rows == block.num_rows
+        assert metadata.schema.equals(block.schema)
+        expected_attempts = ["0", "1"] if action == "owner_loss" else ["0"]
+        assert (directory / "attempts").read_text().splitlines() == expected_attempts
+    finally:
+        gate.touch()
 
 
 def test_rejects_nested_payload_in_consumer_owned_input(stream):
