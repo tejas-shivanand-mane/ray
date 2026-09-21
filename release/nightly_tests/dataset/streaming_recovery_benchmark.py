@@ -29,6 +29,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 MODES = ("ordinary", "copy", "fixed_r", "fixed_r_failure")
+FAILURE_MODES = ("fixed_r_failure", "fixed_r_head_failure")
 
 
 def recovery_system_config():
@@ -48,7 +49,7 @@ def recovery_system_config():
 
 
 def validate_args(args):
-    if args.recovery_mode not in MODES:
+    if args.recovery_mode not in (*MODES, "fixed_r_head_failure"):
         raise ValueError(f"Unknown controlled mode: {args.recovery_mode}")
     for name in (
         "num_input_blocks", "output_batches_per_input_batch",
@@ -81,7 +82,7 @@ def validate_args(args):
         for node in config.executor_node_ids
     ):
         raise ValueError("Each executor needs at least one CPU")
-    if args.recovery_mode == "fixed_r_failure":
+    if args.recovery_mode in FAILURE_MODES:
         if args.output_batches_per_input_batch < 2:
             raise ValueError("Owner failure needs at least two producer output blocks")
         # All initial producers wait while the first consumer starts. Ensure a
@@ -224,7 +225,9 @@ def _operator_metrics(op):
 
 def run_controlled(args, crash_owner=None):
     config = validate_args(args)
-    failure = args.recovery_mode == "fixed_r_failure"
+    failure = args.recovery_mode in FAILURE_MODES
+    if args.recovery_mode == "fixed_r_head_failure" and crash_owner is None:
+        raise ValueError("Head failure requires the head replacement controller")
     context = DataContext.get_current().copy()
     context.eager_free = False
     context.retried_map_errors = False
@@ -335,13 +338,20 @@ def run_controlled(args, crash_owner=None):
                             raise TimeoutError("Initial enrolled wave did not reach failure gate")
                         time.sleep(0.05)
                     failure_metrics["enrolled_at_failure"] = wave + 1
+                    marker = (
+                        "FIXED_R_HEAD_FAILURE_READY" if
+                        args.recovery_mode == "fixed_r_head_failure" else
+                        "FIXED_R_OWNER_FAILURE_READY"
+                    )
                     print(
-                        "FIXED_R_OWNER_FAILURE_READY "
+                        f"{marker} "
                         f"owner_node_id={config.owner_node_id}", flush=True,
                     )
                     failure_start = time.monotonic()
                     if crash_owner is not None:
-                        crash_owner()
+                        replacement_metrics = crash_owner()
+                        if replacement_metrics is not None:
+                            failure_metrics.update(replacement_metrics)
                     # On external clusters the operator stops ONLY the printed
                     # owner node now. Never execute a shell kill on a remote host.
                     deadline = time.monotonic() + args.recovery_timeout_s

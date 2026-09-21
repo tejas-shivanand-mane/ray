@@ -25,7 +25,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefetch-batches", type=int, default=8)
     parser.add_argument(
         "--recovery-mode",
-        choices=["original", "ordinary", "copy", "fixed_r", "fixed_r_failure", "suite"],
+        choices=[
+            "original", "ordinary", "copy", "fixed_r", "fixed_r_failure",
+            "fixed_r_head_failure", "suite",
+        ],
         default="original",
         help="Opt-in controlled physical benchmark; suite runs four fresh local clusters",
     )
@@ -174,6 +177,16 @@ def run_recovery_cases(benchmark, args):
         raise ValueError("suite requires --local-executor-nodes; external failures need a fresh owner")
     if args.local_executor_nodes and (args.owner_node_id or args.executor_node_ids):
         raise ValueError("Choose local nodes or explicit cluster node IDs")
+    if args.recovery_mode == "fixed_r_head_failure":
+        from streaming_recovery_head_failure import local_head_failure_cluster
+
+        with local_head_failure_cluster(args) as (case_args, crash_head):
+            benchmark.run_fn(
+                f"{args.case}/fixed_r_head_failure", run_controlled, case_args,
+                crash_owner=crash_head,
+            )
+            benchmark.write_result()
+        return
     modes = MODES if args.recovery_mode == "suite" else (args.recovery_mode,)
     for mode in modes:
         case_args = argparse.Namespace(**vars(args))
