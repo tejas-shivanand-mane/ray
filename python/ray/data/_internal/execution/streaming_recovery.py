@@ -7,6 +7,7 @@ protected output is exported: copies remain owned by the surviving coordinator.
 
 import math
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Tuple, Union
@@ -18,7 +19,10 @@ from ray._private.streaming_recovery import (
     StreamingRecoveryReader,
     StreamingRecoveryRequired,
 )
-from ray._raylet import _inspect_recovery_stream_descriptor
+from ray._raylet import (
+    _inspect_recovery_stream_descriptor,
+    _recovery_stream_return_id,
+)
 from ray.data._internal.execution.interfaces.physical_operator import (
     DataOpTask,
     TaskGeneratorState,
@@ -274,7 +278,35 @@ class _DataStream:
     def recover(self):
         if self.reader is None:
             raise RuntimeError("A survivor-owned Data task cannot use owner-loss replay")
-        self.reader.recover()
+        try:
+            self.reader.recover()
+        except Exception as exc:
+            # Record strings/counts before Dataset strips the traceback or
+            # shutdown clears the reader. Never mint new ObjectRefs here.
+            failure = {
+                "task_id": self.task_id.hex(),
+                "next_index": self.reader.consumer.next_index,
+                "error_type": type(exc).__name__, "error": str(exc),
+                "traceback": traceback.format_exc(),
+                "retained_returns": {
+                    str(index): ref.hex()
+                    for index, ref in self.reader.consumer._retained.items()
+                },
+            }
+            try:
+                descriptor = self.reader.descriptor
+                info = _inspect_recovery_stream_descriptor(descriptor)
+                ids = {info["generator_id"].hex()}
+                ids.update(_recovery_stream_return_id(descriptor, index).hex()
+                           for index in range(self.expected_returns))
+                counts = ray._private.worker.global_worker.core_worker.get_all_reference_counts()
+                failure["native_reference_counts"] = {
+                    key: value for key, value in counts.items() if key in ids
+                }
+            except Exception as diagnostic_error:
+                failure["diagnostic_error"] = str(diagnostic_error)
+            self.stats.setdefault("fixed_r_recovery_errors", []).append(failure)
+            raise
         self.stats["fixed_r_recovered_tasks"] += 1
 
     def release_pair(self, first_index):
@@ -407,6 +439,7 @@ def new_metrics():
     # One owner failure: only the tasks still live at that loss can replay.
     # Record identities, not every successful task in the Dataset.
     metrics["fixed_r_recovered_task_details"] = []
+    metrics["fixed_r_recovery_errors"] = []
     return metrics
 
 
@@ -471,6 +504,9 @@ class StreamingRecoveryDataOpTask(DataOpTask):
         self.stream.stats["fixed_r_copied_blocks"] += 1
         return size
 
+    def _release_copied_pair(self):
+        self.stream.release_pair(self._pair_start)
+
     def on_data_ready(self, max_bytes_to_read, metadata_fetcher):
         self._track_task_output_backpressure(max_bytes_to_read)
         if self.has_finished or max_bytes_to_read == 0:
@@ -505,7 +541,7 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             if copied_pair is None:
                 return 0
             self._clear_pair()
-            self.stream.release_pair(self._pair_start)
+            self._release_copied_pair()
             # Let distributed reference counting retire copies. Data's
             # owns_blocks=True permits explicit free even if an exported alias
             # remains live; it is distinct from native coordinator ownership.
@@ -604,6 +640,16 @@ class BufferedRecoveryDataOpTask(StreamingRecoveryDataOpTask):
         if self._copied_outputs:
             return self._copied_outputs[0][0]
         return super().get_waitable()
+
+    def _release_copied_pair(self):
+        # This finite task has only two native returns. Keep both registered
+        # with the consumer until close, even after independently owned copies
+        # are emitted. Copying alone does not prove that all runtime aliases
+        # (waitables, RPC envelopes, deserialization buffers) have disappeared.
+        # Recovery before EOF must list every still-live consumed return; the
+        # native adoption check must continue rejecting omitted references.
+        # close() releases these holds after the tombstone barrier.
+        pass
 
     def _copy_pair_if_ready(self):
         refs = [self._pending_block_ref, self._pending_meta_ref]

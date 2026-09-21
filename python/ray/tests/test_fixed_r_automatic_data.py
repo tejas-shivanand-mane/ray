@@ -5,6 +5,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pyarrow as pa
@@ -13,8 +14,12 @@ import ray
 from ray.data import DataContext
 from ray.data._internal.execution.streaming_recovery import (
     CONFIG_KEY,
+    BufferedRecoveryDataOpTask,
     FixedRDataConfig,
     buffered_map_task,
+    get_config,
+    new_metrics,
+    submit_stream,
 )
 
 
@@ -63,6 +68,74 @@ def test_original_range_map_materialize(benchmark_modules, monkeypatch, mode, st
             assert result["operators"][target]["fixed_r_recovered_tasks"] >= 1
             assert result["original_head_processes_exited"]
             assert result["coordinator_node_id"] in result["surviving_node_ids"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Local GCS RocksDB requires Linux")
+@pytest.mark.parametrize("block_count", [0, 2])
+def test_buffered_recovery_after_copy_before_eof(benchmark_modules, block_count):
+    from ray._common.test_utils import wait_for_condition
+    from ray.data._internal.execution.streaming_recovery import _BUFFERED_TASK_MARKER
+    from ray.data.block import BlockExecStats, BlockMetadataWithSchema, TaskExecWorkerStats
+
+    def produce():
+        pairs = []
+        for index in range(block_count):
+            block = pa.table({"value": np.full(128_000, index, dtype=np.int64)})
+            metadata = BlockMetadataWithSchema.from_block(
+                block,
+                block_exec_stats=BlockExecStats(wall_time_s=0.1, block_ser_time_s=0.1),
+                task_exec_stats=TaskExecWorkerStats(task_wall_time_s=0.2),
+            )
+            pairs.append((block, pickle.dumps(metadata)))
+        yield pairs
+        yield _BUFFERED_TASK_MARKER
+
+    with benchmark_modules.local_head_failure_cluster(arguments()) as (_, crash):
+        context = DataContext.get_current().copy()
+        context.enable_fixed_r_task_recovery = True
+        metrics = new_metrics()
+        stream = submit_stream(
+            get_config(context), ray.remote(produce), (), {},
+            {"num_returns": "streaming"}, 1, metrics,
+        )
+        outputs = []
+        done = Mock()
+        task = BufferedRecoveryDataOpTask(
+            0, stream, Mock(), "test", output_ready_callback=outputs.append,
+            task_done_callback=done,
+        )
+        try:
+            def copied():
+                task.on_data_ready(None, None)
+                return stream.next_index == 2 and task._pending_block_ref.is_nil()
+
+            wait_for_condition(copied, timeout=60)
+            # Mimic local runtime aliases outliving the copy operation. Keep
+            # these original refs local and quiescent throughout adoption.
+            assert set(stream.reader.consumer._retained) == {0, 1}
+            aliases = tuple(stream.reader.consumer._retained.values())
+            crash()
+
+            def finished():
+                task.on_data_ready(None, None)
+                return task.has_finished
+
+            wait_for_condition(finished, timeout=60)
+            assert metrics["fixed_r_recovered_tasks"] == 1
+            assert metrics["fixed_r_closed_streams"] == 1
+            assert metrics["fixed_r_copied_blocks"] == block_count
+            assert not metrics["fixed_r_recovery_errors"]
+            assert len(outputs) == block_count
+            assert len(aliases) == 2
+            assert not stream.reader.consumer._retained
+            done.assert_called_once()
+            assert done.call_args.args[0] is None
+            refs = [ref for bundle in outputs for ref in bundle.block_refs]
+            for index, block in enumerate(ray.get(refs)):
+                assert block.num_rows == 128_000
+                assert block["value"].to_pylist() == [index] * 128_000
+        finally:
+            stream.close()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Local GCS RocksDB requires Linux")

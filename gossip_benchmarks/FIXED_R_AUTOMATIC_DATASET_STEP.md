@@ -122,3 +122,42 @@ The harness also saves `execution_error_traceback` from the executor callback
 before the Dataset API strips internal frames. Rerun the same suite command above;
 no native rebuild is needed. This fix and the new regression code have not been
 executed by the assistant and await user validation.
+
+## Second suite result and bounded-reference retention
+
+The user's next suite passed copy (4.676 s), protected no-failure (27.822 s),
+and read-task head failure (6.847 s). Each passed case validated 16 final blocks,
+58,240 rows, and all 48 tasks/stream closures, with zero reported spilling.
+Read-task head failure replayed ReadRange task 0, replaced the head in 2.282 s,
+and completed materialization 5.932 s after the failure request. The remaining
+47 tasks in that case were coordinator-owned submissions after owner loss.
+
+Map-stage head failure still failed: the native adoption guard reported
+`Streaming task has conflicting or unlisted references`. Four tasks had replayed
+before the error (two reads and one task in each map stage); this is not a passing
+run. The JSON did not identify the rejected task or reference, so it does not
+establish the exact alias responsible.
+
+The bounded adapter previously removed both consumed return refs from recovery
+tracking immediately after copying, before EOF/closure. Independent output copies
+do not establish that all scheduler/RPC/buffer aliases of the originals have gone
+out of scope. The bounded path now retains its two native returns in the consumer
+through closure. If recovery occurs in this interval, its snapshot includes both
+consumed returns, while downstream still receives only coordinator-owned copies.
+The native whole-task reference validation and single-replay rule are unchanged;
+declared-count streaming keeps its existing incremental release behavior.
+This can retain a task envelope longer, within the existing per-task payload limit;
+it does not impose a cluster-wide memory bound.
+
+New regression code injects head failure after copying an empty or multi-block
+envelope and before EOF, with local original-ref aliases deliberately retained.
+It checks replay, no duplicate output, value validation, and eventual release.
+Recovery failures now record the task ID, cursor, retained return IDs, available
+native reference counts, and the internal traceback directly in operator metrics.
+This avoids relying solely on callbacks that shutdown may fail to reach.
+
+No builds, tests, lint, or benchmarks were run by the assistant. Rerun the map case
+first with `--recovery-mode fixed_r_head_failure --recovery-failure-stage map` and
+a separate JSON filename; the full suite remains the follow-up validation gate.
+These are Python changes and reuse the existing native build. The retention fix
+remains unvalidated until that rerun.
