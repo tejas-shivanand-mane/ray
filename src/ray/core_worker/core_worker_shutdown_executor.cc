@@ -253,6 +253,9 @@ void CoreWorkerShutdownExecutor::ExecuteExit(
         "CoreWorker.DrainAndShutdown");
   };
 
+  // A stream still waiting for enrollment has no submitter that can complete
+  // it. Settle these tasks before waiting for TaskManager to drain.
+  core_worker->CancelUnreadyRecoveryStreamSubmissions();
   core_worker->task_manager_->DrainAndShutdown(drain_references_callback);
 }
 

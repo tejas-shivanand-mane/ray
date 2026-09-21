@@ -34,6 +34,7 @@
 #include "absl/synchronization/mutex.h"
 #include "ray/asio/periodical_runner_interface.h"
 #include "ray/common/buffer.h"
+#include "ray/common/streaming_recovery/streaming_recovery.h"
 #include "ray/core_worker/actor_management/actor_handle.h"
 #include "ray/core_worker/actor_management/actor_manager.h"
 #include "ray/core_worker/common.h"
@@ -1046,6 +1047,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   /// i.e., Python async actors.
   /// \param[in] call_site The stacktrace of the task invocation, or actor
   /// creation. This is only used for observability.
+  /// \param[out] submission_status Optional synchronous enrollment status. Invalid
+  /// experimental enrollment returns no refs and registers no pending task.
   /// \return ObjectRefs returned by this task.
   std::vector<rpc::ObjectReference> SubmitTask(
       const RayFunction &function,
@@ -1057,7 +1060,17 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
       const std::string &debugger_breakpoint,
       const std::string &serialized_retry_exception_allowlist = "",
       const std::string &call_site = "",
-      const TaskID current_task_id = TaskID::Nil());
+      const TaskID current_task_id = TaskID::Nil(),
+      Status *submission_status = nullptr);
+
+  // Internal owner-side enrollment APIs. The returned descriptor is an OFFER;
+  // ready becomes true only after all holder ACKs and consumer receipt.
+  Status GetStreamingRecoverySubmission(const ObjectID &generator_id,
+                                       std::string *descriptor,
+                                       bool *ready) const;
+  Status ConfirmStreamingRecoveryReceipt(const ObjectID &generator_id,
+                                        const std::string &descriptor,
+                                        const std::string &consumer_address);
 
   /// Create an actor.
   ///
@@ -2363,6 +2376,30 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
   mutable absl::flat_hash_map<
       TaskID, std::shared_ptr<RecoveryFrontierPublicationState>>
       recovery_frontier_publications_;
+
+  struct RecoveryStreamSubmission {
+    rpc::TaskSpec recipe;
+    RecoveryStreamInstallation installation;
+    Status status;
+    bool dispatch_scheduled = false;
+    bool submitted = false;
+    bool cancelled = false;
+  };
+  mutable std::mutex recovery_stream_submission_mutex_;
+  absl::flat_hash_map<TaskID, std::shared_ptr<RecoveryStreamSubmission>>
+      recovery_stream_submissions_;
+
+  Status PrepareRecoveryStreamSubmission(TaskSpecification *spec,
+                                        const TaskOptions &options);
+  void PublishRecoveryStreamSubmission(const TaskSpecification &spec);
+  void MaybeDispatchRecoveryStream(const TaskID &task_id,
+                                  const std::shared_ptr<RecoveryStreamSubmission> &state);
+  bool CancelRecoveryStreamSubmission(const ObjectID &generator_id,
+                                     bool force_kill = false,
+                                     bool recursive = true,
+                                     bool only_if_unready = false);
+  void RetireRecoveryStreamSubmission(const ObjectID &generator_id);
+  void CancelUnreadyRecoveryStreamSubmissions();
 
   absl::flat_hash_set<TaskID> recovery_tombstones_in_flight_;
 

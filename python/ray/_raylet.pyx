@@ -3885,7 +3885,8 @@ cdef class CoreWorker:
                     c_bool enable_task_events,
                     labels,
                     label_selector,
-                    fallback_strategy):
+                    fallback_strategy,
+                    streaming_recovery=None):
         cdef:
             unordered_map[c_string, double] c_resources
             unordered_map[c_string, c_string] c_labels
@@ -3893,6 +3894,9 @@ cdef class CoreWorker:
             c_vector[CFallbackOption] c_fallback_strategy
             CRayFunction ray_function
             CTaskOptions task_options
+            CRayStatus submission_status
+            c_string recovery_consumer_address
+            CAddress recovery_consumer
             c_vector[unique_ptr[CTaskArg]] args_vector
             c_vector[CObjectReference] return_refs
             CSchedulingStrategy c_scheduling_strategy
@@ -3901,6 +3905,14 @@ cdef class CoreWorker:
             CTaskID current_c_task_id
             TaskID current_task = self.get_current_task_id()
             c_string call_site
+
+        if streaming_recovery is not None:
+            from ray._common.ray_option_utils import task_options as option_definitions
+            option_definitions["_streaming_recovery"].validate(
+                "_streaming_recovery", streaming_recovery)
+            recovery_consumer_address = streaming_recovery["consumer_address"]
+            if not recovery_consumer.ParseFromString(recovery_consumer_address):
+                raise ValueError("Malformed streaming consumer address")
 
         self.python_scheduling_strategy_to_c(
             scheduling_strategy, &c_scheduling_strategy)
@@ -3941,6 +3953,11 @@ cdef class CoreWorker:
                 NULL_TENSOR_TRANSPORT,
                 c_fallback_strategy)
 
+            if streaming_recovery is not None:
+                task_options.recovery_stream_expected_returns = (
+                    streaming_recovery["expected_returns"])
+                task_options.recovery_stream_consumer = recovery_consumer
+
             current_c_task_id = current_task.native()
 
             with nogil:
@@ -3952,6 +3969,7 @@ cdef class CoreWorker:
                     serialized_retry_exception_allowlist,
                     call_site,
                     current_c_task_id,
+                    &submission_status,
                 )
 
             # These arguments were serialized and put into the local object
@@ -3962,6 +3980,10 @@ cdef class CoreWorker:
             for put_arg_id in incremented_put_arg_ids:
                 CCoreWorkerProcess.GetCoreWorker().RemoveLocalReference(
                     put_arg_id)
+
+            # Failed enrollment acquired no pending refs. Release temporary put
+            # arguments above before propagating the native validation error.
+            check_status(submission_status)
 
             # The initial local reference is already acquired internally when
             # adding the pending task.
@@ -5229,6 +5251,27 @@ cdef class CoreWorker:
                 task_id,
                 make_optional[ObjectIDIndexType](
                     <int>1 + <int>return_size + <int>generator_index))
+
+    def get_streaming_recovery_address(self):
+        return CCoreWorkerProcess.GetCoreWorker().GetRpcAddress().SerializeAsString()
+
+    def get_streaming_recovery_submission(self, ObjectRef generator_id):
+        cdef CObjectID c_generator_id = generator_id.native()
+        cdef c_string descriptor
+        cdef c_bool ready
+        with nogil:
+            check_status(CCoreWorkerProcess.GetCoreWorker().GetStreamingRecoverySubmission(
+                c_generator_id, &descriptor, &ready))
+        return descriptor, ready
+
+    def confirm_streaming_recovery_receipt(
+            self, ObjectRef generator_id, bytes descriptor, bytes consumer_address):
+        cdef CObjectID c_generator_id = generator_id.native()
+        cdef c_string c_descriptor = descriptor
+        cdef c_string c_consumer_address = consumer_address
+        with nogil:
+            check_status(CCoreWorkerProcess.GetCoreWorker().ConfirmStreamingRecoveryReceipt(
+                c_generator_id, c_descriptor, c_consumer_address))
 
     def async_delete_object_ref_stream(self, ObjectRef generator_id):
         cdef:

@@ -111,3 +111,17 @@ python -m pytest -q python/ray/tests/test_streaming_generator.py
 
 README is unchanged. The previous native/build passes do not validate these
 new bindings or this consumer-state component.
+
+### Subsequent user validation
+
+At published checkpoint `ef65547300ff1b7e26212852725b1520799e9c1c`, the user
+reported a successful full Ray compilation and:
+
+```text
+python -m pytest -q python/ray/tests/test_streaming_recovery_consumer.py
+19 passed in 0.05s
+```
+
+This validates the consumer-state checkpoint. The next enrollment/submission
+changes and their local-cluster tests are described separately in
+`STREAMING_RECOVERY_SUBMISSION_STEP.md`.

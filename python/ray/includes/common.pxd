@@ -231,7 +231,7 @@ cdef extern from "src/ray/protobuf/common.pb.h" nogil:
     cdef cppclass CAddress "ray::rpc::Address":
         CAddress()
         const c_string &SerializeAsString() const
-        void ParseFromString(const c_string &serialized)
+        c_bool ParseFromString(const c_string &serialized)
         void CopyFrom(const CAddress& address)
         const c_string &worker_id()
     cdef cppclass CObjectReference "ray::rpc::ObjectReference":
@@ -379,6 +379,8 @@ cdef extern from "ray/core_worker/common.h" nogil:
         CTaskArgByValue(const shared_ptr[CRayObject] &data)
 
     cdef cppclass CTaskOptions "ray::core::TaskOptions":
+        int64_t recovery_stream_expected_returns
+        CAddress recovery_stream_consumer
         CTaskOptions()
         CTaskOptions(c_string name, int num_returns,
                      unordered_map[c_string, double] &resources,

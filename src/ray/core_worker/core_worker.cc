@@ -3539,7 +3539,11 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
     const std::string &debugger_breakpoint,
     const std::string &serialized_retry_exception_allowlist,
     const std::string &call_site,
-    const TaskID current_task_id) {
+    const TaskID current_task_id,
+    Status *submission_status) {
+  if (submission_status != nullptr) {
+    *submission_status = Status::OK();
+  }
   const bool profile_normal_submit = normal_submit_stage_profiling_enabled_;
   const uint64_t normal_submit_start_ns =
       profile_normal_submit ? RecoveryProfileNowNs() : 0;
@@ -3620,6 +3624,16 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
                             root_detached_actor_id);
 
   TaskSpecification task_spec = std::move(builder).ConsumeAndBuild();
+  const bool enrolled_stream = task_options.recovery_stream_expected_returns >= 0;
+  if (enrolled_stream) {
+    const Status status = PrepareRecoveryStreamSubmission(&task_spec, task_options);
+    if (!status.ok()) {
+      if (submission_status != nullptr) {
+        *submission_status = status;
+      }
+      return {};
+    }
+  }
   RAY_LOG(DEBUG) << "Submitting normal task " << task_spec.DebugString();
   const uint64_t normal_submit_finalize_done_ns =
       profile_normal_submit ? RecoveryProfileNowNs() : 0;
@@ -3740,8 +3754,10 @@ std::vector<rpc::ObjectReference> CoreWorker::SubmitTask(
   const uint64_t normal_submit_owner_setup_done_ns =
       profile_normal_submit ? RecoveryProfileNowNs() : 0;
 
-  if (defer_recovery_frontier_dispatch &&
-      !deferred_recovery_frontier_groups.empty()) {
+  if (enrolled_stream) {
+    PublishRecoveryStreamSubmission(task_spec);
+  } else if (defer_recovery_frontier_dispatch &&
+             !deferred_recovery_frontier_groups.empty()) {
     const TaskID deferred_task_id = task_spec.TaskId();
     std::vector<DeferredRecoveryFrontierGroup> groups_to_start;
 
@@ -4317,6 +4333,10 @@ Status CoreWorker::CancelTask(const ObjectID &object_id,
         << obj_addr.SerializeAsString();
     normal_task_submitter_->RequestOwnerToCancelTask(
         object_id, obj_addr, force_kill, recursive);
+    return Status::OK();
+  }
+
+  if (CancelRecoveryStreamSubmission(object_id, force_kill, recursive)) {
     return Status::OK();
   }
 
@@ -4919,6 +4939,7 @@ Status CoreWorker::SealReturnObject(const ObjectID &return_id,
 
 void CoreWorker::AsyncDelObjectRefStream(const ObjectID &generator_id) {
   RAY_LOG(DEBUG).WithField(generator_id) << "AsyncDelObjectRefStream";
+  RetireRecoveryStreamSubmission(generator_id);
   if (task_manager_->TryDelObjectRefStream(generator_id)) {
     return;
   }

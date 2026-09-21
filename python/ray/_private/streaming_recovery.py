@@ -4,6 +4,8 @@ Internal integration component, not an owner-loss API. A trusted transport must
 complete the all-R enrollment gate, forward owner reads, obtain witness claims,
 and adopt/dispatch the replay before attaching its local ObjectRefGenerator.
 State lives on the designated surviving consumer and cannot be serialized.
+StreamingRecoveryOwner connects the original submission to the enrollment gate;
+claim/replay transport still belongs to the next integration step.
 """
 
 from dataclasses import dataclass
@@ -24,6 +26,82 @@ class StreamingRecoveryStateError(RuntimeError):
 
 class StreamingRecoveryCountError(StreamingRecoveryStateError):
     """The producer ended early or yielded beyond its declared count."""
+
+
+def streaming_recovery_address() -> bytes:
+    """Address of this worker, for the explicit designated-consumer handshake."""
+    worker = ray._private.worker.global_worker
+    worker.check_connected()
+    return worker.core_worker.get_streaming_recovery_address()
+
+
+class StreamingRecoveryOwner:
+    """Hold the original generator through explicit Fixed-R enrollment and EOF.
+
+    The consumer must construct/retain its state before acknowledging receipt.
+    Keep this owner handle alive until the consumer releases the stream; dropping
+    it cancels the native task/enrollment and publishes cancellation tombstones.
+    It cannot be passed to another worker. Transfer only its offered descriptor.
+    """
+
+    @classmethod
+    def submit(
+        cls,
+        producer,
+        *,
+        expected_returns,
+        consumer_address,
+        args=(),
+        kwargs=None,
+        **task_options,
+    ):
+        generator = producer.options(
+            **task_options,
+            _streaming_recovery={
+                "expected_returns": expected_returns,
+                "consumer_address": consumer_address,
+            },
+        ).remote(*args, **(kwargs or {}))
+        return cls(generator)
+
+    def __init__(self, generator):
+        self._generator = generator
+        self._worker = ray._private.worker.global_worker
+        self._worker.check_connected()
+        # Confirms this is a locally enrolled generator, not an ordinary stream.
+        self.submission()
+
+    def submission(self):
+        """Return (offered descriptor bytes, all-R/receipt readiness)."""
+        if self._generator is None:
+            raise StreamingRecoveryStateError("The owner handle is closed")
+        return self._worker.core_worker.get_streaming_recovery_submission(
+            self._generator.completed()
+        )
+
+    def confirm_receipt(self, descriptor: bytes, consumer_address: bytes) -> None:
+        if self._generator is None:
+            raise StreamingRecoveryStateError("The owner handle is closed")
+        self._worker.core_worker.confirm_streaming_recovery_receipt(
+            self._generator.completed(), descriptor, consumer_address
+        )
+
+    def next_ref(self):
+        """Read one original item only after the enrollment barrier succeeds."""
+        _, ready = self.submission()
+        if not ready:
+            raise StreamingRecoveryStateError("Streaming enrollment is not ready")
+        return next(self._generator)
+
+    def close(self) -> None:
+        if self._generator is not None:
+            try:
+                ray.cancel(self._generator, force=False, recursive=True)
+            finally:
+                self._generator = None
+
+    def __reduce__(self):
+        raise TypeError("The original streaming owner handle cannot be transferred")
 
 
 @dataclass(frozen=True, eq=False)

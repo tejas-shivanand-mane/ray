@@ -147,7 +147,14 @@ cdef extern from "ray/core_worker/core_worker.h" nogil:
             c_string debugger_breakpoint,
             c_string serialized_retry_exception_allowlist,
             c_string call_site,
-            const CTaskID current_task_id)
+            const CTaskID current_task_id,
+            CRayStatus *submission_status)
+        CRayStatus GetStreamingRecoverySubmission(
+            const CObjectID &generator_id, c_string *descriptor, c_bool *ready) const
+        CRayStatus ConfirmStreamingRecoveryReceipt(
+            const CObjectID &generator_id,
+            const c_string &descriptor,
+            const c_string &consumer_address)
         CRayStatus CreateActor(
             const CRayFunction &function,
             const c_vector[unique_ptr[CTaskArg]] &args,

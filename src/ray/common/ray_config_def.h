@@ -206,8 +206,9 @@ RAY_CONFIG(bool, enable_recovery_succession, false)
 /// This flag has an effect only when enable_recovery_succession=true.
 RAY_CONFIG(bool, enable_recovery_witness_holder_baseline, false)
 
-/// Accept the bounded streaming descriptor/claim protocol at Fixed-R witnesses.
-/// This does not enable automatic streaming enrollment or a Python adapter.
+/// Accept the bounded streaming descriptor/claim protocol at Fixed-R witnesses
+/// and permit explicit _streaming_recovery task enrollment. Ordinary streaming
+/// tasks remain outside recovery; consumer claim/replay transport is separate.
 RAY_CONFIG(bool, enable_recovery_streaming_fixed_r, false)
 
 /// Serialize complete baseline lineage once at activation and transport those

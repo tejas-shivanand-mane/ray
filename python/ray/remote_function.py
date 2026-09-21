@@ -542,6 +542,7 @@ class RemoteFunction:
                 labels,
                 label_selector,
                 fallback_strategy,
+                task_options["_streaming_recovery"],
             )
             # Reset worker's debug context from the last "remote" command
             # (which applies only to this .remote call).

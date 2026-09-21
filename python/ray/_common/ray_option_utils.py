@@ -43,6 +43,19 @@ class Option:
                 raise ValueError(possible_error_message)
 
 
+def _validate_streaming_recovery(value):
+    if value is None:
+        return None
+    if set(value) != {"expected_returns", "consumer_address"}:
+        return "_streaming_recovery requires expected_returns and consumer_address"
+    count = value["expected_returns"]
+    if type(count) is not int or not 0 <= count < 2**63:
+        return "Streaming expected_returns must be a nonnegative int64"
+    if not isinstance(value["consumer_address"], bytes) or not value["consumer_address"]:
+        return "Streaming consumer_address must be serialized address bytes"
+    return None
+
+
 def _counting_option(name: str, infinite: bool = True, default_value: Any = None):
     """This is used for positive and discrete options.
 
@@ -209,6 +222,10 @@ _task_only_options = {
         )
         else "retry_exceptions must be either a boolean or a list of exceptions",
         default_value=False,
+    ),
+    # Internal bounded Fixed-R submission: dispatch waits for enrollment receipt.
+    "_streaming_recovery": Option(
+        (dict, type(None)), _validate_streaming_recovery, default_value=None
     ),
     "_generator_backpressure_num_objects": Option(
         (int, type(None)),
