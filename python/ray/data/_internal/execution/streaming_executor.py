@@ -227,6 +227,10 @@ class StreamingExecutor(Executor, threading.Thread):
                     ),
                 )
 
+        from ray.data._internal.execution.streaming_recovery import validate_execution
+
+        validate_execution(dag, self._data_context)
+
         # Setup the streaming DAG topology and start the runner thread.
         self._block_ref_counter = BlockRefCounter()
         self._topology = build_streaming_topology(

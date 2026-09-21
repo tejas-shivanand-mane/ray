@@ -615,12 +615,6 @@ def process_completed_tasks(
     Returns:
         The number of errored blocks.
     """
-    # All active tasks, keyed by their waitables.
-    active_tasks: Dict[Waitable, Tuple[OpState, OpTask]] = {}
-    for op, state in topology.items():
-        for task in op.get_active_tasks():
-            active_tasks[task.get_waitable()] = (state, task)
-
     remaining_output_budget: Dict[OpState, int] = {}
     for op, state in topology.items():
         # Check all backpressure policies for max_task_output_bytes_to_read
@@ -655,6 +649,21 @@ def process_completed_tasks(
 
         if max_bytes_to_read is not None:
             remaining_output_budget[state] = max_bytes_to_read
+
+    # A protected Data reader can consume one ref on its owner when asked for
+    # a waitable. Compute budgets before initiating those reads. Ordinary task
+    # waitables retain their existing behavior, including metadata tasks at zero
+    # output budget.
+    active_tasks: Dict[Waitable, Tuple[OpState, OpTask]] = {}
+    for op, state in topology.items():
+        for task in op.get_active_tasks():
+            if (
+                getattr(task, "requires_output_budget_before_wait", False) is True
+                and remaining_output_budget.get(state) == 0
+            ):
+                task._track_task_output_backpressure(0)
+                continue
+            active_tasks[task.get_waitable()] = (state, task)
 
     # Process completed Ray tasks and notify operators.
     num_errored_blocks = 0

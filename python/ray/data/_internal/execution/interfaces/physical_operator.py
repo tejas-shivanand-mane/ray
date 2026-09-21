@@ -457,7 +457,11 @@ class DataOpTask(OpTask):
         self._pending_emit_count -= 1
 
     def produce_block(
-        self, block_ref: "ray.ObjectRef[Block]", meta_bytes: bytes
+        self,
+        block_ref: "ray.ObjectRef[Block]",
+        meta_bytes: bytes,
+        *,
+        owns_blocks: bool = True,
     ) -> int:
         """Deserialize ``meta_bytes``, emit the block's ``RefBundle``, and
         return ``meta.size_bytes`` (the inline mode's output-budget size).
@@ -466,7 +470,9 @@ class DataOpTask(OpTask):
         is reserved for "pair not consumed, retry", and this method has already
         emitted the block. In practice ``RefBundle`` requires a known
         ``size_bytes`` (the emit raises otherwise), so the ``or 0`` is
-        defensive."""
+        defensive. ``owns_blocks=False`` disables Data's eager-free permission;
+        it does not change the block's native ObjectRef owner.
+        """
         meta_with_schema: BlockMetadataWithSchema = pickle.loads(meta_bytes)
         meta = meta_with_schema.metadata
         self._block_ref_counter.on_block_produced(
@@ -475,7 +481,7 @@ class DataOpTask(OpTask):
         self._output_ready_callback(
             RefBundle(
                 [BlockEntry(block_ref, meta)],
-                owns_blocks=True,
+                owns_blocks=owns_blocks,
                 schema=meta_with_schema.schema,
             ),
         )

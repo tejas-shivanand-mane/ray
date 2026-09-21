@@ -607,6 +607,7 @@ class MapOperator(InternalQueueOperatorMixin, OneToOneOperator, ABC):
         gen: ObjectRefGenerator,
         inputs: RefBundle,
         task_done_callback: Optional[Callable[[], None]] = None,
+        task_factory=DataOpTask,
     ):
         """Submit a new data-handling task."""
         # TODO(hchen):
@@ -662,7 +663,7 @@ class MapOperator(InternalQueueOperatorMixin, OneToOneOperator, ABC):
             if task_done_callback:
                 task_done_callback()
 
-        data_task = DataOpTask(
+        data_task = task_factory(
             task_index,
             gen,
             self._block_ref_counter,

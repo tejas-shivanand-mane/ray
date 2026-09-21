@@ -22,6 +22,12 @@ from ray.data._internal.execution.operators.map_operator import (
     _map_task,
 )
 from ray.data._internal.execution.operators.map_transformer import MapTransformer
+from ray.data._internal.execution.streaming_recovery import (
+    StreamingRecoveryDataOpTask,
+    get_config as get_recovery_config,
+    new_metrics as new_recovery_metrics,
+    submit_stream,
+)
 from ray.data._internal.remote_fn import cached_remote_fn
 from ray.data.context import DataContext
 
@@ -83,6 +89,11 @@ class TaskPoolMapOperator(MapOperator):
                 with a default logical ``memory``. The method for choosing the
                 default is an implementation detail.
         """
+        self._streaming_recovery_config = get_recovery_config(data_context)
+        self._streaming_recovery_metrics = new_recovery_metrics()
+        if self._streaming_recovery_config is not None:
+            supports_fusion = False
+
         super().__init__(
             map_transformer,
             input_op,
@@ -187,14 +198,26 @@ class TaskPoolMapOperator(MapOperator):
                 2 * self.data_context._max_num_blocks_in_streaming_gen_buffer
             )
 
-        gen = self._map_task.options(**dynamic_ray_remote_args).remote(
+        args = (
             self._map_transformer_ref,
             self._data_context_ref,
             ctx,
             *bundle.block_refs,
+        )
+        kwargs = dict(
             slices=bundle.slices,
             **self.get_map_task_kwargs(),
         )
+        config = self._streaming_recovery_config
+        if config is None:
+            gen = self._map_task.options(**dynamic_ray_remote_args).remote(*args, **kwargs)
+        else:
+            if self.name not in config.expected_blocks:
+                raise ValueError(f"No Fixed-R output count declared for {self.name!r}")
+            gen = submit_stream(
+                config, self._map_task, args, kwargs, dynamic_ray_remote_args,
+                config.expected_blocks[self.name], self._streaming_recovery_metrics,
+            )
 
         self._current_logical_usage = self._current_logical_usage.add(logical_usage)
 
@@ -203,7 +226,27 @@ class TaskPoolMapOperator(MapOperator):
                 logical_usage
             )
 
-        self._submit_data_task(gen, bundle, task_done_callback=task_done_callback)
+        if config is None:
+            self._submit_data_task(gen, bundle, task_done_callback=task_done_callback)
+        else:
+            try:
+                self._submit_data_task(
+                    gen, bundle, task_done_callback=task_done_callback,
+                    task_factory=StreamingRecoveryDataOpTask,
+                )
+            except BaseException:
+                self._current_logical_usage = self._current_logical_usage.subtract(
+                    logical_usage
+                )
+                gen.close()
+                raise
+
+    def _extra_metrics(self):
+        metrics = super()._extra_metrics()
+        if self._streaming_recovery_config is not None:
+            metrics.update(self._streaming_recovery_metrics)
+            metrics["fixed_r_output_mode"] = self._streaming_recovery_config.mode
+        return metrics
 
     def progress_str(self) -> str:
         return ""
