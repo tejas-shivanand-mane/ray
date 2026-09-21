@@ -129,3 +129,32 @@ Enrollment failure after `begin` may have run still fails closed.
 Actor-based worker scaling, training-prefetch/streaming_split, shuffles,
 stateful/side-effecting tasks, arbitrary read-source recovery, and Succession
 streaming recovery are not implemented or established by this change.
+
+## Reported validation and test setup fixes
+
+The user reported **100 passed, 2 failed** in the Python regression batch at
+`e607e49`. Source inspection identified two test setup defects:
+
+- The actor rejection test passed `1` positionally to the keyword-only
+  `ActorPoolStrategy` constructor. It now uses `size=1` so execution reaches the
+  intended unsupported-plan check.
+- The copied-return lifetime test used a `Mock` core worker. `ObjectRef`
+  construction calls `add_object_ref_reference(self)`, whose recorded mock call
+  retained an unintended strong alias. A plain stub now handles registration,
+  removal, and release checks without retaining the ObjectRef. Assertions still
+  require retaining real Python aliases and native holds before releasing.
+
+These corrections change tests only; no recovery runtime or native changes and
+no rebuild are required. The assistant did not execute tests. After pulling,
+rerun the two failed tests, then resume the benchmark suites:
+
+```bash
+python -m pytest -q --tb=long \
+  python/ray/tests/test_fixed_r_automatic_data.py::test_actor_map_is_rejected_before_execution \
+  python/ray/tests/test_fixed_r_streaming_data.py::test_copied_return_keeps_python_and_native_aliases && \
+bash gossip_benchmarks/validate_fixed_r_streaming_datasets.sh --benchmarks-only
+```
+
+`--benchmarks-only` skips native and Python regression stages; the default script
+still runs the full batch. No standalone benchmark-suite results have been
+reported yet for this streaming update.

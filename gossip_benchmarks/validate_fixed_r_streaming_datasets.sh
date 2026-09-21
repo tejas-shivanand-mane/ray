@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # Run from the ray-dev environment AFTER rebuilding this checkout's native Ray.
 set -euo pipefail
+if [[ $# -gt 1 || ( $# -eq 1 && "${1:-}" != "--benchmarks-only" ) ]]; then
+  echo "Usage: $0 [--benchmarks-only]" >&2
+  exit 2
+fi
 cd "$(dirname "$0")/.."
 result_dir="${RAY_RECOVERY_OUTPUT_DIR:-/tmp/fixed-r-streaming-datasets}"
 mkdir -p "$result_dir"
 
-bazel test //src/ray/common/streaming_recovery:streaming_recovery_test \
-  //src/ray/core_worker/tests:task_manager_test --test_output=errors
+if [[ "${1:-}" != "--benchmarks-only" ]]; then
+  bazel test //src/ray/common/streaming_recovery:streaming_recovery_test \
+    //src/ray/core_worker/tests:task_manager_test --test_output=errors
 
-python -m pytest -q --tb=long \
-  python/ray/tests/test_streaming_recovery_consumer.py \
-  python/ray/tests/test_streaming_recovery_submission.py \
-  python/ray/tests/test_streaming_recovery_owner_loss.py \
-  python/ray/tests/test_fixed_r_automatic_data.py \
-  python/ray/tests/test_fixed_r_streaming_data.py
+  python -m pytest -q --tb=long \
+    python/ray/tests/test_streaming_recovery_consumer.py \
+    python/ray/tests/test_streaming_recovery_submission.py \
+    python/ray/tests/test_streaming_recovery_owner_loss.py \
+    python/ray/tests/test_fixed_r_automatic_data.py \
+    python/ray/tests/test_fixed_r_streaming_data.py
+fi
 
 TEST_OUTPUT_JSON="$result_dir/worker-scaling.json" \
 python release/nightly_tests/dataset/worker_scaling_benchmark.py \

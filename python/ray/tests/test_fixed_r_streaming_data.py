@@ -3,7 +3,6 @@
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import ray
@@ -11,8 +10,22 @@ from ray.data._internal.execution.streaming_recovery import StreamingRecoveryDat
 
 
 def test_copied_return_keeps_python_and_native_aliases(monkeypatch):
-    core = Mock()
-    core.try_release_streaming_recovery_return.return_value = True
+    release_attempts = []
+    releasable = False
+
+    def try_release(ref):
+        # Record only the ID: retaining the ObjectRef would change this test.
+        release_attempts.append(ref.hex())
+        return releasable
+
+    # ObjectRef construction calls add_object_ref_reference(self). A Mock
+    # records that argument and becomes an unintended strong Python alias,
+    # even if the release method itself is replaced with a plain callable.
+    core = SimpleNamespace(
+        add_object_ref_reference=lambda ref: None,
+        remove_object_ref_reference=lambda ref: None,
+        try_release_streaming_recovery_return=try_release,
+    )
     monkeypatch.setattr(ray._private.worker.global_worker, "core_worker", core, raising=False)
     retained = {0: ray.ObjectRef.from_random()}
     consumer = SimpleNamespace(_retained=retained, phase="forwarding",
@@ -23,14 +36,14 @@ def test_copied_return_keeps_python_and_native_aliases(monkeypatch):
     alias = retained[0]
     task._release_unused_copies()
     assert 0 in retained
-    core.try_release_streaming_recovery_return.assert_not_called()
+    assert not release_attempts
     del alias
-    # Use a plain callable: Mock would retain its argument as an extra alias.
-    core.try_release_streaming_recovery_return = lambda ref: False
     task._release_unused_copies()
     assert 0 in retained
-    core.try_release_streaming_recovery_return = lambda ref: True
+    assert len(release_attempts) == 1
+    releasable = True
     task._release_unused_copies()
+    assert len(release_attempts) == 2
     assert not retained
     assert not task._copied_return_indices
 

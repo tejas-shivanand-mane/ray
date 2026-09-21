@@ -180,7 +180,9 @@ def test_actor_map_is_rejected_before_execution(benchmark_modules):
         context.enable_fixed_r_task_recovery = True
         context.fixed_r_task_recovery_output_mode = "buffered"
         with DataContext.current(context):
-            ds = ray.data.range(4).map_batches(Identity, compute=ray.data.ActorPoolStrategy(1))
+            ds = ray.data.range(4).map_batches(
+                Identity, compute=ray.data.ActorPoolStrategy(size=1)
+            )
             with pytest.raises(ValueError, match="task-map chains"):
                 ds.materialize()
 
