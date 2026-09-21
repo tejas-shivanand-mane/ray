@@ -462,7 +462,7 @@ message FreeLocalObjectsReply {}
 
 // Local raylet barrier after checked consumer adoption and before replay.
 message PrepareStreamingRecoveryRequest {
-  RecoveryStreamDescriptor descriptor = 1;
+  RecoveryStreamDescriptor stream_descriptor = 1;
   repeated bytes object_ids = 2;
 }
 message PrepareStreamingRecoveryReply {}

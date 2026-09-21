@@ -4866,7 +4866,7 @@ void NodeManager::HandlePrepareStreamingRecovery(
     rpc::PrepareStreamingRecoveryRequest request,
     rpc::PrepareStreamingRecoveryReply *reply,
     rpc::SendReplyCallback send_reply_callback) {
-  const auto &descriptor = request.descriptor();
+  const auto &descriptor = request.stream_descriptor();
   if (!RayConfig::instance().enable_recovery_streaming_fixed_r() ||
       !RayConfig::instance().enable_recovery_succession() ||
       !RayConfig::instance().enable_recovery_witness_holder_baseline() ||

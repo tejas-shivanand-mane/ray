@@ -155,7 +155,7 @@ Status CoreWorker::RecoverStreamingTask(
     return fail_after_adoption(Status::Invalid("Local streaming raylet is unavailable"));
   }
   rpc::PrepareStreamingRecoveryRequest barrier;
-  barrier.mutable_descriptor()->CopyFrom(descriptor);
+  barrier.mutable_stream_descriptor()->CopyFrom(descriptor);
   for (const auto &id : adopted_ids) {
     barrier.add_object_ids(id.Binary());
   }
