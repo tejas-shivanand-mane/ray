@@ -444,6 +444,64 @@ TEST_F(StreamingRecoveryTest, RestoresCursorOwnershipAndBackpressure) {
                           spec.StreamingGeneratorReturnId(3)});
 }
 
+TEST_F(StreamingRecoveryTest, PlasmaReportsPublishLocationsWithoutCreationNotifications) {
+  auto spec = RecoverySpec();
+  const auto generator_id = spec.ReturnId(0);
+  const auto retained = spec.StreamingGeneratorReturnId(0);
+  const auto unread = spec.StreamingGeneratorReturnId(1);
+  const auto executor_node = NodeID::FromRandom();
+  Borrow(retained, GetRandomWorkerAddr());
+  const auto retained_count = reference_counter_->GetAllReferenceCounts().at(retained);
+  rpc::ObjectReference generator_ref;
+  ASSERT_TRUE(manager_.AddPendingStreamingTaskForRecovery(
+      addr_, spec, "recover", 2, 1, {retained}, &generator_ref).ok());
+
+  auto publications = std::make_shared<
+      absl::flat_hash_map<std::string, rpc::WorkerObjectLocationsPubMessage>>();
+  EXPECT_CALL(*publisher_, Publish(::testing::_))
+      .Times(::testing::AnyNumber())
+      .WillRepeatedly([publications](rpc::PubMessage message) {
+        if (message.has_worker_object_locations_message()) {
+          (*publications)[message.key_id()] = message.worker_object_locations_message();
+        }
+      });
+
+  // An old executor report must not advertise a location after adoption.
+  auto stale = GetIntermediateTaskReturn(
+      0, false, generator_id, retained, GenerateRandomBuffer(), true);
+  stale.mutable_worker_addr()->set_node_id(executor_node.Binary());
+  stale.set_attempt_number(0);
+  ASSERT_FALSE(manager_.HandleReportGeneratorItemReturns(stale, [](Status) {}));
+  ASSERT_TRUE(publications->empty());
+
+  for (int64_t index = 0; index < 2; ++index) {
+    const auto id = spec.StreamingGeneratorReturnId(index);
+    auto request = GetIntermediateTaskReturn(
+        index, false, generator_id, id, GenerateRandomBuffer(), true);
+    request.mutable_worker_addr()->set_node_id(executor_node.Binary());
+    request.set_attempt_number(1);
+    // No object-store creation/location notification is injected here: an
+    // existing copy may only have notified the now-dead original owner.
+    ASSERT_EQ(manager_.HandleReportGeneratorItemReturns(request, [](Status) {}),
+              index == 1);
+    ASSERT_TRUE(publications->contains(id.Binary()));
+    const auto &location = publications->at(id.Binary());
+    ASSERT_EQ(location.node_ids_size(), 1);
+    EXPECT_EQ(location.node_ids(0), executor_node.Binary());
+    EXPECT_FALSE(location.pending_creation());
+    rpc::WorkerObjectLocationsPubMessage snapshot;
+    reference_counter_->FillObjectInformation(id, &snapshot);
+    ASSERT_EQ(snapshot.node_ids_size(), 1);
+    EXPECT_EQ(snapshot.node_ids(0), executor_node.Binary());
+  }
+  EXPECT_EQ(reference_counter_->GetAllReferenceCounts().at(retained), retained_count);
+  ObjectID read;
+  ASSERT_TRUE(manager_.TryReadObjectRefStream(generator_id, &read).ok());
+  ASSERT_EQ(read, unread);
+  CompletePendingStreamingTask(spec, addr_, 2);
+  DeleteStreamAndRelease(generator_id, {retained, unread});
+}
+
 TEST_F(StreamingRecoveryTest, EmptyAndBoundaryCursorsWaitForCompletion) {
   for (const auto &[count, cursor] :
        std::vector<std::pair<int64_t, int64_t>>{{0, 0}, {3, 0}, {3, 3}}) {

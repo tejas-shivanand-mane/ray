@@ -1197,11 +1197,13 @@ bool TaskManager::HandleReportGeneratorItemReturns(
   RAY_LOG(DEBUG) << "Received an intermediate result of index " << item_index
                  << " generator_id: " << generator_id;
   auto backpressure_threshold = -1;
+  bool recovery_stream = false;
 
   {
     absl::MutexLock lock(&mu_);
     auto it = submissible_tasks_.find(task_id);
     if (it != submissible_tasks_.end()) {
+      recovery_stream = it->second.recovery_expected_returns_.has_value();
       backpressure_threshold =
           it->second.spec_.EffectiveStreamingGeneratorOwnerBackpressureThreshold();
       if (it->second.spec_.AttemptNumber() > attempt_number) {
@@ -1285,6 +1287,13 @@ bool TaskManager::HandleReportGeneratorItemReturns(
       RAY_LOG(WARNING).WithField(object_id)
           << "Failed to handle streaming dynamic return: " << put_res.status();
     } else if (!put_res.value()) {
+      if (recovery_stream && returned_object.in_plasma()) {
+        // Replay can reuse an existing Plasma copy whose creation notification
+        // went to the original owner. The pin record alone is not included in
+        // location publications, so advertise the executor from this report.
+        reference_counter_.AddObjectLocation(
+            object_id, NodeID::FromBinary(request.worker_addr().node_id()));
+      }
       // HandleTaskReturn returns false when the object was stored in plasma
       // (true means it was inlined into the in-memory store). Remember the
       // plasma-backed reports so they can be failed if the generator task fails

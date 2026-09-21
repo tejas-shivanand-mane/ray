@@ -15,7 +15,7 @@ from ray._private.streaming_recovery import (
 )
 from ray.cluster_utils import Cluster
 from ray.core.generated.common_pb2 import RecoveryStreamDescriptor
-from ray.exceptions import OwnerDiedError
+from ray.exceptions import GetTimeoutError, OwnerDiedError, RayActorError, RaySystemError
 
 
 @ray.remote(num_returns="streaming", max_retries=1)
@@ -40,6 +40,7 @@ def surviving_cluster():
     try:
         cluster.add_node(
             num_cpus=1,
+            include_dashboard=False,
             _system_config={
                 "enable_recovery_succession": True,
                 "enable_recovery_witness_holder_baseline": True,
@@ -89,6 +90,19 @@ def stream(surviving_cluster, tmp_path):
         nonlocal crashed
         cluster.remove_node(node, allow_graceful=False)
         crashed = True
+        # Removing the raylet does not synchronously stop its actor workers.
+        # A surviving owner can otherwise drain the short stream before its
+        # parent-death check runs, so no recovery is exercised at c=0 or c=1.
+        def owner_stopped():
+            try:
+                ray.get(owner.__ray_ready__.remote(), timeout=1)
+            except RayActorError:
+                return True
+            except GetTimeoutError:
+                return False
+            return False
+
+        wait_for_condition(owner_stopped, timeout=60, raise_exceptions=True)
 
     try:
         yield start, crash, tmp_path
@@ -197,11 +211,11 @@ def test_live_owner_and_foreign_consumer_cannot_claim(stream):
     start, _, directory = stream
     reader = start(count=1)
     worker = ray._private.worker.global_worker.core_worker
-    with pytest.raises(Exception, match="owner node is not known dead"):
+    with pytest.raises(GetTimeoutError, match="owner node is not known dead"):
         worker.recover_streaming_task(reader.descriptor, 0, [], 100)
     changed = RecoveryStreamDescriptor.FromString(reader.descriptor)
     changed.consumer_address.port += 1
-    with pytest.raises(ValueError, match="designated consumer"):
+    with pytest.raises(RaySystemError, match="designated consumer"):
         worker.recover_streaming_task(changed.SerializeToString(), 0, [], 100)
     ref = next(reader)
     assert ray.get(ref, timeout=30) == bytes([0]) * 200_000
@@ -221,6 +235,6 @@ def test_acknowledged_close_prevents_replay(stream):
     reader.close()
     crash()
     worker = ray._private.worker.global_worker.core_worker
-    with pytest.raises(ValueError, match="claim is terminal"):
+    with pytest.raises(RaySystemError, match="claim is terminal"):
         worker.recover_streaming_task(descriptor, 0, [], 60_000)
     assert (directory / "attempts").read_text().splitlines() == ["0"]

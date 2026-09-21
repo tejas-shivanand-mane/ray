@@ -119,3 +119,46 @@ consumer claims; and rejection after acknowledged close. Checks compare original
 IDs, cursor, output count/bytes, and exactly the recorded attempts 0 and 1. The
 native directory test injects delayed old-owner success/failure callbacks after
 rebinding and checks that new-owner failures still propagate normally.
+
+## First integration run and follow-up fixes
+
+The user reported the native ownership-directory test passing and the Python
+batch finishing with **41 passed, 7 failed in 244.19s**. The original 37 cases
+passed. Starting from `3497c119d28a25f0f7487d84153ca52bcb2ee9bc`, the follow-up
+addresses three issues exposed by that run:
+
+- Four c=0/c=1 cases completed with only attempt 0 recorded. Removing a local
+  raylet does not synchronously kill its actor workers; the short stream could
+  drain before the owner's periodic parent-death check. The crash fixture now
+  waits for an owner-actor RPC to fail before allowing subsequent reads. The
+  tests continue to require both attempts 0 and 1 and identical IDs/values.
+- The Plasma-sized c=N case reached replay EOF but timed out fetching all three
+  retained refs. Source review found that a reused Plasma copy can have sent its
+  creation notification only to the original owner. Recording its primary pin
+  does not populate the location set published to the new consumer's raylet.
+  Recovery-stream reports now explicitly advertise the reporting executor for
+  Plasma returns. A native regression case checks publication and snapshots for
+  retained and unread returns without injecting a creation notification, and
+  verifies that a stale attempt cannot advertise a location.
+- The foreign-consumer and tombstone checks rejected the requests as intended,
+  but expected ValueError. Ray's binding maps Status::Invalid to RaySystemError;
+  the tests now require that exception and retain their message checks. The
+  live-owner timeout check also requires the specific GetTimeoutError.
+
+The local cluster disables the dashboard frontend, which is unnecessary for
+these tests and was missing from the user's source build. No builds, tests,
+lint, or benchmarks were run by the agent. The large-output timeout still needs
+runtime confirmation after the native fix; the earlier pass does not validate
+these changes. After rebuilding Ray, run the focused native cases and the
+same Python batch:
+
+```bash
+bazel test //src/ray/core_worker/tests:task_manager_test \
+  --test_arg='--gtest_filter=StreamingRecoveryTest.*' \
+  --test_output=errors
+
+python -m pytest -q \
+  python/ray/tests/test_streaming_recovery_consumer.py \
+  python/ray/tests/test_streaming_recovery_submission.py \
+  python/ray/tests/test_streaming_recovery_owner_loss.py
+```
