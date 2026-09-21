@@ -1,9 +1,11 @@
 """Recovery across head replacement with a surviving driver and GCS storage."""
 
+import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -106,7 +108,7 @@ def test_head_failure_suite_preserves_failure_and_continues(monkeypatch):
             self.result[key] = fn(*args, **kwargs)
 
         def write_result(self):
-            saved.append(dict(self.result))
+            saved.append(json.loads(json.dumps(self.result)))
 
     monkeypatch.setattr(harness, "local_head_failure_cluster", fake_cluster)
     monkeypatch.setattr(harness, "run_controlled", fake_run)
@@ -124,3 +126,61 @@ def test_head_failure_suite_preserves_failure_and_continues(monkeypatch):
     assert [result["validation_status"] for result in results] == ["failed", "passed", "passed"]
     assert results[0]["head_failure_requested"]
     assert "Enrollment failed during head loss" in results[0]["traceback"]
+
+
+def test_head_failure_observation_and_replay_details_are_json_serializable(monkeypatch):
+    benchmark_dir = Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
+    monkeypatch.syspath_prepend(str(benchmark_dir))
+    from streaming_recovery_benchmark import _failure_observation, _OutputProgress
+    from ray._private.streaming_recovery import StreamingRecoveryRequired
+    from ray.data._internal.execution.streaming_recovery import (
+        StreamingRecoveryDataOpTask,
+        new_metrics,
+    )
+
+    stats = new_metrics()
+    task_id = ray.TaskID.for_fake_task(ray.JobID.from_int(1))
+    stream = SimpleNamespace(
+        task_id=task_id, next_index=0, expected_returns=2, reader=object(),
+        closed=False, stats=stats,
+        poll=Mock(side_effect=StreamingRecoveryRequired("owner lost")),
+        recover=Mock(),
+    )
+    # A real DataOpTask exposes task_index() as a method. A mock attribute
+    # would hide the exact bug in both the snapshot and replay-record paths.
+    task = StreamingRecoveryDataOpTask(7, stream, Mock(), "test")
+    assert task.on_data_ready(1, Mock()) == 0
+    stream.recover.assert_called_once_with()
+    op = SimpleNamespace(
+        name="MapBatches(consume)", get_active_tasks=lambda: [task],
+        metrics=SimpleNamespace(
+            num_tasks_submitted=8, num_tasks_finished=7, num_tasks_failed=0,
+            num_task_outputs_generated=7, rows_task_outputs_generated=7,
+            extra_metrics=stats,
+        ),
+    )
+    progress = _OutputProgress()
+    progress.record(7)
+    observation = _failure_observation(SimpleNamespace(operators=[op]), progress)
+    decoded = json.loads(json.dumps(observation))
+    details = decoded["operators"][op.name]
+    assert details["active_enrolled_tasks"][0]["task_index"] == 7
+    assert details["fixed_r_recovered_task_details"] == [
+        {"task_index": 7, "task_id": task_id.hex()},
+    ]
+
+
+def test_benchmark_encoding_error_preserves_previous_report(monkeypatch, tmp_path):
+    benchmark_dir = Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
+    monkeypatch.syspath_prepend(str(benchmark_dir))
+    from benchmark import Benchmark
+
+    report = tmp_path / "result.json"
+    previous = '{"early": {"validation_status": "passed"}}'
+    report.write_text(previous)
+    monkeypatch.setenv("TEST_OUTPUT_JSON", str(report))
+    benchmark = Benchmark()
+    benchmark.result = {"middle": {"unexpected_method": benchmark.write_result}}
+    with pytest.raises(TypeError, match="method"):
+        benchmark.write_result()
+    assert report.read_text() == previous

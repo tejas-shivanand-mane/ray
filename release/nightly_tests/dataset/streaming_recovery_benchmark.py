@@ -272,7 +272,7 @@ def _failure_observation(capture, progress):
             stream = getattr(task, "stream", None)
             if stream is not None and stream.reader is not None and not stream.closed:
                 active.append({
-                    "task_index": task.task_index,
+                    "task_index": task.task_index(),
                     "task_id": task.get_task_id().hex(),
                     "accepted_returns": stream.next_index,
                     "declared_returns": stream.expected_returns,

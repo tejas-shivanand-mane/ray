@@ -277,8 +277,11 @@ class Benchmark:
         """
         # 'TEST_OUTPUT_JSON' is set in the release test environment.
         test_output_json = os.environ.get("TEST_OUTPUT_JSON", "./result.json")
+        # Validate serialization before opening with "w", which truncates the
+        # previous report even if encoding a later case's diagnostics fails.
+        serialized_result = json.dumps(self.result)
         with open(test_output_json, "w") as f:
-            f.write(json.dumps(self.result))
+            f.write(serialized_result)
 
         print(f"Finished benchmark, metrics exported to '{test_output_json}':")
         print(json.dumps(self.result, indent=4))

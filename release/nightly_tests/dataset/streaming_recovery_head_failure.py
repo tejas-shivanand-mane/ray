@@ -53,6 +53,9 @@ def run_head_failure_cases(benchmark, args):
             benchmark.result[key]["validation_status"] = "passed"
         except Exception as exc:
             failed.append(name)
+            # Report the original failure before attempting to encode diagnostics.
+            # A reporting error must not be the only traceback visible to users.
+            traceback.print_exc()
             # Never replace a failure with partial-output success. Preserve its
             # phase, task observations and traceback, and exercise later points.
             benchmark.result[key] = {

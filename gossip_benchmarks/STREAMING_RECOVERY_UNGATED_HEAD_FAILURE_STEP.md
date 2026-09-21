@@ -85,3 +85,16 @@ Regression code covers all three ungated points, forbids gate creation in those
 integration cases, checks replay accounting, and checks that the suite persists
 an error and continues through the remaining cases. Source inspection only:
 no builds, tests, lint, benchmarks, rendering, or Actions were run by the agent.
+
+## Reporting correction after the first user run
+
+The first suite run reported `Object of type method is not JSON serializable`.
+Both the active-task observation and the replay identity record mistakenly
+stored `task_index` instead of calling `task_index()`. Both now store integers.
+The suite also prints the original exception before writing its diagnostics,
+and the benchmark writer encodes before opening/truncating an existing report.
+Regression code uses a real DataOpTask to JSON-round-trip both records and
+checks preservation of an earlier report on encoding failure. These tests
+remain unrun by the agent. This fixes reporting; the underlying Dataset failure
+is not diagnosed from the reporting traceback alone. Rerun the same suite to
+obtain its actual recovery results or preserved failure tracebacks.

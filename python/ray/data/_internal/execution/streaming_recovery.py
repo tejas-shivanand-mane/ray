@@ -410,7 +410,7 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             # Previously emitted copies and their downstream users can continue.
             self.stream.recover()
             self.stream.stats["fixed_r_recovered_task_details"].append({
-                "task_index": self.task_index,
+                "task_index": self.task_index(),
                 "task_id": self.stream.task_id.hex(),
             })
             return 0
