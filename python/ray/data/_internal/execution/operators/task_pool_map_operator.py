@@ -217,6 +217,7 @@ class TaskPoolMapOperator(MapOperator):
             gen = submit_stream(
                 config, self._map_task, args, kwargs, dynamic_ray_remote_args,
                 config.expected_blocks[self.name], self._streaming_recovery_metrics,
+                task_index=self._next_data_task_idx,
             )
 
         self._current_logical_usage = self._current_logical_usage.add(logical_usage)

@@ -7,7 +7,7 @@ emitting it, then release the original refs. This deliberately adds a data copy.
 
 import math
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Tuple, Union
 
 import ray
 from ray._private.streaming_recovery import (
@@ -37,13 +37,30 @@ class FixedRDataConfig:
     coordinator-owned task submission. ``fixed_r`` enrolls tasks on a separate
     owner until that node is authoritatively dead, then submits subsequent tasks
     from the surviving coordinator. This covers only one owner-node failure.
+
+    ``executor_node_id`` accepts a single node ID or an ordered tuple of IDs.
+    Each operator assigns task i to tuple[i % len(tuple)] with hard affinity;
+    replay retains that assignment. Every listed executor must survive.
     """
 
     owner_node_id: str
-    executor_node_id: str
+    executor_node_id: Union[str, Tuple[str, ...]]
     expected_blocks: Dict[str, int]
     mode: str = "fixed_r"
     timeout_s: float = 60
+
+    @property
+    def executor_node_ids(self):
+        """Ordered surviving executors; a string preserves the single-node API."""
+        if isinstance(self.executor_node_id, str):
+            return (self.executor_node_id,)
+        return self.executor_node_id
+
+    def executor_for_task(self, task_index):
+        # Selection happens once at submission. The immutable recipe keeps the
+        # same hard affinity during replay, even as other tasks are submitted.
+        nodes = self.executor_node_ids
+        return nodes[task_index % len(nodes)]
 
     def validate(self):
         if self.mode not in ("fixed_r", "copy"):
@@ -66,7 +83,10 @@ class FixedRDataConfig:
                 raise ValueError(
                     "Expected blocks must map operator names to nonnegative ints"
                 )
-        for node_id in (self.owner_node_id, self.executor_node_id):
+        executors = self.executor_node_ids
+        if not isinstance(executors, tuple) or not executors:
+            raise ValueError("Executors must be a node ID or a nonempty tuple of node IDs")
+        for node_id in (self.owner_node_id, *executors):
             if not isinstance(node_id, str):
                 raise ValueError("Node IDs must be hexadecimal strings")
             try:
@@ -75,7 +95,9 @@ class FixedRDataConfig:
                 raise ValueError("Invalid Fixed-R Data node ID") from exc
             if parsed.is_nil():
                 raise ValueError("Fixed-R Data node IDs must be non-nil")
-        if self.owner_node_id == self.executor_node_id:
+        if len(executors) != len(set(executors)):
+            raise ValueError("Fixed-R Data executor node IDs must be unique")
+        if self.owner_node_id in executors:
             raise ValueError("Protected owner and task executor must be separate nodes")
 
 
@@ -128,10 +150,12 @@ def validate_execution(dag, context):
 
 def _owner_alive(config):
     nodes = {node["NodeID"]: node for node in ray.nodes()}
-    if config.owner_node_id not in nodes or config.executor_node_id not in nodes:
+    if any(node_id not in nodes for node_id in (
+        config.owner_node_id, *config.executor_node_ids
+    )):
         raise ValueError("Fixed-R Data owner/executor node is unknown to GCS")
-    if not nodes[config.executor_node_id]["Alive"]:
-        raise ValueError("Fixed-R Data requires the configured task executor to survive")
+    if any(not nodes[node_id]["Alive"] for node_id in config.executor_node_ids):
+        raise ValueError("Fixed-R Data requires all configured task executors to survive")
     if ray.get_runtime_context().get_node_id() == config.owner_node_id:
         raise ValueError("The Dataset coordinator must survive on a different node")
     return nodes[config.owner_node_id]["Alive"]
@@ -212,7 +236,9 @@ class _DataStream:
         self.stats["fixed_r_closed_streams"] += 1
 
 
-def submit_stream(config, producer, args, kwargs, options, expected_blocks, stats):
+def submit_stream(
+    config, producer, args, kwargs, options, expected_blocks, stats, *, task_index=0
+):
     owner_alive = _owner_alive(config)
     inputs = tuple(
         value for value in (*args, *kwargs.values())
@@ -222,7 +248,7 @@ def submit_stream(config, producer, args, kwargs, options, expected_blocks, stat
     options = dict(options)
     options.update(
         scheduling_strategy=NodeAffinitySchedulingStrategy(
-            config.executor_node_id, soft=False
+            config.executor_for_task(task_index), soft=False
         ),
         max_retries=1,
         retry_exceptions=False,

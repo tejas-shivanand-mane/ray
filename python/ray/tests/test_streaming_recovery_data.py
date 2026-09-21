@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 import time
 from unittest.mock import Mock
 
@@ -54,6 +55,7 @@ def surviving_data_cluster():
             },
         )
         executor_node = cluster.add_node(num_cpus=3)
+        cluster.add_node(num_cpus=3)
         cluster.wait_for_nodes()
         ray.init(address=cluster.address)
         yield cluster, executor_node.node_id
@@ -355,3 +357,80 @@ def test_copy_mode_config_is_explicit():
     )
     with pytest.raises(ValueError, match="mode"):
         replace(config, mode="automatic").validate()
+
+
+@pytest.mark.parametrize("invalid", [(), [], None, "duplicate", "owner"])
+def test_multi_executor_config_rejects_invalid_nodes(invalid):
+    owner = ray.NodeID.from_random().hex()
+    executor = ray.NodeID.from_random().hex()
+    nodes = (executor, executor) if invalid == "duplicate" else (
+        (executor, owner) if invalid == "owner" else invalid
+    )
+    with pytest.raises(ValueError, match="Executors|unique|separate"):
+        FixedRDataConfig(owner, nodes, {"Map": 1}).validate()
+
+
+def test_multi_executor_selection_is_stable():
+    nodes = tuple(ray.NodeID.from_random().hex() for _ in range(3))
+    config = FixedRDataConfig(ray.NodeID.from_random().hex(), nodes, {"Map": 1})
+    config.validate()
+    assert [config.executor_for_task(index) for index in range(7)] == list(nodes * 2) + [nodes[0]]
+    assert config.executor_for_task(1) == nodes[1]
+
+
+def test_multi_executor_requires_every_executor_to_survive(monkeypatch):
+    from ray.data._internal.execution.streaming_recovery import _owner_alive
+
+    owner, first, second = (ray.NodeID.from_random().hex() for _ in range(3))
+    config = FixedRDataConfig(owner, (first, second), {"Map": 1})
+    monkeypatch.setattr(ray, "nodes", lambda: [
+        {"NodeID": owner, "Alive": True},
+        {"NodeID": first, "Alive": True},
+        {"NodeID": second, "Alive": False},
+    ])
+    with pytest.raises(ValueError, match="all configured task executors"):
+        _owner_alive(config)
+
+
+@pytest.mark.parametrize("mode", ["ordinary", "copy", "fixed_r", "fixed_r_failure"])
+def test_backpressure_benchmark_multi_executor(data_cluster, monkeypatch, mode):
+    # Exercise the actual benchmark adapters, including its count and placement
+    # checks, on small blocks. Do not launch the benchmark's CLI or memory sampler.
+    benchmark_dir = Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
+    monkeypatch.syspath_prepend(str(benchmark_dir))
+    from streaming_recovery_benchmark import run_controlled
+
+    owner_id, _, crash = data_cluster
+    coordinator = ray.get_runtime_context().get_node_id()
+    executor_ids = tuple(sorted(
+        node["NodeID"] for node in ray.nodes()
+        if node["Alive"] and node["NodeID"] not in (owner_id, coordinator)
+    ))
+    assert len(executor_ids) == 2
+    args = SimpleNamespace(
+        recovery_mode=mode, owner_node_id=owner_id, executor_node_ids=executor_ids,
+        producer_concurrency=2, num_input_blocks=4,
+        output_batches_per_input_batch=3, output_batch_rows=4, output_row_bytes=64,
+        consumer_sleep_s=0.01, recovery_timeout_s=60,
+    )
+    result = run_controlled(args, crash_owner=lambda: crash([]))
+    assert result["validated_output_blocks"] == 12
+    assert result["observed_producer_nodes"] == list(executor_ids)
+    assert result["observed_consumer_nodes"] == list(executor_ids)
+    source, sink = result["operators"]["Produce"], result["operators"]["Consume"]
+    if mode == "ordinary":
+        assert "fixed_r_enrolled_tasks" not in source
+    elif mode == "copy":
+        assert source["fixed_r_copy_baseline_tasks"] == 4
+        assert sink["fixed_r_copy_baseline_tasks"] == 12
+        assert source["fixed_r_enrolled_tasks"] == sink["fixed_r_enrolled_tasks"] == 0
+    elif mode == "fixed_r":
+        assert source["fixed_r_enrolled_tasks"] == 4
+        assert sink["fixed_r_enrolled_tasks"] == 12
+        assert source["fixed_r_recovered_tasks"] == sink["fixed_r_recovered_tasks"] == 0
+    else:
+        assert result["enrolled_at_failure"] == 3
+        assert source["fixed_r_enrolled_tasks"] == source["fixed_r_recovered_tasks"] == 2
+        assert sink["fixed_r_enrolled_tasks"] == sink["fixed_r_recovered_tasks"] == 1
+        assert source["fixed_r_survivor_tasks"] == 2
+        assert sink["fixed_r_survivor_tasks"] == 11
