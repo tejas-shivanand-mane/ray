@@ -50,6 +50,9 @@ class OwnershipBasedObjectDirectory : public IObjectDirectory {
 
   void HandleNodeRemoved(const NodeID &node_id) override;
 
+  Status RebindStreamingRecoveryOwner(const ObjectID &object_id,
+                                     const rpc::Address &owner) override;
+
   void SubscribeObjectLocations(const UniqueID &callback_id,
                                 const ObjectID &object_id,
                                 const rpc::Address &owner_address,

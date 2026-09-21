@@ -1072,6 +1072,14 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                                         const std::string &descriptor,
                                         const std::string &consumer_address);
 
+  // Blocking frontend-thread APIs; never call from the CoreWorker IO loop.
+  Status RecoverStreamingTask(const std::string &descriptor,
+                              int64_t next_index,
+                              const std::vector<ObjectID> &live_consumed_returns,
+                              int64_t timeout_ms,
+                              rpc::ObjectReference *generator_ref);
+  Status CloseStreamingRecovery(const std::string &descriptor, int64_t timeout_ms);
+
   /// Create an actor.
   ///
   /// NOTE: RAY CHECK fails if an actor handle with the same actor id has already been

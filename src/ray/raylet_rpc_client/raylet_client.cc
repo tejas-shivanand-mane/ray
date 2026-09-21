@@ -570,6 +570,18 @@ void RayletClient::CancelLocalTask(
                             /*method_timeout_ms*/ -1);
 }
 
+void RayletClient::PrepareStreamingRecovery(
+    const rpc::PrepareStreamingRecoveryRequest &request,
+    const rpc::ClientCallback<rpc::PrepareStreamingRecoveryReply> &callback) {
+  INVOKE_RETRYABLE_RPC_CALL(retryable_grpc_client_,
+                            NodeManagerService,
+                            PrepareStreamingRecovery,
+                            request,
+                            callback,
+                            grpc_client_,
+                            /*method_timeout_ms=*/-1);
+}
+
 void RayletClient::FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request) {
   INVOKE_RETRYABLE_RPC_CALL(
       retryable_grpc_client_,

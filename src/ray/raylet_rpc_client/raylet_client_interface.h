@@ -227,6 +227,12 @@ class RayletClientInterface {
 
   virtual void FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request) = 0;
 
+  virtual void PrepareStreamingRecovery(
+      const rpc::PrepareStreamingRecoveryRequest &request,
+      const rpc::ClientCallback<rpc::PrepareStreamingRecoveryReply> &callback) {
+    callback(Status::Invalid("Streaming recovery barrier is unavailable"), {});
+  }
+
   virtual ~RayletClientInterface() = default;
 
   virtual void UpdateRecoveryWitness(

@@ -180,6 +180,10 @@ class RayletClient : public RayletClientInterface {
 
   void FreeLocalObjects(const rpc::FreeLocalObjectsRequest &request) override;
 
+  void PrepareStreamingRecovery(
+      const rpc::PrepareStreamingRecoveryRequest &request,
+      const rpc::ClientCallback<rpc::PrepareStreamingRecoveryReply> &callback) override;
+
 
   void UpdateRecoveryWitness(
       rpc::UpdateRecoveryWitnessRequest &&request,

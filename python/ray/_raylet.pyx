@@ -5273,6 +5273,29 @@ cdef class CoreWorker:
             check_status(CCoreWorkerProcess.GetCoreWorker().ConfirmStreamingRecoveryReceipt(
                 c_generator_id, c_descriptor, c_consumer_address))
 
+    def recover_streaming_task(
+            self, bytes descriptor, int64_t next_index, live_consumed_returns,
+            int64_t timeout_ms):
+        cdef c_string c_descriptor = descriptor
+        cdef c_vector[CObjectID] ids
+        cdef ObjectRef ref
+        cdef CObjectReference completion
+        cdef c_vector[CObjectReference] refs
+        for ref in live_consumed_returns:
+            ids.push_back(ref.native())
+        with nogil:
+            check_status(CCoreWorkerProcess.GetCoreWorker().RecoverStreamingTask(
+                c_descriptor, next_index, ids, timeout_ms, &completion))
+        refs.push_back(completion)
+        # Native adoption acquired exactly one handle reference.
+        return VectorToObjectRefs(refs, skip_adding_local_ref=True)[0]
+
+    def close_streaming_recovery(self, bytes descriptor, int64_t timeout_ms):
+        cdef c_string c_descriptor = descriptor
+        with nogil:
+            check_status(CCoreWorkerProcess.GetCoreWorker().CloseStreamingRecovery(
+                c_descriptor, timeout_ms))
+
     def async_delete_object_ref_stream(self, ObjectRef generator_id):
         cdef:
             CObjectID c_generator_id = generator_id.native()

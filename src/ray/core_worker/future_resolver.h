@@ -80,6 +80,13 @@ class FutureResolver {
   /// future.
   void ResolveFutureAsync(const ObjectID &object_id, const rpc::Address &owner_address);
 
+  /// Serialize ownership adoption against the check-and-store part of old
+  /// owner replies. After adoption, existing owner checks discard stale replies.
+  Status AdoptStreamingRecovery(const std::function<Status()> &adopt) {
+    std::lock_guard<std::recursive_mutex> lock(streaming_transition_mutex_);
+    return adopt();
+  }
+
   /// Process a resolved future. This can be used if we already have the objec
   /// status and don't need to ask the owner for it right away.
   ///
@@ -128,6 +135,7 @@ class FutureResolver {
   /// Binary strings keep this cold-path state independent of extra hash/Bazel
   /// dependencies in the standalone future_resolver target.
   std::mutex recovery_owner_mutex_;
+  std::recursive_mutex streaming_transition_mutex_;
   std::unordered_map<std::string, std::string> initial_owner_by_object_;
 
   /// Suppresses duplicate re-entry while one acting-owner recovery attempt is

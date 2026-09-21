@@ -7,6 +7,7 @@ ray_cc_library(
         "core_worker_process.cc",
         "recovery_frontier_publication.cc",
         "streaming_recovery_submission.cc",
+        "streaming_recovery_replay.cc",
         "core_worker_shutdown_executor.cc",
     ],
     hdrs = [
@@ -350,6 +351,7 @@ ray_cc_library(
         ":memory_store",
         ":reference_counter_interface",
         "//src/ray/common:id",
+        "//src/ray/common:ray_config",
         "//src/ray/core_worker_rpc_client:core_worker_client_pool",
     ],
 )

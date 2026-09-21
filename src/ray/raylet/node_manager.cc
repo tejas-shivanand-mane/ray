@@ -4862,6 +4862,58 @@ void NodeManager::HandleCancelLocalTask(rpc::CancelLocalTaskRequest request,
       });
 }
 
+void NodeManager::HandlePrepareStreamingRecovery(
+    rpc::PrepareStreamingRecoveryRequest request,
+    rpc::PrepareStreamingRecoveryReply *reply,
+    rpc::SendReplyCallback send_reply_callback) {
+  const auto &descriptor = request.descriptor();
+  if (!RayConfig::instance().enable_recovery_streaming_fixed_r() ||
+      !RayConfig::instance().enable_recovery_succession() ||
+      !RayConfig::instance().enable_recovery_witness_holder_baseline() ||
+      !ValidateRecoveryStreamDescriptor(descriptor).ok() ||
+      descriptor.consumer_address().node_id() != self_node_id_.Binary()) {
+    send_reply_callback(Status::Invalid("Streaming raylet barrier rejected"),
+                        nullptr,
+                        nullptr);
+    return;
+  }
+  if (!failed_nodes_cache_.contains(NodeID::FromBinary(
+          descriptor.manifest().succession(0).address().node_id()))) {
+    send_reply_callback(Status::TimedOut("Local raylet has not observed owner-node death"),
+                        nullptr,
+                        nullptr);
+    return;
+  }
+  std::vector<ObjectID> ids;
+  for (const auto &binary : request.object_ids()) {
+    if (binary.size() != ObjectID::Size()) {
+      send_reply_callback(Status::Invalid("Malformed streaming return ID"), nullptr, nullptr);
+      return;
+    }
+    const auto id = ObjectID::FromBinary(binary);
+    if (id.TaskId().Binary() != descriptor.task_id() || id.ObjectIndex() < 1 ||
+        static_cast<uint64_t>(id.ObjectIndex()) >
+            static_cast<uint64_t>(descriptor.expected_returns()) + 1) {
+      send_reply_callback(Status::Invalid("Streaming return outside descriptor"),
+                          nullptr,
+                          nullptr);
+      return;
+    }
+    ids.push_back(id);
+  }
+  for (const auto &id : ids) {
+    const auto status = object_directory_.RebindStreamingRecoveryOwner(
+        id, descriptor.consumer_address());
+    if (!status.ok()) {
+      send_reply_callback(status, nullptr, nullptr);
+      return;
+    }
+  }
+  // All old directory callbacks are now fenced. The consumer removes stale
+  // Plasma errors and waits for their deletion before submitting the replay.
+  send_reply_callback(Status::OK(), nullptr, nullptr);
+}
+
 void NodeManager::HandleFreeLocalObjects(rpc::FreeLocalObjectsRequest request,
                                          rpc::FreeLocalObjectsReply *reply,
                                          rpc::SendReplyCallback send_reply_callback) {

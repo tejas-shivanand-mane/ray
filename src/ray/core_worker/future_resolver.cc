@@ -17,6 +17,8 @@
 #include <memory>
 #include <utility>
 
+#include "ray/common/ray_config.h"
+
 namespace ray {
 namespace core {
 namespace {
@@ -119,6 +121,11 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
                                            const rpc::Address &owner_address,
                                            const Status &status,
                                            const rpc::GetObjectStatusReply &reply) {
+  std::unique_lock<std::recursive_mutex> transition_lock(streaming_transition_mutex_,
+                                                       std::defer_lock);
+  if (RayConfig::instance().enable_recovery_streaming_fixed_r()) {
+    transition_lock.lock();
+  }
   // A recovery successor may have taken ownership while an older
   // GetObjectStatus RPC was still in flight. Ignore responses from
   // an owner that is no longer the current owner of this ObjectID.
@@ -166,6 +173,11 @@ void FutureResolver::ProcessResolvedObject(const ObjectID &object_id,
       recovery_reentry_callback(
           object_id,
           [this, object_id, owner_address, object_key](bool started) {
+            std::unique_lock<std::recursive_mutex> transition_lock(
+                streaming_transition_mutex_, std::defer_lock);
+            if (RayConfig::instance().enable_recovery_streaming_fixed_r()) {
+              transition_lock.lock();
+            }
             {
               std::lock_guard<std::mutex> lock(recovery_owner_mutex_);
               recovery_reentry_in_flight_.erase(object_key);

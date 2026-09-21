@@ -1,13 +1,12 @@
-"""Consumer delivery state for the bounded Fixed-R streaming experiment.
+"""Private, bounded Fixed-R streaming enrollment and single-owner-node recovery.
 
-Internal integration component, not an owner-loss API. A trusted transport must
-complete the all-R enrollment gate, forward owner reads, obtain witness claims,
-and adopt/dispatch the replay before attaching its local ObjectRefGenerator.
-State lives on the designated surviving consumer and cannot be serialized.
-StreamingRecoveryOwner connects the original submission to the enrollment gate;
-claim/replay transport still belongs to the next integration step.
+Use StreamingRecoveryReader with a StreamingRecoveryOwnerActor on another node.
+The designated consumer, driver/job, and runtime must survive. Inputs are by
+value, output count is finite/known, and there must be no earlier executor retry.
 """
 
+import math
+import time
 from dataclasses import dataclass
 from threading import RLock
 from typing import Tuple
@@ -26,6 +25,15 @@ class StreamingRecoveryStateError(RuntimeError):
 
 class StreamingRecoveryCountError(StreamingRecoveryStateError):
     """The producer ended early or yielded beyond its declared count."""
+
+
+def _timeout_ms(timeout_s):
+    if not isinstance(timeout_s, (int, float)) or not math.isfinite(timeout_s):
+        raise ValueError("Recovery timeout must be finite and positive")
+    result = int(timeout_s * 1000)
+    if not 0 < result < 2**63:
+        raise ValueError("Recovery timeout must be finite and positive")
+    return result
 
 
 def streaming_recovery_address() -> bytes:
@@ -273,6 +281,41 @@ class StreamingRecoveryConsumer:
             self._snapshot = None
             self._phase = "replaying"
 
+    def recover(self, timeout_s=60) -> None:
+        """Claim, adopt, repair and dispatch one replay on this consumer.
+
+        Settle the owner read and pause application gets/exports of retained
+        refs before calling. No other worker may still use those outputs during
+        this bounded handoff. Existing application aliases remain the same IDs.
+        """
+        timeout_ms = _timeout_ms(timeout_s)
+        worker = ray._private.worker.global_worker
+        worker.check_connected()
+        with self._lock:
+            snapshot = self.begin_recovery()
+            completion = None
+            generator = None
+            try:
+                completion = worker.core_worker.recover_streaming_task(
+                    snapshot.descriptor,
+                    snapshot.next_index,
+                    snapshot.live_consumed_refs,
+                    timeout_ms,
+                )
+                from ray._private.object_ref_generator import ObjectRefGenerator
+
+                generator = ObjectRefGenerator(completion, worker)
+                self.attach_replay(snapshot, generator)
+            except BaseException:
+                self.fail()
+                if completion is not None:
+                    try:
+                        ray.cancel(completion, force=False, recursive=True)
+                    finally:
+                        if generator is None:
+                            worker.core_worker.async_delete_object_ref_stream(completion)
+                raise
+
     def read_replay(self, timeout_s=0):
         """Return the next ref, None on timeout, or raise StopIteration at EOF.
 
@@ -354,3 +397,171 @@ class StreamingRecoveryConsumer:
 
     def __reduce__(self):
         raise TypeError("Streaming recovery consumer state must remain on its consumer")
+
+
+class StreamingRecoveryOwnerActor:
+    """Wrap with ray.remote(num_cpus=0), and place on the protected owner node.
+
+    This actor holds stream state but is not itself recovered. Its normal
+    producer task is replayed on the surviving consumer's behalf.
+    """
+
+    def __init__(self):
+        self.stream = None
+
+    def begin(self, producer, expected_returns, consumer_address, args, kwargs, options):
+        if self.stream is not None:
+            raise StreamingRecoveryStateError("This owner already holds a stream")
+        self.stream = StreamingRecoveryOwner.submit(
+            producer,
+            expected_returns=expected_returns,
+            consumer_address=consumer_address,
+            args=args,
+            kwargs=kwargs,
+            **options,
+        )
+        return self.stream.submission()
+
+    def offer(self):
+        return self.stream.submission()
+
+    def confirm(self, descriptor, consumer_address):
+        self.stream.confirm_receipt(descriptor, consumer_address)
+
+    def pull(self):
+        try:
+            ref = self.stream.next_ref()
+        except StopIteration:
+            ray.get(self.stream._generator.completed())
+            return {"eof": True}
+        if ref == self.stream._generator.completed():
+            ray.get(ref)  # Surface producer errors, never forward completion as a yield.
+        return {"ref": ref}
+
+    def close(self):
+        if self.stream is not None:
+            self.stream.close()
+
+
+class StreamingRecoveryReader:
+    """One consumer's original delivery and owner-node-loss replay transport.
+
+    Keep this reader and consumed ObjectRefs on the same surviving worker.
+    Serialize reader operations and pause other gets/exports during recovery.
+    release(index) requires all application uses/aliases of that output to end.
+    close() acknowledges tombstones at every surviving selected holder.
+    """
+
+    @classmethod
+    def submit(
+        cls,
+        owner,
+        producer,
+        *,
+        expected_returns,
+        args=(),
+        kwargs=None,
+        timeout_s=60,
+        **options,
+    ):
+        timeout_ms = _timeout_ms(timeout_s)
+        address = streaming_recovery_address()
+        try:
+            descriptor, _ = ray.get(
+                owner.begin.remote(
+                    producer, expected_returns, address, args, kwargs or {}, options
+                ),
+                timeout=timeout_ms / 1000,
+            )
+        except BaseException:
+            # A queued begin can still finish after a caller timeout. Queue
+            # close behind it so an abandoned offer cannot remain held forever.
+            owner.close.remote()
+            raise
+        reader = cls(owner, descriptor, address, timeout_s)
+        try:
+            ray.get(owner.confirm.remote(descriptor, address), timeout=timeout_s)
+            deadline = time.monotonic() + timeout_s
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Streaming enrollment did not become ready")
+                offered, ready = ray.get(owner.offer.remote(), timeout=remaining)
+                if offered != descriptor:
+                    raise StreamingRecoveryStateError("Owner changed its descriptor")
+                if ready:
+                    break
+                time.sleep(0.01)
+            reader.consumer.mark_ready(descriptor)
+            return reader
+        except BaseException:
+            reader.close()
+            raise
+
+    def __init__(self, owner, descriptor, address, timeout_s=60):
+        self.owner = owner
+        self.descriptor = descriptor
+        self.consumer = StreamingRecoveryConsumer(descriptor, address)
+        self.timeout_s = timeout_s
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def __next__(self):
+        if self._closed:
+            raise StreamingRecoveryStateError("Streaming reader is closed")
+        if self.consumer.phase == "completed":
+            raise StopIteration
+        if self.consumer.phase == "forwarding":
+            ticket = self.consumer.begin_owner_read()
+            try:
+                # A timeout alone would leave this read outstanding; wait for
+                # a settled actor result or failure before taking a snapshot.
+                response = ray.get(self.owner.pull.remote())
+            except ray.exceptions.RayActorError:
+                self.consumer.settle_failed_owner_read(ticket)
+                self.recover()
+            except BaseException:
+                self.consumer.fail()
+                raise
+            else:
+                if response.get("eof"):
+                    self.consumer.accept_owner_eof(ticket)
+                    raise StopIteration
+                return self.consumer.accept_owner_item(ticket, response["ref"])
+        return self.consumer.read_replay(timeout_s=None)
+
+    def recover(self):
+        """Explicit recovery also supports retained outputs after original EOF."""
+        self.consumer.recover(self.timeout_s)
+
+    def release(self, index):
+        self.consumer.release(index)
+
+    def close(self):
+        if self._closed:
+            return
+        worker = ray._private.worker.global_worker
+        worker.check_connected()
+        try:
+            try:
+                ray.get(self.owner.close.remote(), timeout=self.timeout_s)
+            except ray.exceptions.RayActorError:
+                pass
+            worker.core_worker.close_streaming_recovery(
+                self.descriptor, _timeout_ms(self.timeout_s)
+            )
+        finally:
+            self.consumer.close()
+        # A timed-out close can be retried; it must not report durable success.
+        self._closed = True
+
+    def __reduce__(self):
+        raise TypeError("Streaming reader must remain on its designated consumer")

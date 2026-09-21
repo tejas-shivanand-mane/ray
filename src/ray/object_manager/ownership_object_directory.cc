@@ -317,6 +317,25 @@ void OwnershipBasedObjectDirectory::ObjectLocationSubscriptionCallback(
   }
 }
 
+Status OwnershipBasedObjectDirectory::RebindStreamingRecoveryOwner(
+    const ObjectID &object_id, const rpc::Address &owner) {
+  auto it = listeners_.find(object_id);
+  if (it == listeners_.end() ||
+      it->second.owner_address.worker_id() == owner.worker_id()) {
+    return Status::OK();
+  }
+  auto callbacks = std::move(it->second.callbacks);
+  object_location_subscriber_->Unsubscribe(
+      rpc::ChannelType::WORKER_OBJECT_LOCATIONS_CHANNEL,
+      it->second.owner_address,
+      object_id.Binary());
+  listeners_.erase(it);
+  for (const auto &[id, callback] : callbacks) {
+    SubscribeObjectLocations(id, object_id, owner, callback);
+  }
+  return Status::OK();
+}
+
 void OwnershipBasedObjectDirectory::SubscribeObjectLocations(
     const UniqueID &callback_id,
     const ObjectID &object_id,
@@ -329,7 +348,13 @@ void OwnershipBasedObjectDirectory::SubscribeObjectLocations(
     request.set_intended_worker_id(owner_address.worker_id());
     request.set_object_id(object_id.Binary());
 
-    auto msg_published_callback = [this, object_id](const rpc::PubMessage &pub_message) {
+    auto msg_published_callback = [this, object_id, owner_address](
+                                      const rpc::PubMessage &pub_message) {
+      auto current = listeners_.find(object_id);
+      if (current == listeners_.end() ||
+          current->second.owner_address.worker_id() != owner_address.worker_id()) {
+        return;
+      }
       RAY_CHECK(pub_message.has_worker_object_locations_message());
       const auto &location_info = pub_message.worker_object_locations_message();
       ObjectLocationSubscriptionCallback(
@@ -341,6 +366,11 @@ void OwnershipBasedObjectDirectory::SubscribeObjectLocations(
     auto failure_callback = [this, owner_address](const std::string &object_id_binary,
                                                   const Status &status) {
       const auto obj_id = ObjectID::FromBinary(object_id_binary);
+      auto current = listeners_.find(obj_id);
+      if (current == listeners_.end() ||
+          current->second.owner_address.worker_id() != owner_address.worker_id()) {
+        return;
+      }
       if (!status.ok()) {
         if (is_shutting_down_) {
           // We are shutting down, so this long-poll failure is caused by our
@@ -413,13 +443,20 @@ void OwnershipBasedObjectDirectory::SubscribeObjectLocations(
     // structures shared with the caller and potentially invalidating caller
     // iterators. See https://github.com/ray-project/ray/issues/2959.
     io_service_.post(
-        [callback,
+        [this,
+         owner_address,
+         callback,
          locations,
          spilled_url,
          spilled_node_id,
          pending_creation,
          object_size,
          object_id]() {
+          auto current = listeners_.find(object_id);
+          if (current == listeners_.end() ||
+              current->second.owner_address.worker_id() != owner_address.worker_id()) {
+            return;
+          }
           callback(object_id,
                    locations,
                    spilled_url,

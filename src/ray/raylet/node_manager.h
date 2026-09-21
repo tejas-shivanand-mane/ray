@@ -353,6 +353,12 @@ class NodeManager : public rpc::NodeManagerServiceHandler,
                                rpc::IsLocalWorkerDeadReply *reply,
                                rpc::SendReplyCallback send_reply_callback) override;
 
+  /// Fence old local object-location callbacks before a streaming replay.
+  void HandlePrepareStreamingRecovery(
+      rpc::PrepareStreamingRecoveryRequest request,
+      rpc::PrepareStreamingRecoveryReply *reply,
+      rpc::SendReplyCallback send_reply_callback) override;
+
   /// Stores a newer compact recovery manifest on this witness raylet.
   void HandleUpdateRecoveryWitness(
       rpc::UpdateRecoveryWitnessRequest request,

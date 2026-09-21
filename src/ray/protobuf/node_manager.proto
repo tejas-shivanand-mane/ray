@@ -460,6 +460,13 @@ message FreeLocalObjectsRequest {
 
 message FreeLocalObjectsReply {}
 
+// Local raylet barrier after checked consumer adoption and before replay.
+message PrepareStreamingRecoveryRequest {
+  RecoveryStreamDescriptor descriptor = 1;
+  repeated bytes object_ids = 2;
+}
+message PrepareStreamingRecoveryReply {}
+
 
 // A Fixed-R replay reservation replicated across the ordered live witness set.
 // Replay may begin only after every later witness not authoritatively known dead
@@ -725,6 +732,8 @@ service NodeManagerService {
   // Request the raylet to free plasma objects corresponding to the object ID
   // Failure: Retries, it's idempotent.
   rpc FreeLocalObjects(FreeLocalObjectsRequest) returns (FreeLocalObjectsReply);
+  rpc PrepareStreamingRecovery(PrepareStreamingRecoveryRequest)
+      returns (PrepareStreamingRecoveryReply);
 
   // Stores compact recovery-succession metadata on this raylet.
   // Idempotent. No voting, locking, or admission decision is performed.

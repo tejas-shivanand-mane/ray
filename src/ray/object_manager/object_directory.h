@@ -48,6 +48,13 @@ class IObjectDirectory {
   /// the GCS worker/node-death path.
   virtual void MarkShuttingDown() {}
 
+  /// Replace an existing local subscription after checked streaming adoption.
+  /// Called on the raylet event loop; implementations must fence old callbacks.
+  virtual Status RebindStreamingRecoveryOwner(const ObjectID &object_id,
+                                             const rpc::Address &owner) {
+    return Status::Invalid("Streaming ownership rebinding is unavailable");
+  }
+
   /// Handle the removal of an object manager node. This updates the
   /// locations of all subscribed objects that have the removed node as a
   /// location, and fires the subscribed callbacks for those objects.

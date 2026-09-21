@@ -69,6 +69,7 @@ class ServerCallFactory;
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(CancelLocalTask)                \
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(FreeLocalObjects)               \
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(UpdateRecoveryWitness)          \
+    RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(PrepareStreamingRecovery)       \
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(UpdateRecoveryWitnessBatch)     \
     RAY_NODE_MANAGER_RPC_SERVICE_HANDLER(GetRecoveryWitness)
 
@@ -214,6 +215,11 @@ class NodeManagerServiceHandler {
     virtual void HandleFreeLocalObjects(
         FreeLocalObjectsRequest request,
         FreeLocalObjectsReply *reply,
+        SendReplyCallback send_reply_callback) = 0;
+
+    virtual void HandlePrepareStreamingRecovery(
+        PrepareStreamingRecoveryRequest request,
+        PrepareStreamingRecoveryReply *reply,
         SendReplyCallback send_reply_callback) = 0;
 
     virtual void HandleUpdateRecoveryWitness(

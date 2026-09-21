@@ -111,10 +111,12 @@ class CapturingSubscriber : public pubsub::FakeSubscriber {
       pubsub::SubscriptionFailureCallback subscription_failure_callback) override {
     if (key_id.has_value()) {
       failure_callbacks[*key_id] = std::move(subscription_failure_callback);
+      success_callbacks[*key_id] = std::move(subscription_callback);
     }
   }
 
   absl::flat_hash_map<std::string, pubsub::SubscriptionFailureCallback> failure_callbacks;
+  absl::flat_hash_map<std::string, pubsub::SubscriptionItemCallback> success_callbacks;
 };
 
 class MockGcsClient : public gcs::GcsClient {
@@ -625,6 +627,38 @@ TEST_F(OwnershipBasedObjectDirectoryTest, OwnerDiedMarkedWhenNotShuttingDown) {
   ASSERT_EQ(mark_as_failed_calls.size(), 1);
   ASSERT_EQ(mark_as_failed_calls[0].first, object_id);
   ASSERT_EQ(mark_as_failed_calls[0].second, rpc::ErrorType::OWNER_DIED);
+}
+
+TEST_F(OwnershipBasedObjectDirectoryTest, StreamingRebindFencesOldOwnerCallbacks) {
+  const auto id = ObjectID::FromRandom();
+  rpc::Address old_owner;
+  old_owner.set_worker_id(WorkerID::FromRandom().Binary());
+  old_owner.set_node_id(NodeID::FromRandom().Binary());
+  rpc::Address consumer;
+  consumer.set_worker_id(WorkerID::FromRandom().Binary());
+  consumer.set_node_id(NodeID::FromRandom().Binary());
+  size_t deliveries = 0;
+  obod_->SubscribeObjectLocations(
+      UniqueID::FromRandom(), id, old_owner,
+      [&](const ObjectID &, const std::unordered_set<NodeID> &,
+          const std::string &, const NodeID &, bool, size_t) { ++deliveries; });
+  auto old_failure = subscriber_->failure_callbacks.at(id.Binary());
+  auto old_success = subscriber_->success_callbacks.at(id.Binary());
+  ASSERT_TRUE(obod_->RebindStreamingRecoveryOwner(id, consumer).ok());
+  ASSERT_TRUE(obod_->RebindStreamingRecoveryOwner(id, consumer).ok());
+  old_failure(id.Binary(), Status::Disconnected("Old owner died"));
+  rpc::PubMessage message;
+  message.mutable_worker_object_locations_message()->add_node_ids(
+      NodeID::FromRandom().Binary());
+  old_success(message);
+  ASSERT_TRUE(mark_as_failed_calls.empty());
+  ASSERT_EQ(deliveries, 0);
+  subscriber_->success_callbacks.at(id.Binary())(message);
+  ASSERT_EQ(deliveries, 1);
+  subscriber_->failure_callbacks.at(id.Binary())(
+      id.Binary(), Status::Disconnected("Consumer died"));
+  ASSERT_EQ(mark_as_failed_calls.size(), 1);
+  ASSERT_EQ(mark_as_failed_calls.front().second, rpc::ErrorType::OWNER_DIED);
 }
 
 }  // namespace ray

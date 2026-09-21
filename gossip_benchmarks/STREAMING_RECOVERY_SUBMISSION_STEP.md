@@ -105,3 +105,17 @@ binding and generator cleanup path:
 ```bash
 python -m pytest -q python/ray/tests/test_streaming_generator.py
 ```
+
+## Subsequent user validation and integration
+
+The missing manager-definition include was fixed in
+`1dc4a4fecf3dbfe59cd7a24ae93e65775f958151`. The user then reported:
+
+```text
+test_streaming_recovery_consumer.py + test_streaming_recovery_submission.py
+37 passed in 68.97s
+```
+
+The combined owner-loss integration follows in `STREAMING_RECOVERY_OWNER_LOSS_STEP.md`.
+It adds the reader transport and acknowledged consumer close; the original
+owner helper's GC fallback remains best effort.
