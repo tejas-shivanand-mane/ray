@@ -176,6 +176,11 @@ from ray.includes.stream_redirection cimport (
     RedirectStderrOncePerProcess,
 )
 
+from ray.includes.streaming_recovery cimport (
+    CRecoveryStreamDescriptor,
+    ValidateRecoveryStreamDescriptor,
+)
+
 from ray.includes.ray_config cimport RayConfig
 from ray.includes.global_state_accessor cimport CGlobalStateAccessor
 from ray.includes.global_state_accessor cimport (
@@ -406,6 +411,43 @@ cdef c_vector[CObjectID] ObjectRefsToVector(object_refs):
     for object_ref in object_refs:
         result.push_back((<ObjectRef>object_ref).native())
     return result
+
+
+def _recovery_stream_generator_id(TaskID task_id):
+    """Derive a completion ID without registering a reference or creating a stream."""
+    cdef CTaskID native_task_id = task_id.native()
+    if native_task_id.IsNil():
+        raise ValueError("Streaming recovery requires a non-nil task ID")
+    return CObjectID.FromIndex(native_task_id, 1).Binary()
+
+
+def _inspect_recovery_stream_descriptor(bytes serialized_descriptor):
+    """Validate internal descriptor bytes without creating or owning ObjectRefs."""
+    cdef CRecoveryStreamDescriptor descriptor
+    cdef c_string serialized = serialized_descriptor
+    if not descriptor.ParseFromString(serialized):
+        raise ValueError("Malformed streaming recovery descriptor")
+    check_status(ValidateRecoveryStreamDescriptor(descriptor))
+    return {
+        "task_id": descriptor.task_id(),
+        "generator_id": descriptor.generator_id(),
+        "expected_returns": descriptor.expected_returns(),
+        "consumer_address": descriptor.consumer_address().SerializeAsString(),
+    }
+
+
+def _recovery_stream_return_id(bytes serialized_descriptor, int64_t index):
+    """Derive an original yield ID using the native layout; acquire no ref."""
+    cdef CRecoveryStreamDescriptor descriptor
+    cdef c_string serialized = serialized_descriptor
+    cdef CTaskID task_id
+    if not descriptor.ParseFromString(serialized):
+        raise ValueError("Malformed streaming recovery descriptor")
+    check_status(ValidateRecoveryStreamDescriptor(descriptor))
+    if index < 0 or index >= descriptor.expected_returns():
+        raise ValueError("Yield index is outside the declared streaming count")
+    task_id = CTaskID.FromBinary(descriptor.task_id())
+    return CObjectID.FromIndex(task_id, index + 2).Binary()
 
 
 def compute_task_id(ObjectRef object_ref):

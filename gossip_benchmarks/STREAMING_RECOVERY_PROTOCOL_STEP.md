@@ -104,3 +104,10 @@ bazel build //src/ray/raylet:raylet \
 Use your usual additional Bazel flags. These protocol changes require rebuilding
 the protobuf/native components. A passing build and unit tests will still not
 establish owner-loss recovery or Ray Data benchmark support. README is unchanged.
+
+## User validation reported after publication
+
+The user reported all three targets above passed at
+`71f9f7c5a7b538e1dafc0ded14ba2ea9dcb4ed3f`, then confirmed that the entire Ray
+build had already completed successfully. These reports cover this protocol
+step, not subsequent consumer-adapter changes or distributed owner-loss behavior.
