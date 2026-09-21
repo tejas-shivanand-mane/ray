@@ -6,6 +6,7 @@ emitting it, then release the original refs. This deliberately adds a data copy.
 """
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Dict, Tuple, Union
 
@@ -263,7 +264,8 @@ def submit_stream(
         retry_exceptions=False,
     )
     count = 2 * expected_blocks
-    if config.mode == "copy" or not owner_alive:
+
+    def submit_from_coordinator():
         generator = producer.options(**options).remote(*args, **kwargs)
         key = (
             "fixed_r_copy_baseline_tasks" if config.mode == "copy"
@@ -272,6 +274,9 @@ def submit_stream(
         stats[key] += 1
         return _DataStream(count, stats, generator=generator)
 
+    if config.mode == "copy" or not owner_alive:
+        return submit_from_coordinator()
+
     owner = ray.remote(num_cpus=0, max_restarts=0, max_task_retries=0)(
         StreamingRecoveryOwnerActor
     ).options(
@@ -279,6 +284,37 @@ def submit_stream(
             config.owner_node_id, soft=False
         )
     ).remote()
+    # Do not ask this helper to create a protected producer until startup has
+    # succeeded. A failure here is unambiguously before begin/descriptor/receipt,
+    # so there is no protected task or witness offer to abandon or duplicate.
+    try:
+        ray.get(owner.__ray_ready__.remote(), timeout=config.timeout_s)
+        owner_alive = _owner_alive(config)
+    except (ray.exceptions.RayActorError, ray.exceptions.GetTimeoutError):
+        try:
+            deadline = time.monotonic() + config.timeout_s
+            while _owner_alive(config):
+                # An actor error or timeout alone is not node-death authority.
+                # Keep the original error if GCS never confirms head loss.
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+        finally:
+            ray.kill(owner, no_restart=True)
+        stream = submit_from_coordinator()
+        stats["fixed_r_pre_submission_failovers"] += 1
+        return stream
+    except BaseException:
+        ray.kill(owner, no_restart=True)
+        raise
+
+    # Head status can change while the helper starts. This is still before any
+    # begin call, so switching submission ownership remains safe here.
+    if not owner_alive:
+        ray.kill(owner, no_restart=True)
+        stream = submit_from_coordinator()
+        stats["fixed_r_pre_submission_failovers"] += 1
+        return stream
     try:
         reader = StreamingRecoveryReader.submit(
             owner, producer, expected_returns=count, args=args, kwargs=kwargs,
@@ -288,7 +324,13 @@ def submit_stream(
         # Reader.submit already queues close for an abandoned offer. Give it a
         # bounded opportunity to execute before retiring the private helper.
         try:
-            ray.get(owner.close.remote(), timeout=config.timeout_s)
+            try:
+                ray.get(owner.close.remote(), timeout=config.timeout_s)
+            except ray.exceptions.RayActorError:
+                # Do not mask the original enrollment/retirement exception with
+                # a second RPC to the same dead helper. No fresh submission is
+                # allowed after begin may have run.
+                pass
         finally:
             ray.kill(owner, no_restart=True)
         raise
@@ -300,6 +342,7 @@ def new_metrics():
     metrics = dict.fromkeys((
         "fixed_r_enrolled_tasks", "fixed_r_survivor_tasks", "fixed_r_copy_baseline_tasks",
         "fixed_r_recovered_tasks", "fixed_r_copied_blocks", "fixed_r_closed_streams",
+        "fixed_r_pre_submission_failovers",
     ), 0)
     # One owner failure: only the tasks still live at that loss can replay.
     # Record identities, not every successful task in the Dataset.

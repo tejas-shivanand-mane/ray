@@ -447,6 +447,114 @@ def test_multi_executor_requires_every_executor_to_survive(monkeypatch):
         _owner_alive(config)
 
 
+@pytest.fixture
+def submission_race(monkeypatch):
+    from ray.data._internal.execution import streaming_recovery as adapter
+
+    owner = Mock()
+    owner.__ray_ready__ = Mock()
+    actor_class = Mock()
+    actor_class.options.return_value.remote.return_value = owner
+    fake_ray = SimpleNamespace(
+        ObjectRef=ray.ObjectRef, exceptions=ray.exceptions,
+        remote=Mock(return_value=Mock(return_value=actor_class)),
+        get=Mock(), kill=Mock(),
+        _private=SimpleNamespace(worker=SimpleNamespace(
+            global_worker=SimpleNamespace(core_worker=Mock()),
+        )),
+    )
+    monkeypatch.setattr(adapter, "ray", fake_ray)
+    reader_submit = Mock()
+    monkeypatch.setattr(adapter.StreamingRecoveryReader, "submit", reader_submit)
+    producer = Mock()
+    generator = producer.options.return_value.remote.return_value
+    config = adapter.FixedRDataConfig(
+        ray.NodeID.from_random().hex(),
+        tuple(ray.NodeID.from_random().hex() for _ in range(2)),
+        {"Map": 1}, timeout_s=1,
+    )
+    stats = adapter.new_metrics()
+
+    def submit():
+        return adapter.submit_stream(
+            config, producer, ("payload",), {"label": "x"}, {}, 1, stats,
+            task_index=1,
+        )
+
+    return SimpleNamespace(
+        adapter=adapter, ray=fake_ray, owner=owner, reader_submit=reader_submit,
+        producer=producer, generator=generator, config=config, stats=stats,
+        submit=submit,
+    )
+
+
+@pytest.mark.parametrize("failure", ["actor", "timeout", "after_ready"])
+def test_owner_startup_loss_uses_survivor_before_any_begin(
+    monkeypatch, submission_race, failure,
+):
+    env = submission_race
+    env.ray.get.side_effect = {
+        "actor": RayActorError(), "timeout": GetTimeoutError(), "after_ready": None,
+    }[failure]
+    alive = Mock(
+        side_effect=[True, True, False] if failure != "after_ready" else [True, False]
+    )
+    monkeypatch.setattr(env.adapter, "_owner_alive", alive)
+    monkeypatch.setattr(env.adapter, "time", SimpleNamespace(
+        monotonic=lambda: 0, sleep=Mock(),
+    ))
+    stream = env.submit()
+    env.reader_submit.assert_not_called()
+    env.owner.begin.remote.assert_not_called()
+    env.owner.close.remote.assert_not_called()
+    env.ray.kill.assert_called_once_with(env.owner, no_restart=True)
+    env.producer.options.return_value.remote.assert_called_once_with("payload", label="x")
+    options = env.producer.options.call_args.kwargs
+    assert options["scheduling_strategy"].node_id == env.config.executor_node_ids[1]
+    assert options["max_retries"] == 1 and options["retry_exceptions"] is False
+    assert stream.generator is env.generator
+    assert env.stats["fixed_r_survivor_tasks"] == 1
+    assert env.stats["fixed_r_pre_submission_failovers"] == 1
+    assert env.stats["fixed_r_enrolled_tasks"] == 0
+
+
+def test_owner_startup_error_without_node_death_does_not_resubmit(
+    monkeypatch, submission_race,
+):
+    env = submission_race
+    error = RayActorError()
+    env.ray.get.side_effect = error
+    monkeypatch.setattr(env.adapter, "_owner_alive", lambda config: True)
+    monkeypatch.setattr(env.adapter, "time", SimpleNamespace(
+        monotonic=Mock(side_effect=[0, 2]), sleep=Mock(),
+    ))
+    with pytest.raises(RayActorError) as caught:
+        env.submit()
+    assert caught.value is error
+    env.reader_submit.assert_not_called()
+    env.producer.options.assert_not_called()
+    env.ray.kill.assert_called_once_with(env.owner, no_restart=True)
+    assert env.stats["fixed_r_pre_submission_failovers"] == 0
+
+
+@pytest.mark.parametrize("error", [RayActorError(), RuntimeError("retirement barrier failed")])
+def test_failure_after_begin_never_resubmits_or_masks_original_error(
+    monkeypatch, submission_race, error,
+):
+    env = submission_race
+    monkeypatch.setattr(env.adapter, "_owner_alive", lambda config: True)
+    # Startup succeeds. Enrollment fails, then cleanup also sees the dead actor.
+    env.ray.get.side_effect = [None, RayActorError()]
+    env.reader_submit.side_effect = error
+    with pytest.raises(type(error)) as caught:
+        env.submit()
+    assert caught.value is error
+    env.reader_submit.assert_called_once()
+    env.producer.options.assert_not_called()
+    env.ray.kill.assert_called_once_with(env.owner, no_restart=True)
+    assert env.stats["fixed_r_pre_submission_failovers"] == 0
+
+
 @pytest.mark.parametrize("mode", ["ordinary", "copy", "fixed_r", "fixed_r_failure"])
 def test_backpressure_benchmark_multi_executor(data_cluster, monkeypatch, mode):
     # Exercise the actual benchmark adapters, including its count and placement

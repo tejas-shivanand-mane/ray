@@ -46,6 +46,8 @@ def run_head_failure_cases(benchmark, args):
         try:
             # Every point gets fresh Ray processes and a separate GCS database.
             with local_head_failure_cluster(selected) as (case_args, crash_head):
+                # Retain resolved placement even when run_controlled raises.
+                diagnostics.update(vars(case_args))
                 benchmark.run_fn(
                     key, run_controlled, case_args, crash_owner=crash_head,
                     diagnostics=diagnostics,

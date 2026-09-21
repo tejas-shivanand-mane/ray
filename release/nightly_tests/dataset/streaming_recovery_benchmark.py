@@ -606,6 +606,10 @@ def run_controlled(args, crash_owner=None, diagnostics=None):
                     enrolled + actual["fixed_r_survivor_tasks"] != tasks
                     or not 0 <= recovered <= enrolled <= tasks
                     or actual["fixed_r_copy_baseline_tasks"] != 0
+                    or not (
+                        0 <= actual["fixed_r_pre_submission_failovers"]
+                        <= actual["fixed_r_survivor_tasks"]
+                    )
                     or len(details) != recovered
                     or len({item["task_index"] for item in details}) != recovered
                     or len({item["task_id"] for item in details}) != recovered

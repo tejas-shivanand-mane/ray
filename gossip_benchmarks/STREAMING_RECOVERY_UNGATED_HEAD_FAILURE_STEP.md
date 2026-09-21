@@ -98,3 +98,42 @@ checks preservation of an earlier report on encoding failure. These tests
 remain unrun by the agent. This fixes reporting; the underlying Dataset failure
 is not diagnosed from the reporting traceback alone. Rerun the same suite to
 obtain its actual recovery results or preserved failure tracebacks.
+
+## Owner-helper startup failure from the saved suite report
+
+The next user report showed all three head replacements succeeded in about
+2.3 seconds, with the original coordinator and executors surviving. Each
+Dataset stopped at its trigger (13, 64, or 116 validated outputs) because the
+next consumer's owner helper died before it started. Its failed `begin` RPC
+aborted submission before the executor could recover active producers. A
+second `ActorDiedError` from cleanup obscured the original enrollment failure.
+
+The Data adapter now waits for helper readiness before requesting `begin`.
+If startup fails or times out, it waits for authoritative GCS owner-node death
+while requiring all configured executors to survive. Only then can this still
+unsubmitted task use the existing coordinator-owned submission path, preserving
+arguments, task index, executor affinity, and output count. No producer,
+descriptor, receipt, or witness offer exists before `begin`, so this transition
+cannot duplicate an enrolled producer. If the owner remains alive, the original
+startup error is raised. A successful readiness RPC followed by confirmed head
+loss uses the same safe transition.
+
+This is deliberately limited to the phase before any `begin` request. Once
+enrollment may have started, failures still stop execution; this change does
+not retry an unknown protected submission. A dead-helper cleanup RPC no longer
+masks the original enrollment or retirement exception. Failure during later
+enrollment or retirement may still require a separate protocol fix.
+
+`fixed_r_pre_submission_failovers` counts these startup transitions as a subset
+of `fixed_r_survivor_tasks`, separately from actual protected-task replays.
+The suite still requires at least one successful replay and complete output,
+task, placement, and stream-close accounting. Failure diagnostics now retain
+the resolved owner and executor IDs. Failure timing and UDF behavior are unchanged.
+
+Added regression code covers startup actor death, startup timeout, head loss
+after readiness, refusal to resubmit without confirmed node death, and refusal
+to resubmit after enrollment errors while preserving the original exception.
+Source inspection only: no builds, tests, lint, benchmarks, rendering, or
+Actions were run by the agent. No native rebuild is needed. Pull and rerun the
+same command above in the existing compiled `ray-dev` environment; passing
+early/middle/late recovery is still awaiting that run.
