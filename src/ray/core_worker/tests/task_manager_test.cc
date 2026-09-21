@@ -317,6 +317,49 @@ class StreamingRecoveryTest : public TaskManagerTest {
     reference_counter_->AddBorrowedObject(id, ObjectID::Nil(), owner);
   }
 
+  rpc::GetRecoveryWitnessReply WitnessGrant(const TaskSpecification &spec) {
+    rpc::Address consumer(addr_);
+    consumer.set_node_id(NodeID::FromRandom().Binary());
+    consumer.set_ip_address("127.0.0.1");
+    consumer.set_port(10001);
+    rpc::Address owner(GetRandomWorkerAddr());
+    owner.set_node_id(NodeID::FromRandom().Binary());
+    owner.set_ip_address("127.0.0.1");
+    owner.set_port(10002);
+    rpc::RecoveryStreamDescriptor descriptor;
+    descriptor.set_version(1);
+    descriptor.set_task_id(spec.TaskId().Binary());
+    descriptor.set_generator_id(spec.ReturnId(0).Binary());
+    descriptor.set_expected_returns(2);
+    descriptor.mutable_consumer_address()->CopyFrom(consumer);
+    auto *manifest = descriptor.mutable_manifest();
+    manifest->set_task_id(spec.TaskId().Binary());
+    manifest->set_job_id(spec.TaskId().JobId().Binary());
+    manifest->set_target_holder_count(1);
+    manifest->set_witness_count(1);
+    manifest->set_max_recovery_attempts(2);
+    manifest->mutable_version()->set_generation(1);
+    auto *holder = manifest->add_succession();
+    holder->mutable_address()->CopyFrom(owner);
+    holder->set_failure_domain_id(owner.node_id());
+    manifest->add_witness_raylets()->CopyFrom(consumer);
+    rpc::GetRecoveryWitnessReply reply;
+    reply.set_found(true);
+    reply.set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_GRANTED);
+    reply.mutable_acting_owner()->CopyFrom(consumer);
+    reply.mutable_manifest()->CopyFrom(*manifest);
+    reply.mutable_manifest()->set_recovery_attempt(1);
+    auto *recipe = reply.mutable_task_spec();
+    recipe->CopyFrom(spec.GetMessage());
+    recipe->set_job_id(manifest->job_id());
+    recipe->set_num_objects_per_yield(1);
+    recipe->set_attempt_number(0);
+    recipe->mutable_caller_address()->CopyFrom(owner);
+    recipe->mutable_recovery_stream_descriptor()->CopyFrom(descriptor);
+    recipe->mutable_recovery_manifest()->CopyFrom(reply.manifest());
+    return reply;
+  }
+
   void DeleteStreamAndRelease(const ObjectID &generator_id,
                               const std::vector<ObjectID> &frontend_refs) {
     // Deletion releases unread/EOF refs, but the frontend completion reference
@@ -576,6 +619,70 @@ TEST_F(StreamingRecoveryTest, FailureSettlesConsumedAndReportedPlasmaReturns) {
   ASSERT_EQ(error, rpc::ErrorType::WORKER_DIED);
   ASSERT_EQ(stored_in_plasma.count(unread), 1);
   DeleteStreamAndRelease(generator_id, {consumed});
+}
+
+TEST_F(StreamingRecoveryTest, WitnessGrantAdoptsOriginalStreamAndPreservesLivePrefix) {
+  auto spec = RecoverySpec();
+  const auto reply = WitnessGrant(spec);
+  const auto &descriptor = reply.task_spec().recovery_stream_descriptor();
+  const auto &consumer = descriptor.consumer_address();
+  const auto live = spec.StreamingGeneratorReturnId(0);
+  Borrow(live, descriptor.manifest().succession(0).address());
+  const auto count = reference_counter_->GetAllReferenceCounts().at(live);
+  rpc::TaskSpec replay;
+  rpc::ObjectReference ref;
+  ASSERT_TRUE(manager_.AddPendingStreamingTaskFromWitness(
+      consumer, descriptor, reply, 1, {live}, &ref, &replay).ok());
+  EXPECT_EQ(ref.object_id(), descriptor.generator_id());
+  EXPECT_TRUE(reference_counter_->OwnedByUs(live));
+  EXPECT_EQ(reference_counter_->GetAllReferenceCounts().at(live), count);
+  EXPECT_EQ(replay.attempt_number(), 1);
+  EXPECT_EQ(replay.caller_address().worker_id(), addr_.worker_id());
+  EXPECT_EQ(replay.num_streaming_generator_returns(), 2);
+  const auto registered = manager_.GetTaskSpec(spec.TaskId());
+  ASSERT_TRUE(registered.has_value());
+  EXPECT_EQ(registered->GetMessage().SerializeAsString(), replay.SerializeAsString());
+  auto request = GetIntermediateTaskReturn(
+      1, false, spec.ReturnId(0), spec.StreamingGeneratorReturnId(1),
+      GenerateRandomBuffer(), false);
+  request.set_attempt_number(1);
+  ASSERT_TRUE(manager_.HandleReportGeneratorItemReturns(request, [](Status) {}));
+  ObjectID read;
+  ASSERT_TRUE(manager_.TryReadObjectRefStream(spec.ReturnId(0), &read).ok());
+  EXPECT_EQ(read, spec.StreamingGeneratorReturnId(1));
+  const auto counts = reference_counter_->GetAllReferenceCounts();
+  EXPECT_FALSE(manager_.AddPendingStreamingTaskFromWitness(
+      consumer, descriptor, reply, 1, {live}, &ref, &replay).ok());
+  EXPECT_EQ(reference_counter_->GetAllReferenceCounts(), counts);
+  CompletePendingStreamingTask(TaskSpecification(replay), consumer, 2);
+  DeleteStreamAndRelease(spec.ReturnId(0), {live, read});
+}
+
+TEST_F(StreamingRecoveryTest, RejectedWitnessGrantDoesNotMutateOwnershipOrOutputs) {
+  auto spec = RecoverySpec();
+  auto reply = WitnessGrant(spec);
+  const auto descriptor = reply.task_spec().recovery_stream_descriptor();
+  const auto live = spec.StreamingGeneratorReturnId(0);
+  Borrow(live, descriptor.manifest().succession(0).address());
+  const auto counts = reference_counter_->GetAllReferenceCounts();
+  rpc::TaskSpec replay;
+  replay.set_task_id("unchanged");
+  rpc::ObjectReference ref;
+  ref.set_object_id("unchanged");
+  for (const bool invalid_claim : {true, false}) {
+    reply.set_claim_result(invalid_claim ? rpc::GetRecoveryWitnessReply::CLAIM_ALREADY_GRANTED
+                                         : rpc::GetRecoveryWitnessReply::CLAIM_GRANTED);
+    // The second rejection comes from native validation after the grant passes:
+    // the live consumed ref was omitted, so the ownership batch cannot commit.
+    EXPECT_FALSE(manager_.AddPendingStreamingTaskFromWitness(
+        descriptor.consumer_address(), descriptor, reply, 1, {}, &ref, &replay).ok());
+    EXPECT_EQ(manager_.NumPendingTasks(), 0);
+    EXPECT_EQ(reference_counter_->GetAllReferenceCounts(), counts);
+    EXPECT_FALSE(reference_counter_->OwnedByUs(live));
+    EXPECT_EQ(ref.object_id(), "unchanged");
+    EXPECT_EQ(replay.task_id(), "unchanged");
+  }
+  reference_counter_->RemoveLocalReference(live, nullptr);
 }
 
 TEST_F(TaskManagerTest, TestRecordMetrics) {

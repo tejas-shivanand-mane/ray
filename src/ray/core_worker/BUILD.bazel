@@ -307,6 +307,7 @@ ray_cc_library(
         "//src/ray/common:buffer",
         "//src/ray/common:id",
         "//src/ray/common:protobuf_utils",
+        "//src/ray/common/streaming_recovery",
         "//src/ray/core_worker/actor_management:actor_manager",
         "//src/ray/core_worker_rpc_client:core_worker_client_interface",
         "//src/ray/protobuf:common_cc_proto",

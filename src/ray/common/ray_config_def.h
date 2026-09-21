@@ -206,6 +206,10 @@ RAY_CONFIG(bool, enable_recovery_succession, false)
 /// This flag has an effect only when enable_recovery_succession=true.
 RAY_CONFIG(bool, enable_recovery_witness_holder_baseline, false)
 
+/// Accept the bounded streaming descriptor/claim protocol at Fixed-R witnesses.
+/// This does not enable automatic streaming enrollment or a Python adapter.
+RAY_CONFIG(bool, enable_recovery_streaming_fixed_r, false)
+
 /// Serialize complete baseline lineage once at activation and transport those
 /// bytes to all R holders instead of traversing the protobuf independently R times.
 RAY_CONFIG(bool, enable_recovery_baseline_serialize_task_spec_once, false)

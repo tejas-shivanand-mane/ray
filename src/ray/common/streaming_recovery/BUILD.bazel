@@ -1,0 +1,28 @@
+load("//bazel:ray.bzl", "ray_cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+ray_cc_library(
+    name = "streaming_recovery",
+    srcs = ["streaming_recovery.cc"],
+    hdrs = ["streaming_recovery.h"],
+    deps = [
+        "//src/ray/common:id",
+        "//src/ray/common:ray_config",
+        "//src/ray/common:status",
+        "//src/ray/protobuf:common_cc_proto",
+        "//src/ray/protobuf:node_manager_cc_proto",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "streaming_recovery_test",
+    srcs = ["streaming_recovery_test.cc"],
+    deps = [
+        ":streaming_recovery",
+        "//src/ray/common:id",
+        "//src/ray/common:ray_config",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

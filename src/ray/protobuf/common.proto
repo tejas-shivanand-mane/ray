@@ -638,6 +638,10 @@ message TaskSpec {
   // but nested first-holder TaskSpec piggybacks are stripped.
   repeated RecoveryTaskArgumentMetadata recovery_argument_metadata = 48;
 
+  // Explicit, bounded Fixed-R streaming enrollment. Ordinary streaming tasks
+  // do not populate this field. Retained with the complete immutable recipe.
+  optional RecoveryStreamDescriptor recovery_stream_descriptor = 49;
+
 
 
 }
@@ -1225,6 +1229,20 @@ message RecoveryManifest {
   int32 max_recovery_attempts = 11;
 }
 
+
+// Version 1: one finite normal streaming task, one surviving consumer, K=1.
+// The manifest is the immutable installation topology (recovery_attempt=0).
+// The delivery cursor and live consumed refs belong to the surviving consumer;
+// they must never be restored from this installation-time descriptor.
+// Possession alone does not prove all-R installation or consumer receipt.
+message RecoveryStreamDescriptor {
+  uint32 version = 1;
+  bytes task_id = 2;
+  bytes generator_id = 3;
+  int64 expected_returns = 4;
+  Address consumer_address = 5;
+  RecoveryManifest manifest = 6;
+}
 
 // Patch 4H: compact transport form used only inside downstream TaskSpec
 // ObjectReference recovery metadata. Internal manager state and generic object

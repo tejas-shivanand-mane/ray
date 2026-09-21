@@ -86,7 +86,7 @@ survives. This primitive neither authenticates a recovery descriptor nor
 recreates a failed coordinator. It must not be exposed as unrestricted public
 ownership adoption.
 
-## Tests written, not executed
+## Tests and user validation
 
 Eight `StreamingRecoveryTest` cases were added to the existing native
 `task_manager_test` target. They exercise the real ReferenceCounter and native
@@ -125,5 +125,9 @@ python -m pytest -q python/ray/tests/test_streaming_generator.py
 python gossip_benchmarks/11_generalized_succession_correctness.py
 ```
 
-No builds, tests, lint, benchmarks, or rendering were run for this change.
-Validation so far is manual source review only. README is unchanged.
+No builds, tests, lint, benchmarks, or rendering were run by the agent.
+On 2026-09-21 the user reported that the focused `StreamingRecoveryTest.*`
+command and then the full `task_manager_test` plus `reference_counter_test`
+command above passed for commit `565816c09fb8fe897641c238b8c888e7d44a0345`.
+These results validate that native step; they do not cover later protocol changes
+or a distributed owner-loss run. README is unchanged.

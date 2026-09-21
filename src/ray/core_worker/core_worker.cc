@@ -7209,6 +7209,13 @@ CoreWorker::StartRecoveryReplay(
     return std::nullopt;
   }
 
+  // Streaming replay requires the descriptor/consumer claim handoff, including
+  // its live cursor. It must never enter the static-return adoption path.
+  if (replay_task_proto.streaming_generator() ||
+      replay_task_proto.has_recovery_stream_descriptor()) {
+    return std::nullopt;
+  }
+
   // The worker performing the replay becomes the new owner.
   replay_task_proto.mutable_caller_address()->CopyFrom(
       rpc_address_);

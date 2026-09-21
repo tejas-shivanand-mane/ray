@@ -491,6 +491,31 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskInternal(
   return returned_refs;
 }
 
+Status TaskManager::AddPendingStreamingTaskFromWitness(
+    const rpc::Address &consumer,
+    const rpc::RecoveryStreamDescriptor &descriptor,
+    const rpc::GetRecoveryWitnessReply &reply,
+    int64_t next_index,
+    const std::vector<ObjectID> &live_consumed_returns,
+    rpc::ObjectReference *generator_ref,
+    rpc::TaskSpec *replay_task) {
+  if (replay_task == nullptr) {
+    return Status::Invalid("Streaming witness handoff requires a replay output");
+  }
+  rpc::TaskSpec prepared;
+  RAY_RETURN_NOT_OK(PrepareRecoveryStreamReplay(descriptor, consumer, reply, &prepared));
+  TaskSpecification spec(prepared);
+  RAY_RETURN_NOT_OK(AddPendingStreamingTaskForRecovery(consumer,
+                                                      spec,
+                                                      "Fixed-R streaming replay",
+                                                      descriptor.expected_returns(),
+                                                      next_index,
+                                                      live_consumed_returns,
+                                                      generator_ref));
+  replay_task->Swap(&prepared);
+  return Status::OK();
+}
+
 Status TaskManager::AddPendingStreamingTaskForRecovery(
     const rpc::Address &caller_address,
     const TaskSpecification &spec,

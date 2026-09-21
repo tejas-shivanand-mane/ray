@@ -27,6 +27,7 @@
 #include "absl/synchronization/mutex.h"
 #include "ray/common/id.h"
 #include "ray/common/status.h"
+#include "ray/common/streaming_recovery/streaming_recovery.h"
 #include "ray/core_worker/core_worker_options.h"
 #include "ray/core_worker/reference_counter_interface.h"
 #include "ray/core_worker/store_provider/memory_store/memory_store.h"
@@ -343,6 +344,20 @@ class TaskManager : public TaskManagerInterface {
       int64_t next_index,
       const std::vector<ObjectID> &live_consumed_returns,
       rpc::ObjectReference *generator_ref);
+
+  // Checked witness-to-adoption handoff. Enrollment readiness, owner-loss
+  // observation and RPC provenance belong to the CoreWorker adapter. This
+  // validates the grant before calling the native primitive, and returns the
+  // exact registered TaskSpec for subsequent dispatch. Same lifetime and
+  // serialization requirements as AddPendingStreamingTaskForRecovery apply.
+  Status AddPendingStreamingTaskFromWitness(
+      const rpc::Address &consumer,
+      const rpc::RecoveryStreamDescriptor &descriptor,
+      const rpc::GetRecoveryWitnessReply &reply,
+      int64_t next_index,
+      const std::vector<ObjectID> &live_consumed_returns,
+      rpc::ObjectReference *generator_ref,
+      rpc::TaskSpec *replay_task);
 
   std::optional<rpc::ErrorType> ResubmitTask(const TaskID &task_id,
                                              std::vector<ObjectID> *task_deps) override;

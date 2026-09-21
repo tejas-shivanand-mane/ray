@@ -553,6 +553,10 @@ message GetRecoveryWitnessRequest {
   // CoreWorker that will become acting owner and submit the replay.
   // Required when claim_recovery is true.
   optional Address claimant_address = 3;
+
+  // Required for an explicitly enrolled stream. Must equal the descriptor
+  // retained with the witness recipe; rejected for an ordinary static task.
+  optional RecoveryStreamDescriptor stream_descriptor = 4;
 }
 
 message GetRecoveryWitnessReply {

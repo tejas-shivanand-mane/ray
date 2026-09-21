@@ -51,6 +51,7 @@
 #include "ray/common/scheduling/scheduling_ids.h"
 #include "ray/common/status.h"
 #include "ray/common/status_or.h"
+#include "ray/common/streaming_recovery/streaming_recovery.h"
 #include "ray/core_worker_rpc_client/core_worker_client_pool.h"
 #include "ray/flatbuffers/node_manager_generated.h"
 #include "ray/raylet/local_object_manager_interface.h"
@@ -541,9 +542,16 @@ void NodeManager::HandleUpdateRecoveryWitness(
         rpc::RecoveryManifest &stored_manifest = manifest_it->second;
         reply->mutable_latest_manifest()->CopyFrom(stored_manifest);
 
-        if (stored_manifest.tombstoned() ||
-            recovery_witness_task_specs_.find(task_id) ==
-                recovery_witness_task_specs_.end()) {
+        const auto retained_recipe = recovery_witness_task_specs_.find(task_id);
+        const bool stream_claim_invalid =
+            retained_recipe != recovery_witness_task_specs_.end() &&
+            retained_recipe->second.has_recovery_stream_descriptor() &&
+            (!RayConfig::instance().enable_recovery_streaming_fixed_r() ||
+             incoming_claim.recovery_attempt() != 1 ||
+             !RecoveryStreamClaimantMatches(retained_recipe->second,
+                                            incoming_claim.acting_owner()));
+        if (stored_manifest.tombstoned() || stream_claim_invalid ||
+            retained_recipe == recovery_witness_task_specs_.end()) {
           reply->set_stored(false);
         } else {
           size_t self_witness_index =
@@ -756,7 +764,13 @@ void NodeManager::HandleUpdateRecoveryWitness(
         baseline_enabled &&
         incoming_task_spec->task_id() == incoming.task_id() &&
         incoming_task_spec->has_recovery_manifest() &&
-        manifests_equal(incoming_task_spec->recovery_manifest(), incoming);
+        manifests_equal(incoming_task_spec->recovery_manifest(), incoming) &&
+        ((!incoming_task_spec->streaming_generator() &&
+          !incoming_task_spec->has_recovery_stream_descriptor()) ||
+         (RayConfig::instance().enable_recovery_streaming_fixed_r() &&
+          ValidateRecoveryStreamRecipe(*incoming_task_spec).ok() &&
+          manifests_equal(incoming_task_spec->recovery_stream_descriptor().manifest(),
+                          incoming)));
 
     if (!valid_lineage) {
       reply->set_stored(false);
@@ -774,6 +788,20 @@ void NodeManager::HandleUpdateRecoveryWitness(
       witness_mutex_acquired_ns = RecoveryWitnessProfileNowNs();
       reply->set_witness_mutex_wait_time_ns(
           witness_mutex_acquired_ns - witness_mutex_wait_start_ns);
+    }
+
+    // A stream's enrollment binds its full recipe and designated consumer.
+    // Neither same-generation retries nor later installs may replace it, remove
+    // its descriptor, or turn a previously static task into a stream.
+    const auto recipe_it = recovery_witness_task_specs_.find(task_id);
+    if (incoming_task_spec != nullptr && recipe_it != recovery_witness_task_specs_.end() &&
+        (incoming_task_spec->has_recovery_stream_descriptor() ||
+         recipe_it->second.has_recovery_stream_descriptor())) {
+      if (!SameRecoveryStreamRecipe(*incoming_task_spec, recipe_it->second)) {
+        reply->set_stored(false);
+        send_reply(Status::OK(), nullptr, nullptr);
+        return;
+      }
     }
 
     auto existing_it = recovery_witness_manifests_.find(task_id);
@@ -1288,6 +1316,33 @@ void NodeManager::HandleGetRecoveryWitness(
       reply->mutable_manifest()->CopyFrom(stored_manifest);
       reply->set_claim_result(
           rpc::GetRecoveryWitnessReply::CLAIM_TOMBSTONED);
+      send_reply_callback(Status::OK(), nullptr, nullptr);
+      return;
+    }
+
+    const auto &recipe = task_spec_it->second;
+    if (recipe.has_recovery_stream_descriptor()) {
+      const auto &descriptor = recipe.recovery_stream_descriptor();
+      // Version 1 protects an owner-node crash and a surviving single consumer.
+      // Validate before reserving an attempt. A caller cannot use a static
+      // object claim or change the retained cursor owner to adopt a stream.
+      if (!RayConfig::instance().enable_recovery_streaming_fixed_r() ||
+          !request.has_stream_descriptor() ||
+          !SameRecoveryStreamDescriptor(request.stream_descriptor(), descriptor) ||
+          !RecoveryStreamClaimantMatches(recipe, request.claimant_address()) ||
+          !failed_nodes_cache_.contains(
+              NodeID::FromBinary(descriptor.manifest().succession(0).address().node_id())) ||
+          failed_nodes_cache_.contains(
+              NodeID::FromBinary(request.claimant_address().node_id())) ||
+          failed_workers_cache_.contains(
+              WorkerID::FromBinary(request.claimant_address().worker_id())) ||
+          stored_manifest.recovery_attempt() > 1) {
+        reply->set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_INVALID);
+        send_reply_callback(Status::OK(), nullptr, nullptr);
+        return;
+      }
+    } else if (request.has_stream_descriptor() || recipe.streaming_generator()) {
+      reply->set_claim_result(rpc::GetRecoveryWitnessReply::CLAIM_INVALID);
       send_reply_callback(Status::OK(), nullptr, nullptr);
       return;
     }
