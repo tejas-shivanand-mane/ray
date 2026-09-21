@@ -650,10 +650,10 @@ TEST_F(OwnershipBasedObjectDirectoryTest, StreamingRebindFencesOldOwnerCallbacks
   rpc::PubMessage message;
   message.mutable_worker_object_locations_message()->add_node_ids(
       NodeID::FromRandom().Binary());
-  old_success(message);
+  old_success(rpc::PubMessage(message));
   ASSERT_TRUE(mark_as_failed_calls.empty());
   ASSERT_EQ(deliveries, 0);
-  subscriber_->success_callbacks.at(id.Binary())(message);
+  subscriber_->success_callbacks.at(id.Binary())(rpc::PubMessage(message));
   ASSERT_EQ(deliveries, 1);
   subscriber_->failure_callbacks.at(id.Binary())(
       id.Binary(), Status::Disconnected("Consumer died"));
