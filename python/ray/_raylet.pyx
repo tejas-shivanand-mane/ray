@@ -5273,6 +5273,15 @@ cdef class CoreWorker:
             check_status(CCoreWorkerProcess.GetCoreWorker().ConfirmStreamingRecoveryReceipt(
                 c_generator_id, c_descriptor, c_consumer_address))
 
+    def validate_streaming_recovery_inputs(self, input_refs):
+        cdef c_vector[CObjectID] ids
+        cdef ObjectRef ref
+        for ref in input_refs:
+            ids.push_back(ref.native())
+        with nogil:
+            check_status(CCoreWorkerProcess.GetCoreWorker().ValidateStreamingRecoveryInputs(
+                ids))
+
     def recover_streaming_task(
             self, bytes descriptor, int64_t next_index, live_consumed_returns,
             int64_t timeout_ms):

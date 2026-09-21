@@ -2,7 +2,8 @@
 
 Use StreamingRecoveryReader with a StreamingRecoveryOwnerActor on another node.
 The designated consumer, driver/job, and runtime must survive. Inputs are by
-value, output count is finite/known, and there must be no earlier executor retry.
+value or ready ObjectRefs owned by the consumer. Output count is finite/known,
+and there must be no earlier executor retry.
 """
 
 import math
@@ -447,6 +448,8 @@ class StreamingRecoveryReader:
     """One consumer's original delivery and owner-node-loss replay transport.
 
     Keep this reader and consumed ObjectRefs on the same surviving worker.
+    Direct input ObjectRefs must be ready and owned by this consumer, with no
+    nested refs or tensor transport. The reader retains them until close.
     Serialize reader operations and pause other gets/exports during recovery.
     release(index) requires all application uses/aliases of that output to end.
     close() acknowledges tombstones at every surviving selected holder.
@@ -466,6 +469,17 @@ class StreamingRecoveryReader:
     ):
         timeout_ms = _timeout_ms(timeout_s)
         address = streaming_recovery_address()
+        # Snapshot direct dependencies before exporting the submission. Retain
+        # them through EOF and recovery even if the application drops its refs.
+        args = tuple(args)
+        kwargs = dict(kwargs or {})
+        input_refs = tuple(
+            value for value in (*args, *kwargs.values())
+            if isinstance(value, ray.ObjectRef)
+        )
+        ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs(
+            input_refs
+        )
         try:
             descriptor, _ = ray.get(
                 owner.begin.remote(
@@ -479,6 +493,7 @@ class StreamingRecoveryReader:
             owner.close.remote()
             raise
         reader = cls(owner, descriptor, address, timeout_s)
+        reader._input_refs = input_refs
         try:
             ray.get(owner.confirm.remote(descriptor, address), timeout=timeout_s)
             deadline = time.monotonic() + timeout_s
@@ -504,6 +519,7 @@ class StreamingRecoveryReader:
         self.consumer = StreamingRecoveryConsumer(descriptor, address)
         self.timeout_s = timeout_s
         self._closed = False
+        self._input_refs = ()
 
     def __iter__(self):
         return self
@@ -562,6 +578,7 @@ class StreamingRecoveryReader:
             self.consumer.close()
         # A timed-out close can be retried; it must not report durable success.
         self._closed = True
+        self._input_refs = ()
 
     def __reduce__(self):
         raise TypeError("Streaming reader must remain on its designated consumer")

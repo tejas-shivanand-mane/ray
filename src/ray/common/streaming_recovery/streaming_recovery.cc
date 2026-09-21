@@ -97,13 +97,28 @@ Status ValidateRecoveryStreamRecipe(const rpc::TaskSpec &recipe) {
            static_cast<uint64_t>(d.expected_returns()))) {
     return Status::Invalid("Recipe does not satisfy the bounded streaming contract");
   }
-  for (const auto &arg : recipe.args()) {
-    if (arg.has_object_ref() || !arg.nested_inlined_refs().empty()) {
-      return Status::Invalid("Streaming recovery requires by-value inputs without refs");
-    }
-  }
+  return ValidateRecoveryStreamInputs(recipe, d.consumer_address());
+}
+
+Status ValidateRecoveryStreamInputs(const rpc::TaskSpec &recipe,
+                                   const rpc::Address &consumer) {
   if (!recipe.recovery_argument_metadata().empty()) {
     return Status::Invalid("Streaming recovery does not support dependency sidecars");
+  }
+  for (const auto &arg : recipe.args()) {
+    if (!arg.nested_inlined_refs().empty()) {
+      return Status::Invalid("Streaming recovery does not support nested input refs");
+    }
+    if (arg.has_object_ref()) {
+      const auto &ref = arg.object_ref();
+      if (ref.object_id().size() != ObjectID::Size() ||
+          ObjectID::FromBinary(ref.object_id()).IsNil() ||
+          ObjectID::FromBinary(ref.object_id()).TaskId().Binary() == recipe.task_id() ||
+          !SameAddress(ref.owner_address(), consumer) || ref.has_tensor_transport() ||
+          ref.has_recovery_metadata()) {
+        return Status::Invalid("Streaming input refs must belong to the designated consumer");
+      }
+    }
   }
   return Status::OK();
 }

@@ -502,6 +502,38 @@ TEST_F(StreamingRecoveryTest, PlasmaReportsPublishLocationsWithoutCreationNotifi
   DeleteStreamAndRelease(generator_id, {retained, unread});
 }
 
+TEST_F(StreamingRecoveryTest, RetainedConsumerInputUsesNormalTaskReferenceAccounting) {
+  auto spec = RecoverySpec();
+  const auto input_id = ObjectID::FromRandom();
+  auto *input = spec.GetMutableMessage().add_args()->mutable_object_ref();
+  input->set_object_id(input_id.Binary());
+  input->mutable_owner_address()->CopyFrom(addr_);
+  rpc::ObjectReference generator_ref;
+  // A recipe's claimed ownership is insufficient without a live local input.
+  ASSERT_FALSE(manager_.AddPendingStreamingTaskForRecovery(
+      addr_, spec, "recover", 0, 0, {}, &generator_ref).ok());
+  EXPECT_EQ(manager_.NumPendingTasks(), 0);
+  EXPECT_EQ(reference_counter_->NumObjectIDsInScope(), 0);
+  reference_counter_->AddOwnedObject(
+      input_id, {}, addr_, "retained input", 100,
+      LineageReconstructionEligibility::ELIGIBLE,
+      true);
+  EXPECT_FALSE(reference_counter_->ValidateStreamingRecoveryInputs({input_id}).ok());
+  reference_counter_->UpdateObjectPendingCreation(input_id, false);
+  ASSERT_TRUE(reference_counter_->ValidateStreamingRecoveryInputs({input_id}).ok());
+  ASSERT_TRUE(manager_.AddPendingStreamingTaskForRecovery(
+      addr_, spec, "recover", 0, 0, {}, &generator_ref).ok());
+  const auto during = reference_counter_->GetAllReferenceCounts().at(input_id);
+  EXPECT_EQ(during.first, 1);
+  EXPECT_EQ(during.second, 1);
+  CompletePendingStreamingTask(spec, addr_, 0);
+  const auto after = reference_counter_->GetAllReferenceCounts().at(input_id);
+  EXPECT_EQ(after.first, 1);
+  EXPECT_EQ(after.second, 0);
+  reference_counter_->RemoveLocalReference(input_id, nullptr);
+  DeleteStreamAndRelease(spec.ReturnId(0), {});
+}
+
 TEST_F(StreamingRecoveryTest, EmptyAndBoundaryCursorsWaitForCompletion) {
   for (const auto &[count, cursor] :
        std::vector<std::pair<int64_t, int64_t>>{{0, 0}, {3, 0}, {3, 3}}) {

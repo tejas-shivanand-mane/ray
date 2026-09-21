@@ -18,6 +18,8 @@ namespace ray {
 
 Status ValidateRecoveryStreamDescriptor(const rpc::RecoveryStreamDescriptor &descriptor);
 Status ValidateRecoveryStreamRecipe(const rpc::TaskSpec &recipe);
+Status ValidateRecoveryStreamInputs(const rpc::TaskSpec &recipe,
+                                   const rpc::Address &consumer);
 bool SameRecoveryStreamDescriptor(const rpc::RecoveryStreamDescriptor &left,
                                   const rpc::RecoveryStreamDescriptor &right);
 bool RecoveryStreamClaimantMatches(const rpc::TaskSpec &recipe,

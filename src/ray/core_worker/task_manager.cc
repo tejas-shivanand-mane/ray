@@ -537,11 +537,14 @@ Status TaskManager::AddPendingStreamingTaskForRecovery(
           RayConfig::instance().max_num_generator_returns()) {
     return Status::Invalid("Unsupported streaming recovery task or cursor/count");
   }
+  RAY_RETURN_NOT_OK(ValidateRecoveryStreamInputs(proto, caller_address));
+  std::vector<ObjectID> input_ids;
   for (const auto &arg : proto.args()) {
-    if (arg.has_object_ref() || !arg.nested_inlined_refs().empty()) {
-      return Status::Invalid("Streaming recovery currently requires by-value inputs");
+    if (arg.has_object_ref()) {
+      input_ids.push_back(ObjectID::FromBinary(arg.object_ref().object_id()));
     }
   }
+  RAY_RETURN_NOT_OK(reference_counter_.ValidateStreamingRecoveryInputs(input_ids));
   const ObjectID generator_id = spec.ReturnId(0);
   for (const auto &id : live_consumed_returns) {
     if (id.TaskId() != spec.TaskId() || id.ObjectIndex() < 2 ||

@@ -329,7 +329,8 @@ class TaskManager : public TaskManagerInterface {
   /// the listed refs and serialize submission/adoption for this TaskID until
   /// this call returns. Concurrent calls to this API are serialized internally.
   ///
-  /// Supports a finite normal streaming task with by-value inputs and one
+  /// Supports a finite normal streaming task with by-value or ready, retained,
+  /// consumer-owned inputs without nested refs/tensor transport, and one
   /// object per yield. live_consumed_returns must enumerate all locally tracked
   /// yielded refs, and every one must precede next_index. Duplicate registration
   /// is rejected without adding references or rewinding an existing stream.

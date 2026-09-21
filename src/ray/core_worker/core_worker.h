@@ -1073,6 +1073,7 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                                         const std::string &consumer_address);
 
   // Blocking frontend-thread APIs; never call from the CoreWorker IO loop.
+  Status ValidateStreamingRecoveryInputs(const std::vector<ObjectID> &object_ids) const;
   Status RecoverStreamingTask(const std::string &descriptor,
                               int64_t next_index,
                               const std::vector<ObjectID> &live_consumed_returns,

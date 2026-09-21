@@ -93,6 +93,14 @@ class ReferenceCounterInterface {
   /// Return true if the object is owned by us.
   virtual bool OwnedByUs(const ObjectID &object_id) const = 0;
 
+  // The surviving consumer must retain ready, locally owned, reference-free
+  // inputs throughout enrollment/replay. Do not promote borrowed dependencies.
+  virtual Status ValidateStreamingRecoveryInputs(
+      const std::vector<ObjectID> &object_ids) const {
+    return object_ids.empty() ? Status::OK()
+                              : Status::Invalid("Streaming input validation unavailable");
+  }
+
   /// Increase the reference count for the ObjectID by one. If there is no
   /// entry for the ObjectID, one will be created. The object ID will not have
   /// any owner information, since we don't know how it was created.

@@ -74,6 +74,9 @@ class Owner:
     def pid(self):
         return os.getpid()
 
+    def make_input(self):
+        return [ray.put(42)]
+
 
 @pytest.fixture(scope="module")
 def recovery_cluster():
@@ -243,7 +246,7 @@ def test_invalid_recipe_fails_submission_without_killing_worker(owner, tmp_path,
     elif invalid == "malformed_address":
         address += b"\x80"
     else:
-        ref = ray.put(42)
+        ref = ray.get(owner.make_input.remote())[0] if invalid == "by_ref" else ray.put(42)
         # Nest once for the actor call so the owner receives an ObjectRef.
         extra = [ref] if invalid == "by_ref" else [{"nested": ref}]
     with pytest.raises(RayTaskError):

@@ -35,6 +35,11 @@ Status AwaitStreamRpc(Send send, Deadline deadline, Reply *reply) {
 }
 }  // namespace
 
+Status CoreWorker::ValidateStreamingRecoveryInputs(
+    const std::vector<ObjectID> &object_ids) const {
+  return reference_counter_->ValidateStreamingRecoveryInputs(object_ids);
+}
+
 Status CoreWorker::RecoverStreamingTask(
     const std::string &serialized_descriptor,
     int64_t next_index,

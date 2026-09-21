@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import pickle
 import time
 
 import pytest
@@ -75,10 +76,11 @@ def stream(surviving_cluster, tmp_path):
     readers = []
     crashed = False
 
-    def start(count=3, size=200_000, gate=None):
+    def start(count=3, size=200_000, gate=None, task=producer, task_args=None):
         reader = StreamingRecoveryReader.submit(
-            owner, producer, expected_returns=count,
-            args=(count, size, str(tmp_path / "attempts"), gate),
+            owner, task, expected_returns=count,
+            args=(count, size, str(tmp_path / "attempts"), gate)
+            if task_args is None else task_args,
             resources={"replay_executor": 0.01},
             _generator_backpressure_num_objects=1,
             timeout_s=60,
@@ -221,6 +223,73 @@ def test_live_owner_and_foreign_consumer_cannot_claim(stream):
     assert ray.get(ref, timeout=30) == bytes([0]) * 200_000
     assert list(reader) == []
     assert (directory / "attempts").read_text().splitlines() == ["0"]
+
+
+@ray.remote(num_returns="streaming", max_retries=1)
+def data_map_stream(transformer, data_context, task_context, block, attempts_path):
+    from ray.data._internal.execution.operators.map_operator import _map_task
+
+    attempt = ray._private.worker.global_worker.core_worker.get_current_task_attempt_number()
+    with Path(attempts_path).open("a") as log:
+        log.write(f"{attempt}\n")
+    yield from _map_task(transformer, data_context, task_context, block)
+
+
+def identity_blocks(blocks, ctx):
+    yield from blocks
+
+
+@pytest.mark.parametrize("consumed", [0, 1, 2])
+def test_ray_data_map_task_with_retained_input_refs(stream, consumed):
+    import pyarrow as pa
+    from ray.data._internal.execution.interfaces.task_context import TaskContext
+    from ray.data._internal.execution.operators.map_transformer import (
+        BlockMapTransformFn,
+        MapTransformer,
+    )
+    from ray.data.context import DataContext
+
+    start, crash, directory = stream
+    block = pa.table({"value": list(range(50_000))})
+    transformer = MapTransformer([
+        BlockMapTransformFn(identity_blocks, disable_block_shaping=True)
+    ])
+    inputs = (
+        ray.put(transformer), ray.put(DataContext.get_current()),
+        TaskContext(task_idx=0, op_name="FixedRDataMap"), ray.put(block),
+        str(directory / "attempts"),
+    )
+    reader = start(count=2, task=data_map_stream, task_args=inputs)
+    del inputs  # The reader, rather than this test variable, retains the inputs.
+    retained = [next(reader) for _ in range(consumed)]
+    ids = [ref.binary() for ref in retained]
+    if consumed == 2:
+        with pytest.raises(StopIteration):
+            next(reader)
+    wait_for_condition(
+        lambda: (directory / "attempts").exists()
+        and (directory / "attempts").read_text().splitlines() == ["0"],
+        timeout=30,
+    )
+    crash()
+    if consumed == 2:
+        reader.recover()
+    outputs = retained + list(reader)
+    assert [ref.binary() for ref in retained] == ids
+    assert len(outputs) == 2
+    recovered_block, serialized_metadata = ray.get(outputs, timeout=60)
+    assert recovered_block.equals(block)
+    metadata = pickle.loads(serialized_metadata)
+    assert metadata.num_rows == block.num_rows
+    assert metadata.schema.equals(block.schema)
+    assert (directory / "attempts").read_text().splitlines() == ["0", "1"]
+
+
+def test_rejects_nested_payload_in_consumer_owned_input(stream):
+    start, _, _ = stream
+    nested = ray.put([ray.put(42)])
+    with pytest.raises(RaySystemError, match="consumer-owned objects without refs"):
+        start(count=0, task_args=(0, 16, "unused", nested))
 
 
 def test_acknowledged_close_prevents_replay(stream):

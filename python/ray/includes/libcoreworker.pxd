@@ -159,6 +159,8 @@ cdef extern from "ray/core_worker/core_worker.h" nogil:
             const c_string &descriptor, int64_t next_index,
             const c_vector[CObjectID] &live_consumed_returns,
             int64_t timeout_ms, CObjectReference *generator_ref)
+        CRayStatus ValidateStreamingRecoveryInputs(
+            const c_vector[CObjectID] &object_ids) const
         CRayStatus CloseStreamingRecovery(const c_string &descriptor, int64_t timeout_ms)
         CRayStatus CreateActor(
             const CRayFunction &function,

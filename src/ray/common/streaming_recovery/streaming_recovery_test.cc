@@ -193,6 +193,29 @@ TEST_F(StreamingRecoveryProtocolTest, RejectsUnsupportedRecipes) {
   }
 }
 
+TEST_F(StreamingRecoveryProtocolTest, ConsumerOwnedInputsSurviveRecipeReplay) {
+  auto *input = recipe.add_args()->mutable_object_ref();
+  input->set_object_id(ObjectID::FromRandom().Binary());
+  input->mutable_owner_address()->CopyFrom(descriptor.consumer_address());
+  ASSERT_TRUE(ValidateRecoveryStreamRecipe(recipe).ok());
+  rpc::TaskSpec replay;
+  ASSERT_TRUE(PrepareRecoveryStreamReplay(
+      descriptor, descriptor.consumer_address(), Grant(), &replay).ok());
+  EXPECT_EQ(replay.args(0).SerializeAsString(), recipe.args(0).SerializeAsString());
+  const std::vector<std::function<void(rpc::ObjectReference &)>> changes = {
+      [](auto &ref) { ref.mutable_owner_address()->CopyFrom(Worker()); },
+      [](auto &ref) { ref.set_object_id("short"); },
+      [](auto &ref) { ref.set_tensor_transport("nixl"); },
+      [](auto &ref) { ref.mutable_recovery_metadata(); },
+      [&](auto &ref) { ref.set_object_id(descriptor.generator_id()); },
+  };
+  for (const auto &change : changes) {
+    auto invalid = recipe;
+    change(*invalid.mutable_args(0)->mutable_object_ref());
+    EXPECT_FALSE(ValidateRecoveryStreamRecipe(invalid).ok());
+  }
+}
+
 TEST_F(StreamingRecoveryProtocolTest, InstalledRecipeCannotChangeOrDropDescriptor) {
   auto retained = recipe;
   retained.clear_recovery_manifest();

@@ -332,6 +332,22 @@ bool ReferenceCounter::AddOrPromoteOwnedObjectForRecoveryInternal(
   return true;
 }
 
+Status ReferenceCounter::ValidateStreamingRecoveryInputs(
+    const std::vector<ObjectID> &object_ids) const {
+  absl::MutexLock lock(&mutex_);
+  for (const auto &id : object_ids) {
+    const auto it = object_id_refs_.find(id);
+    if (it == object_id_refs_.end() || freed_objects_.contains(id) ||
+        !it->second.owned_by_us_ || it->second.local_ref_count == 0 ||
+        it->second.pending_creation_ || !it->second.nested().contains.empty() ||
+        it->second.tensor_transport_.has_value()) {
+      return Status::Invalid(
+          "Streaming inputs must be ready, retained, consumer-owned objects without refs");
+    }
+  }
+  return Status::OK();
+}
+
 Status ReferenceCounter::AdoptStreamingGeneratorForRecovery(
     const ObjectID &generator_id,
     const std::vector<ObjectID> &live_consumed_returns,

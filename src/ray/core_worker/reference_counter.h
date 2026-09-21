@@ -87,6 +87,9 @@ class ReferenceCounter : public ReferenceCounterInterface,
 
   bool OwnedByUs(const ObjectID &object_id) const override ABSL_LOCKS_EXCLUDED(mutex_);
 
+  Status ValidateStreamingRecoveryInputs(
+      const std::vector<ObjectID> &object_ids) const override ABSL_LOCKS_EXCLUDED(mutex_);
+
   void AddLocalReference(const ObjectID &object_id, const std::string &call_site) override
       ABSL_LOCKS_EXCLUDED(mutex_);
 
