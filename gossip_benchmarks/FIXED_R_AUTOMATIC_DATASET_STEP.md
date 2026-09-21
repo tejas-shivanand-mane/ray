@@ -99,3 +99,26 @@ python -m pytest -q --tb=long \
 
 No builds, tests, lint, or benchmarks were run by the assistant. Source inspection
 only; this new runtime path awaits user validation. README is unchanged.
+
+## First suite result and serialization metadata fix
+
+The user's first run failed in all four cases when emitting the first ReadRange
+block. Output accounting incremented before the metrics assertion failed; no
+copied block was recorded. The read-head-failure case did replay one protected
+ReadRange task, but it then hit the same assertion and did not pass validation.
+The map-head-failure case did not reach its selected enrollment.
+
+Source inspection found that the envelope wrapper advanced `_map_task` with
+`next()` after snapshotting each block. The normal generator runner instead sends
+`StreamingGeneratorStats` into `yield_block_with_stats`. Without that feedback,
+`BlockExecStats.block_ser_time_s` was None, violating the output metrics contract.
+The wrapper now measures each block's snapshot serialization and sends that
+duration through the existing protocol. This measures local snapshot serialization,
+not subsequent envelope publication or coordinator copying. The metrics assertion
+remains intact. Regression code exercises the real metadata protocol for multiple
+blocks and checks that each measured duration survives serialization.
+
+The harness also saves `execution_error_traceback` from the executor callback
+before the Dataset API strips internal frames. Rerun the same suite command above;
+no native rebuild is needed. This fix and the new regression code have not been
+executed by the assistant and await user validation.

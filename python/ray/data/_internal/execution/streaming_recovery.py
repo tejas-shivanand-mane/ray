@@ -538,6 +538,7 @@ def buffered_map_task(map_transformer, data_context, ctx, *blocks, **kwargs):
     """
     from ray.data.block import BlockAccessor
     from ray import cloudpickle
+    from ray._raylet import StreamingGeneratorStats
     from ray.data._internal.execution.operators.map_operator import _map_task
 
     config = get_config(data_context)
@@ -561,9 +562,20 @@ def buffered_map_task(map_transformer, data_context, ctx, *blocks, **kwargs):
             # serialization. A UDF may reuse/mutate its batch buffer on its next
             # iteration. Keep real objects in the envelope (not opaque pickled
             # bytes), so contained references remain visible to Ray validation.
-            block = cloudpickle.loads(cloudpickle.dumps(block))
+            serialization_started = time.perf_counter()
+            serialized_block = cloudpickle.dumps(block)
+            serialization_time_s = time.perf_counter() - serialization_started
+            block = cloudpickle.loads(serialized_block)
+            del serialized_block
             try:
-                metadata = next(produced)
+                # _map_task delegates to yield_block_with_stats, which expects
+                # Ray's generator runner to send serialization feedback. We
+                # drive it locally, so report this block's actual snapshot
+                # serialization time. Advancing with next() would leave required
+                # BlockExecStats.block_ser_time_s unset and break output metrics.
+                metadata = produced.send(StreamingGeneratorStats(
+                    object_creation_dur_s=serialization_time_s,
+                ))
             except StopIteration as exc:
                 raise StreamingRecoveryCountError("Task ended between block and metadata") from exc
             # Account for metadata and empty blocks too. This bounds retained

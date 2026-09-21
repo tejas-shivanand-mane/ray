@@ -33,11 +33,15 @@ def execution_control(args):
             self.enrolled = Event()
             self.resume = Event()
             self.target = None
+            self.execution_error_traceback = None
 
         def __getstate__(self):
             # Callback classes travel in the DataContext, but the executor,
             # task handles and thread events must stay in the driver.
-            return {"executor": None, "operators": [], "target": None}
+            return {
+                "executor": None, "operators": [], "target": None,
+                "execution_error_traceback": None,
+            }
 
     control = Control()
     failure = args.recovery_mode == "fixed_r_head_failure"
@@ -49,6 +53,13 @@ def execution_control(args):
     timeout_s = args.recovery_timeout_s
 
     class Capture(ExecutionCallback):
+        def after_execution_fails(self, executor, error):
+            # Preserve internal frames before Dataset's public exception
+            # decorator removes them. Store text, not live traceback references.
+            control.execution_error_traceback = "".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            )
+
         def before_execution_starts(self, executor):
             ops = [op for op in executor._topology if isinstance(op, MapOperator)]
             if not ops:
@@ -223,6 +234,8 @@ def run_dataset(args, crash_head, diagnostics):
         }
     finally:
         control.resume.set()
+        if control.execution_error_traceback is not None:
+            diagnostics["execution_error_traceback"] = control.execution_error_traceback
         diagnostics["last_observation"] = snapshot(control)
         if not registered:
             cloudpickle.unregister_pickle_by_value(original)

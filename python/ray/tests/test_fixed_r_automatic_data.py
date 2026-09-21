@@ -1,6 +1,8 @@
 """Normal Dataset APIs with opt-in bounded finite-task recovery."""
 
+import pickle
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -131,6 +133,58 @@ def test_buffering_snapshots_reused_udf_buffers(monkeypatch):
     assert [block["value"].to_pylist() for block, _ in outputs] == [
         [0] * 4, [1] * 4, [2] * 4,
     ]
+
+
+def test_buffered_blocks_preserve_serialization_stats(monkeypatch):
+    from ray.data._internal.execution import streaming_recovery
+    from ray.data._internal.execution.operators import map_operator
+    from ray.data._internal.execution.util import yield_block_with_stats
+    from ray.data.block import BlockAccessor, BlockExecStats, BlockMetadataWithSchema
+
+    def task(*args, **kwargs):
+        for index in range(2):
+            block = pa.table({"value": [index]})
+
+            def metadata(serialization_time_s):
+                stats = BlockExecStats(
+                    node_id="unit-test-node", wall_time_s=0.25,
+                    block_ser_time_s=serialization_time_s,
+                )
+                return BlockMetadataWithSchema.from_metadata(
+                    replace(BlockAccessor.for_block(block).get_metadata(), exec_stats=stats),
+                    schema=block.schema,
+                )
+
+            # Use the real protocol helper from _map_task. next() in the
+            # envelope wrapper would produce None serialization times here.
+            yield from yield_block_with_stats(block, metadata)
+
+    ticks = iter([10.0, 10.125, 20.0, 20.5])
+    monkeypatch.setattr(streaming_recovery, "time", SimpleNamespace(
+        perf_counter=lambda: next(ticks),
+    ))
+    monkeypatch.setattr(map_operator, "_map_task", task)
+    outputs, _ = list(buffered_map_task(None, buffered_context(), None))
+    stats = [pickle.loads(metadata).exec_stats for _, metadata in outputs]
+    assert [item.block_ser_time_s for item in stats] == [0.125, 0.5]
+    assert [item.wall_time_s for item in stats] == [0.25, 0.25]
+    assert [block["value"].to_pylist() for block, _ in outputs] == [[0], [1]]
+
+
+def test_dataset_failure_diagnostics_preserve_internal_frames(benchmark_modules):
+    control, callback = benchmark_modules.execution_control(arguments())
+
+    def fail_inside_executor():
+        raise AssertionError("internal output failure")
+
+    try:
+        fail_inside_executor()
+    except AssertionError as error:
+        callback().after_execution_fails(None, error)
+        error.with_traceback(None)
+
+    assert "fail_inside_executor" in control.execution_error_traceback
+    assert "AssertionError: internal output failure" in control.execution_error_traceback
 
 
 @pytest.mark.parametrize("kind", ["limit", "udf_error", "incomplete_pair"])
