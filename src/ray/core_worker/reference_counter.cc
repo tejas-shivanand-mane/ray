@@ -249,11 +249,20 @@ bool ReferenceCounter::AddOrPromoteOwnedObjectForRecovery(
     const std::string &call_site,
     LineageReconstructionEligibility lineage_eligibility,
     const std::optional<std::string> &tensor_transport) {
+  absl::MutexLock lock(&mutex_);
+  return AddOrPromoteOwnedObjectForRecoveryInternal(
+      object_id, owner_address, call_site, lineage_eligibility, tensor_transport);
+}
+
+bool ReferenceCounter::AddOrPromoteOwnedObjectForRecoveryInternal(
+    const ObjectID &object_id,
+    const rpc::Address &owner_address,
+    const std::string &call_site,
+    LineageReconstructionEligibility lineage_eligibility,
+    const std::optional<std::string> &tensor_transport) {
   if (object_id.IsNil() || ObjectID::IsActorID(object_id)) {
     return false;
   }
-
-  absl::MutexLock lock(&mutex_);
 
   auto it = object_id_refs_.find(object_id);
 
@@ -321,6 +330,61 @@ bool ReferenceCounter::AddOrPromoteOwnedObjectForRecovery(
   PRINT_REF_COUNT(it);
 
   return true;
+}
+
+Status ReferenceCounter::AdoptStreamingGeneratorForRecovery(
+    const ObjectID &generator_id,
+    const std::vector<ObjectID> &live_consumed_returns,
+    const rpc::Address &owner_address,
+    const std::string &call_site) {
+  if (generator_id.IsNil() || generator_id.ObjectIndex() != 1 ||
+      owner_address.worker_id().empty() ||
+      owner_address.worker_id() != rpc_address_.worker_id()) {
+    return Status::Invalid("Invalid streaming recovery owner or completion ID");
+  }
+  absl::flat_hash_set<ObjectID> live_ids;
+  for (const auto &id : live_consumed_returns) {
+    if (id.IsNil() || id.TaskId() != generator_id.TaskId() ||
+        id.ObjectIndex() < 2 || !live_ids.insert(id).second) {
+      return Status::Invalid("Invalid or duplicate consumed streaming return");
+    }
+  }
+
+  absl::MutexLock lock(&mutex_);
+  // Validate the entire batch before promoting any entry. The bounded API does
+  // not adopt peeked/unconsumed refs or refs that the caller omitted.
+  if (freed_objects_.contains(generator_id)) {
+    return Status::Invalid("Cannot adopt a freed streaming completion ref");
+  }
+  for (const auto &[id, ref] : object_id_refs_) {
+    if (id.TaskId() != generator_id.TaskId()) {
+      continue;
+    }
+    if (ref.owned_by_us_ || (id != generator_id && !live_ids.contains(id))) {
+      return Status::Invalid("Streaming task has conflicting or unlisted references");
+    }
+  }
+  for (const auto &id : live_consumed_returns) {
+    const auto it = object_id_refs_.find(id);
+    if (it == object_id_refs_.end() || freed_objects_.contains(id) ||
+        it->second.OutOfScope(lineage_pinning_enabled_)) {
+      return Status::Invalid("Consumed streaming return is no longer live");
+    }
+  }
+
+  RAY_CHECK(AddOrPromoteOwnedObjectForRecoveryInternal(
+      generator_id, owner_address, call_site,
+      LineageReconstructionEligibility::ELIGIBLE, std::nullopt));
+  // This ref belongs to the newly created generator handle, not to the task's
+  // submitted-ref count. The caller must transfer it to the frontend or release
+  // it explicitly after requesting stream deletion.
+  object_id_refs_.at(generator_id).local_ref_count++;
+  for (const auto &id : live_consumed_returns) {
+    RAY_CHECK(AddOrPromoteOwnedObjectForRecoveryInternal(
+        id, owner_address, call_site,
+        LineageReconstructionEligibility::ELIGIBLE, std::nullopt));
+  }
+  return Status::OK();
 }
 
 void ReferenceCounter::AddDynamicReturn(const ObjectID &object_id,

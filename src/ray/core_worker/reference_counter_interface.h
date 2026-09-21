@@ -208,6 +208,18 @@ class ReferenceCounterInterface {
     return false;
   }
 
+  /// Atomically register a recovery stream's completion ref and promote its
+  /// still-live consumed returns. Reject conflicting ownership or omitted refs
+  /// before making changes. Adds one local completion ref for the new generator
+  /// handle; preserves all existing counts on the consumed returns.
+  virtual Status AdoptStreamingGeneratorForRecovery(
+      const ObjectID &,
+      const std::vector<ObjectID> &,
+      const rpc::Address &,
+      const std::string &) {
+    return Status::NotImplemented("Streaming recovery ownership is not supported");
+  }
+
   /// Add an owned object that was dynamically created. These are objects that
   /// were created by a task that we called, but that we own.
   ///

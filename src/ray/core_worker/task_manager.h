@@ -94,6 +94,10 @@ class ObjectRefStream {
       : generator_task_id_(generator_id.TaskId()),
         generator_id_(std::move(generator_id)) {}
 
+  /// Initialize a fresh stream with a surviving consumer's delivered prefix.
+  /// Does not mark EOF or pretend any unread output has been regenerated.
+  Status RestoreConsumedPrefixForRecovery(int64_t next_index);
+
   /// Asynchronously read object reference of the next index.
   ///
   /// \param[out] object_id_out The next object ID from the stream.
@@ -201,6 +205,8 @@ class ObjectRefStream {
   void MarkCallerDeleted() { caller_deleted_ = true; }
   bool IsCallerDeleted() const { return caller_deleted_; }
 
+  bool IsRecoveryStream() const { return recovery_initialized_; }
+
   /// Record that a reported return was stored in plasma. These are the returns
   /// that can be lost (e.g. their node dies) and must be failed if the generator
   /// task fails before its first completion recorded them on the task spec.
@@ -247,6 +253,8 @@ class ObjectRefStream {
   /// out of scope). Used to decide whether a backpressured executor should be
   /// released while the stream is still retained. See MarkCallerDeleted.
   bool caller_deleted_ = false;
+
+  bool recovery_initialized_ = false;
 };
 
 class TaskManager : public TaskManagerInterface {
@@ -313,6 +321,28 @@ class TaskManager : public TaskManagerInterface {
       const TaskSpecification &spec,
       const std::string &call_site,
       int max_retries);
+
+  /// Experimental native registration only: does not claim witnesses, submit
+  /// the task, or enable streaming eligibility. The caller must first establish
+  /// authority to recover and supply the new execution attempt. It must retain
+  /// the listed refs and serialize submission/adoption for this TaskID until
+  /// this call returns. Concurrent calls to this API are serialized internally.
+  ///
+  /// Supports a finite normal streaming task with by-value inputs and one
+  /// object per yield. live_consumed_returns must enumerate all locally tracked
+  /// yielded refs, and every one must precede next_index. Duplicate registration
+  /// is rejected without adding references or rewinding an existing stream.
+  /// On success, generator_ref owns ONE new frontend local ref; transfer it to
+  /// one generator handle or explicitly release it after requesting deletion.
+  /// Stream deletion completes once the completion and yielded refs are gone.
+  Status AddPendingStreamingTaskForRecovery(
+      const rpc::Address &caller_address,
+      const TaskSpecification &spec,
+      const std::string &call_site,
+      int64_t expected_returns,
+      int64_t next_index,
+      const std::vector<ObjectID> &live_consumed_returns,
+      rpc::ObjectReference *generator_ref);
 
   std::optional<rpc::ErrorType> ResubmitTask(const TaskID &task_id,
                                              std::vector<ObjectID> *task_deps) override;
@@ -659,7 +689,11 @@ class TaskManager : public TaskManagerInterface {
       const TaskSpecification &spec,
       const std::string &call_site,
       int max_retries,
-      bool recovery_replay);
+      bool recovery_replay,
+      std::optional<ObjectRefStream> recovery_stream = std::nullopt,
+      std::optional<int64_t> recovery_expected_returns = std::nullopt);
+
+  absl::Mutex streaming_recovery_registration_mu_;
 
   LineageReleasedCallback lineage_released_callback_;
 
@@ -726,6 +760,10 @@ class TaskManager : public TaskManagerInterface {
     /// TaskSpec for tasks that cannot be retried (e.g., actor tasks), or by
     /// storing a shared_ptr to a PushTaskRequest protobuf for all tasks.
     TaskSpecification spec_;
+    // An explicit recovery contract, including a known zero-return stream.
+    // Unlike ordinary reconstruction, the new owner has no successful attempt
+    // from which to infer this count.
+    std::optional<int64_t> recovery_expected_returns_;
     // Number of times this task may be resubmitted. If this reaches 0, then
     // the task entry may be erased.
     int32_t num_retries_left_;
@@ -826,7 +864,8 @@ class TaskManager : public TaskManagerInterface {
   /// already-reported returns when the task fails before its first completion
   /// recorded them on the task spec.
   std::vector<ObjectID> GetStreamingGeneratorReportedPlasmaRefs(
-      const ObjectID &generator_id) const ABSL_LOCKS_EXCLUDED(object_ref_stream_ops_mu_);
+      const ObjectID &generator_id, bool only_recovery = false) const
+      ABSL_LOCKS_EXCLUDED(object_ref_stream_ops_mu_);
 
   /// Shutdown if all tasks are finished and shutdown is scheduled.
   void ShutdownIfNeeded() ABSL_LOCKS_EXCLUDED(mu_);
@@ -882,8 +921,8 @@ class TaskManager : public TaskManagerInterface {
   /// early in CompletePendingTask: before any return object is written to the
   /// store (so downstream consumers cannot observe the inconsistent objects)
   /// and before SetTaskStatus(FINISHED) (FailPendingTask RAY_CHECKs
-  /// IsPending()). Whether this is a replay is determined internally from the
-  /// task's successful-execution count. The caller must skip this check on
+  /// IsPending()). Adopted streams use their explicit count, including zero;
+  /// ordinary retries use the successful-execution count. Skip this check on
   /// application-error completions, which already route through the failure
   /// path.
   bool FailStreamingGeneratorReplayIfInconsistent(const TaskID &task_id,

@@ -77,6 +77,12 @@ class ReferenceCounter : public ReferenceCounterInterface,
   void DrainAndShutdown(std::function<void()> shutdown) override
       ABSL_LOCKS_EXCLUDED(mutex_);
 
+  Status AdoptStreamingGeneratorForRecovery(
+      const ObjectID &generator_id,
+      const std::vector<ObjectID> &live_consumed_returns,
+      const rpc::Address &owner_address,
+      const std::string &call_site) override ABSL_LOCKS_EXCLUDED(mutex_);
+
   size_t Size() const override ABSL_LOCKS_EXCLUDED(mutex_);
 
   bool OwnedByUs(const ObjectID &object_id) const override ABSL_LOCKS_EXCLUDED(mutex_);
@@ -520,6 +526,14 @@ class ReferenceCounter : public ReferenceCounterInterface,
   };
 
   using ReferenceTable = absl::flat_hash_map<ObjectID, Reference>;
+
+  bool AddOrPromoteOwnedObjectForRecoveryInternal(
+      const ObjectID &object_id,
+      const rpc::Address &owner_address,
+      const std::string &call_site,
+      LineageReconstructionEligibility lineage_eligibility,
+      const std::optional<std::string> &tensor_transport)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   bool AddOwnedObjectInternal(const ObjectID &object_id,
                               const std::vector<ObjectID> &contained_ids,

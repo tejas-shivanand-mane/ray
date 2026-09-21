@@ -63,6 +63,24 @@ rpc::ErrorType MapPlasmaPutStatusToErrorType(const Status &status) {
 
 }  // namespace
 
+Status ObjectRefStream::RestoreConsumedPrefixForRecovery(int64_t next_index) {
+  if (next_index < 0 ||
+      static_cast<uint64_t>(next_index) >=
+          RayConfig::instance().max_num_generator_returns()) {
+    return Status::Invalid("Recovery cursor exceeds streaming return ID bounds");
+  }
+  if (recovery_initialized_ || next_index_ != 0 || end_of_stream_index_ != -1 ||
+      max_index_seen_ != -1 || caller_deleted_ || !refs_written_to_stream_.empty() ||
+      !temporarily_owned_refs_.empty() || !reported_plasma_refs_.empty()) {
+    return Status::Invalid("Recovery requires a fresh object ref stream");
+  }
+  next_index_ = next_index;
+  total_num_object_consumed_ = next_index;
+  total_num_object_written_ = next_index;
+  recovery_initialized_ = true;
+  return Status::OK();
+}
+
 std::vector<ObjectID> ObjectRefStream::PopUnconsumedItems() {
   // Get all unconsumed refs.
   std::vector<ObjectID> unconsumed_ids;
@@ -345,7 +363,9 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskInternal(
     const TaskSpecification &spec,
     const std::string &call_site,
     int max_retries,
-    bool recovery_replay) {
+    bool recovery_replay,
+    std::optional<ObjectRefStream> recovery_stream,
+    std::optional<int64_t> recovery_expected_returns) {
   int32_t max_oom_retries =
       (max_retries != 0) ? RayConfig::instance().task_oom_retries() : 0;
   RAY_LOG(DEBUG) << "Adding pending task " << spec.TaskId() << " with " << max_retries
@@ -396,7 +416,11 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskInternal(
       // object is considered in scope before we return the ObjectRef to the
       // language frontend. Note that the language bindings should set
       // skip_adding_local_ref=True to avoid double referencing the object.
-      if (recovery_replay) {
+      if (recovery_stream.has_value()) {
+        // The streaming adoption API validated and promoted the completion and
+        // consumed refs atomically, including one frontend completion ref.
+        RAY_CHECK(reference_counter_.OwnedByUs(return_id));
+      } else if (recovery_replay) {
         RAY_CHECK(reference_counter_.AddOrPromoteOwnedObjectForRecovery(
             return_id, caller_address, call_site, lineage_eligibility, tensor_transport))
             << "Failed to register succession replay "
@@ -440,8 +464,10 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskInternal(
     const auto generator_id = spec.ReturnId(0);
     RAY_LOG(DEBUG) << "Create an object ref stream of an id " << generator_id;
     absl::MutexLock lock(&object_ref_stream_ops_mu_);
-    auto inserted =
-        object_ref_streams_.emplace(generator_id, ObjectRefStream(generator_id));
+    auto inserted = object_ref_streams_.emplace(
+        generator_id,
+        recovery_stream.has_value() ? std::move(*recovery_stream)
+                                    : ObjectRefStream(generator_id));
     RAY_CHECK(inserted.second);
   }
 
@@ -450,6 +476,7 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskInternal(
     auto inserted = submissible_tasks_.try_emplace(
         spec.TaskId(), spec, max_retries, num_returns, task_counter_, max_oom_retries);
     RAY_CHECK(inserted.second);
+    inserted.first->second.recovery_expected_returns_ = recovery_expected_returns;
     num_pending_tasks_++;
   }
 
@@ -462,6 +489,90 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTaskInternal(
       /* include_task_info */ true));
 
   return returned_refs;
+}
+
+Status TaskManager::AddPendingStreamingTaskForRecovery(
+    const rpc::Address &caller_address,
+    const TaskSpecification &spec,
+    const std::string &call_site,
+    int64_t expected_returns,
+    int64_t next_index,
+    const std::vector<ObjectID> &live_consumed_returns,
+    rpc::ObjectReference *generator_ref) {
+  const auto &proto = spec.GetMessage();
+  if (generator_ref == nullptr || proto.task_id().size() != TaskID::Size() ||
+      proto.type() != rpc::TaskType::NORMAL_TASK || !spec.IsStreamingGenerator() ||
+      spec.NumReturns() != 1 || spec.NumObjectsPerYield() != 1 ||
+      spec.MaxRetries() == 0 || spec.MaxRetries() < -1 || spec.AttemptNumber() <= 0 ||
+      spec.TensorTransport().has_value() || expected_returns < 0 || next_index < 0 ||
+      next_index > expected_returns ||
+      (spec.NumStreamingGeneratorReturns() != 0 &&
+       spec.NumStreamingGeneratorReturns() != static_cast<uint64_t>(expected_returns)) ||
+      static_cast<uint64_t>(expected_returns) >=
+          RayConfig::instance().max_num_generator_returns()) {
+    return Status::Invalid("Unsupported streaming recovery task or cursor/count");
+  }
+  for (const auto &arg : proto.args()) {
+    if (arg.has_object_ref() || !arg.nested_inlined_refs().empty()) {
+      return Status::Invalid("Streaming recovery currently requires by-value inputs");
+    }
+  }
+  const ObjectID generator_id = spec.ReturnId(0);
+  for (const auto &id : live_consumed_returns) {
+    if (id.TaskId() != spec.TaskId() || id.ObjectIndex() < 2 ||
+        static_cast<uint64_t>(id.ObjectIndex() - 2) >=
+            static_cast<uint64_t>(next_index)) {
+      return Status::Invalid("Live streaming return is outside the consumed prefix");
+    }
+  }
+
+  absl::MutexLock registration_lock(&streaming_recovery_registration_mu_);
+  {
+    absl::MutexLock lock(&mu_);
+    if (submissible_tasks_.contains(spec.TaskId())) {
+      return Status::Invalid("Streaming recovery task is already registered");
+    }
+  }
+  {
+    absl::MutexLock lock(&object_ref_stream_ops_mu_);
+    if (object_ref_streams_.contains(generator_id)) {
+      return Status::Invalid("Streaming recovery stream already exists");
+    }
+  }
+  ObjectRefStream stream(generator_id);
+  RAY_RETURN_NOT_OK(stream.RestoreConsumedPrefixForRecovery(next_index));
+  RAY_RETURN_NOT_OK(reference_counter_.AdoptStreamingGeneratorForRecovery(
+      generator_id, live_consumed_returns, caller_address, call_site));
+
+  // Copy rather than mutate a shared TaskSpec. The explicit expected count is
+  // also needed to settle live consumed outputs if this first local attempt
+  // fails before completion records its reports.
+  rpc::TaskSpec replay_proto(proto);
+  replay_proto.mutable_caller_address()->CopyFrom(caller_address);
+  replay_proto.set_num_streaming_generator_returns(expected_returns);
+  TaskSpecification replay_spec(std::move(replay_proto));
+  auto refs = AddPendingTaskInternal(caller_address,
+                                    replay_spec,
+                                    call_site,
+                                    spec.MaxRetries(),
+                                    /*recovery_replay=*/true,
+                                    std::move(stream),
+                                    expected_returns);
+
+  // The CoreWorker integration must also repair plasma/future-resolver state.
+  // Here we clear only stale owner-death values in the native memory store.
+  std::vector<ObjectID> adopted_ids(live_consumed_returns);
+  adopted_ids.push_back(generator_id);
+  for (const auto &id : adopted_ids) {
+    const auto value = in_memory_store_.GetIfExists(id);
+    rpc::ErrorType error_type;
+    if (value != nullptr && value->IsException(&error_type) &&
+        error_type == rpc::ErrorType::OWNER_DIED) {
+      in_memory_store_.Delete({id});
+    }
+  }
+  generator_ref->CopyFrom(refs.front());
+  return Status::OK();
 }
 
 std::optional<rpc::ErrorType> TaskManager::ResubmitTask(
@@ -988,17 +1099,21 @@ bool TaskManager::FailStreamingGeneratorReplayIfInconsistent(
     if (it == submissible_tasks_.end() || !it->second.spec_.IsStreamingGenerator()) {
       return false;
     }
-    // Only a replay can be inconsistent: the first successful execution defines
-    // the expected object count, so there is nothing to compare against yet.
-    if (it->second.num_successful_executions_ == 0) {
-      return false;
+    if (it->second.recovery_expected_returns_.has_value()) {
+      expected_count = *it->second.recovery_expected_returns_;
+    } else {
+      // Ordinary owner-alive reconstruction learns a nonzero expected count
+      // from its first successful execution. Preserve that existing behavior.
+      if (it->second.num_successful_executions_ == 0) {
+        return false;
+      }
+      expected_count = it->second.spec_.NumStreamingGeneratorReturns();
+      if (expected_count == 0) {
+        return false;
+      }
     }
-    expected_count = it->second.spec_.NumStreamingGeneratorReturns();
     actual_count = reply.streaming_generator_return_ids_size();
-    // NumStreamingGeneratorReturns is only recorded when the first successful
-    // attempt yielded > 0 objects (see CompletePendingTask), so expected_count
-    // == 0 means the count is unknown; we cannot detect drift from it.
-    if (expected_count == 0 || expected_count == actual_count) {
+    if (expected_count == actual_count) {
       return false;
     }
     // Use the pinned task spec, so malformed replies without return_objects
@@ -1878,10 +1993,11 @@ absl::flat_hash_set<ObjectID> TaskManager::GetTaskReturnObjectsToStoreInPlasma(
 }
 
 std::vector<ObjectID> TaskManager::GetStreamingGeneratorReportedPlasmaRefs(
-    const ObjectID &generator_id) const {
+    const ObjectID &generator_id, bool only_recovery) const {
   absl::MutexLock lock(&object_ref_stream_ops_mu_);
   auto it = object_ref_streams_.find(generator_id);
-  if (it == object_ref_streams_.end()) {
+  if (it == object_ref_streams_.end() ||
+      (only_recovery && !it->second.IsRecoveryStream())) {
     return {};
   }
   return it->second.GetReportedPlasmaRefs();
@@ -1968,9 +2084,11 @@ void TaskManager::MarkTaskReturnObjectsFailed(
     // lost objects never get an error and stay pending creation forever.
     // Reported refs always go through plasma: a plasma-pull-blocked ray.get
     // wakes only when the error lands in plasma.
-    if (num_streaming_generator_returns == 0) {
-      for (const auto &reported_id :
-           GetStreamingGeneratorReportedPlasmaRefs(generator_id)) {
+    // An adopted stream already has a declared count before its first local
+    // completion. Its reported plasma returns still need this failure path.
+    for (const auto &reported_id : GetStreamingGeneratorReportedPlasmaRefs(
+             generator_id, /*only_recovery=*/num_streaming_generator_returns != 0)) {
+      if (!store_in_plasma_ids.contains(reported_id)) {
         Status s = put_in_local_plasma_callback_(error, reported_id);
         if (!s.ok()) {
           RAY_LOG(WARNING).WithField(reported_id)

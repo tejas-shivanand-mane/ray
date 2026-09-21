@@ -303,6 +303,281 @@ class TaskManagerLineageTest : public TaskManagerTest {
   TaskManagerLineageTest() : TaskManagerTest(true, /*max_lineage_bytes=*/10000) {}
 };
 
+class StreamingRecoveryTest : public TaskManagerTest {
+ public:
+  TaskSpecification RecoverySpec(int64_t backpressure = 1) {
+    auto spec = CreateTaskHelper(1, {}, true, true, backpressure);
+    spec.GetMutableMessage().set_max_retries(2);
+    spec.GetMutableMessage().set_attempt_number(1);
+    return spec;
+  }
+
+  void Borrow(const ObjectID &id, const rpc::Address &owner) {
+    reference_counter_->AddLocalReference(id, "surviving consumer");
+    reference_counter_->AddBorrowedObject(id, ObjectID::Nil(), owner);
+  }
+
+  void DeleteStreamAndRelease(const ObjectID &generator_id,
+                              const std::vector<ObjectID> &frontend_refs) {
+    // Deletion releases unread/EOF refs, but the frontend completion reference
+    // and any consumed live refs must keep the stream alive until released.
+    EXPECT_FALSE(manager_.TryDelObjectRefStream(generator_id));
+    for (const auto &id : frontend_refs) {
+      reference_counter_->RemoveLocalReference(id, nullptr);
+    }
+    reference_counter_->RemoveLocalReference(generator_id, nullptr);
+    EXPECT_TRUE(manager_.TryDelObjectRefStream(generator_id));
+    EXPECT_EQ(reference_counter_->NumObjectIDsInScope(), 0);
+    EXPECT_EQ(reference_counter_->NumObjectsOwnedByUs(), 0);
+  }
+};
+
+TEST_F(StreamingRecoveryTest, RestoresCursorOwnershipAndBackpressure) {
+  auto spec = RecoverySpec();
+  const auto generator_id = spec.ReturnId(0);
+  const auto live_id = spec.StreamingGeneratorReturnId(1);
+  const auto old_owner = GetRandomWorkerAddr();
+  Borrow(live_id, old_owner);
+  reference_counter_->AddLocalReference(live_id, "second live reference");
+  const auto original_count = reference_counter_->GetAllReferenceCounts().at(live_id);
+  store_->Put(RayObject(rpc::ErrorType::OWNER_DIED), live_id, true);
+
+  rpc::ObjectReference generator_ref;
+  ASSERT_TRUE(manager_.AddPendingStreamingTaskForRecovery(
+      addr_, spec, "recover", 4, 2, {live_id}, &generator_ref).ok());
+  ASSERT_EQ(generator_ref.object_id(), generator_id.Binary());
+  ASSERT_EQ(generator_ref.owner_address().worker_id(), addr_.worker_id());
+  ASSERT_TRUE(reference_counter_->OwnedByUs(live_id));
+  ASSERT_EQ(reference_counter_->GetAllReferenceCounts().at(live_id), original_count);
+  ASSERT_EQ(store_->GetIfExists(live_id), nullptr);
+  ASSERT_FALSE(manager_.StreamingGeneratorIsFinished(generator_id));
+
+  int64_t consumed = -1;
+  auto report = [&](int64_t index, uint64_t attempt = 1) {
+    auto data = GenerateRandomBuffer();
+    auto request = GetIntermediateTaskReturn(
+        index, false, generator_id, spec.StreamingGeneratorReturnId(index), data, false);
+    request.set_attempt_number(attempt);
+    return manager_.HandleReportGeneratorItemReturns(
+        request, [](Status) {},
+        [&](Status status, int64_t count) {
+          if (status.ok()) {
+            consumed = count;
+          }
+        });
+  };
+  // A stale attempt must not supply data or consumption credit.
+  ASSERT_FALSE(report(1, 0));
+  ASSERT_EQ(store_->GetIfExists(live_id), nullptr);
+  ASSERT_EQ(consumed, -1);
+  ASSERT_FALSE(report(0));
+  ASSERT_EQ(consumed, 2);  // consumed prefix exceeds the window of one
+  ASSERT_FALSE(report(1));
+  ASSERT_NE(store_->GetIfExists(live_id), nullptr);
+  ASSERT_EQ(reference_counter_->GetAllReferenceCounts().at(live_id), original_count);
+
+  // Out-of-order unread reports must not skip a hole at the resumed cursor.
+  ASSERT_TRUE(report(3));
+  ObjectID read_id;
+  ASSERT_TRUE(manager_.TryReadObjectRefStream(generator_id, &read_id).ok());
+  ASSERT_TRUE(read_id.IsNil());
+  ASSERT_TRUE(report(2));
+  ASSERT_TRUE(manager_.TryReadObjectRefStream(generator_id, &read_id).ok());
+  ASSERT_EQ(read_id, spec.StreamingGeneratorReturnId(2));
+  ASSERT_EQ(consumed, 3);
+
+  const auto counts = reference_counter_->GetAllReferenceCounts();
+  ASSERT_FALSE(manager_.AddPendingStreamingTaskForRecovery(
+      addr_, spec, "duplicate", 4, 2, {live_id}, &generator_ref).ok());
+  ASSERT_EQ(reference_counter_->GetAllReferenceCounts(), counts);
+  ASSERT_EQ(manager_.NumPendingTasks(), 1);
+  ASSERT_TRUE(manager_.TryReadObjectRefStream(generator_id, &read_id).ok());
+  ASSERT_EQ(read_id, spec.StreamingGeneratorReturnId(3));
+  ASSERT_EQ(consumed, 4);
+  CompletePendingStreamingTask(spec, addr_, 4);
+  ASSERT_TRUE(manager_.StreamingGeneratorIsFinished(generator_id));
+  DeleteStreamAndRelease(generator_id,
+                         {live_id, live_id, spec.StreamingGeneratorReturnId(2),
+                          spec.StreamingGeneratorReturnId(3)});
+}
+
+TEST_F(StreamingRecoveryTest, EmptyAndBoundaryCursorsWaitForCompletion) {
+  for (const auto &[count, cursor] :
+       std::vector<std::pair<int64_t, int64_t>>{{0, 0}, {3, 0}, {3, 3}}) {
+    auto spec = RecoverySpec();
+    const auto generator_id = spec.ReturnId(0);
+    rpc::ObjectReference ref;
+    ASSERT_TRUE(manager_.AddPendingStreamingTaskForRecovery(
+        addr_, spec, "recover", count, cursor, {}, &ref).ok());
+    ASSERT_FALSE(manager_.StreamingGeneratorIsFinished(generator_id));
+    std::vector<ObjectID> delivered;
+    for (int64_t i = 0; i < count; ++i) {
+      auto request = GetIntermediateTaskReturn(
+          i, false, generator_id, spec.StreamingGeneratorReturnId(i),
+          GenerateRandomBuffer(), false);
+      request.set_attempt_number(1);
+      manager_.HandleReportGeneratorItemReturns(request, [](Status) {});
+      if (i >= cursor) {
+        ObjectID id;
+        ASSERT_TRUE(manager_.TryReadObjectRefStream(generator_id, &id).ok());
+        ASSERT_EQ(id, spec.StreamingGeneratorReturnId(i));
+        delivered.push_back(id);
+      }
+    }
+    CompletePendingStreamingTask(spec, addr_, count);
+    ASSERT_TRUE(manager_.StreamingGeneratorIsFinished(generator_id));
+    DeleteStreamAndRelease(generator_id, delivered);
+  }
+}
+
+TEST_F(StreamingRecoveryTest, InvalidAdoptionDoesNotMutateState) {
+  auto spec = RecoverySpec();
+  rpc::ObjectReference ref;
+  ref.set_call_site("unchanged");
+  auto reject = [&](const TaskSpecification &candidate, int64_t count, int64_t cursor) {
+    EXPECT_FALSE(manager_.AddPendingStreamingTaskForRecovery(
+        addr_, candidate, "recover", count, cursor, {}, &ref).ok());
+    EXPECT_EQ(ref.call_site(), "unchanged");
+    EXPECT_EQ(manager_.NumPendingTasks(), 0);
+    EXPECT_EQ(reference_counter_->Size(), 0);
+    EXPECT_FALSE(manager_.ObjectRefStreamExists(spec.ReturnId(0)));
+  };
+  reject(spec, 2, -1);
+  reject(spec, 2, 3);
+  reject(spec, -1, 0);
+  reject(spec, RayConfig::instance().max_num_generator_returns(), 0);
+  auto static_task = CreateTaskHelper(1, {});
+  reject(static_task, 2, 0);
+  auto no_retries = RecoverySpec();
+  no_retries.GetMutableMessage().set_max_retries(0);
+  reject(no_retries, 2, 0);
+  auto first_attempt = RecoverySpec();
+  first_attempt.GetMutableMessage().set_attempt_number(0);
+  reject(first_attempt, 2, 0);
+  auto conflicting_count = RecoverySpec();
+  conflicting_count.SetNumStreamingGeneratorReturns(3);
+  reject(conflicting_count, 2, 0);
+  auto actor = RecoverySpec();
+  actor.GetMutableMessage().set_type(rpc::TaskType::ACTOR_TASK);
+  reject(actor, 2, 0);
+  auto paired = RecoverySpec();
+  paired.GetMutableMessage().set_num_objects_per_yield(2);
+  reject(paired, 2, 0);
+  auto dependency = RecoverySpec();
+  dependency.GetMutableMessage().add_args()->mutable_object_ref()->set_object_id(
+      ObjectID::FromRandom().Binary());
+  reject(dependency, 2, 0);
+  auto nested = RecoverySpec();
+  nested.GetMutableMessage().add_args()->add_nested_inlined_refs()->set_object_id(
+      ObjectID::FromRandom().Binary());
+  reject(nested, 2, 0);
+}
+
+TEST_F(StreamingRecoveryTest, OwnershipBatchRejectsMissingAndUnlistedRefsAtomically) {
+  auto spec = RecoverySpec();
+  const auto first = spec.StreamingGeneratorReturnId(0);
+  const auto second = spec.StreamingGeneratorReturnId(1);
+  const auto old_owner = GetRandomWorkerAddr();
+  Borrow(first, old_owner);
+  const auto counts = reference_counter_->GetAllReferenceCounts();
+  rpc::ObjectReference ref;
+  for (const auto &ids : std::vector<std::vector<ObjectID>>{
+           {first, second}, {}, {first, first}}) {
+    ASSERT_FALSE(manager_.AddPendingStreamingTaskForRecovery(
+        addr_, spec, "recover", 3, 2, ids, &ref).ok());
+    ASSERT_FALSE(reference_counter_->OwnedByUs(first));
+    ASSERT_FALSE(reference_counter_->HasReference(spec.ReturnId(0)));
+    ASSERT_EQ(reference_counter_->GetAllReferenceCounts(), counts);
+    ASSERT_EQ(manager_.NumPendingTasks(), 0);
+  }
+  rpc::Address owner;
+  ASSERT_TRUE(reference_counter_->GetOwner(first, &owner));
+  ASSERT_EQ(owner.worker_id(), old_owner.worker_id());
+  reference_counter_->FreePlasmaObjects({first});
+  ASSERT_FALSE(manager_.AddPendingStreamingTaskForRecovery(
+      addr_, spec, "recover freed ref", 3, 2, {first}, &ref).ok());
+  ASSERT_TRUE(reference_counter_->IsPlasmaObjectFreed(first));
+  ASSERT_FALSE(reference_counter_->OwnedByUs(first));
+  ASSERT_EQ(reference_counter_->GetAllReferenceCounts(), counts);
+  reference_counter_->RemoveLocalReference(first, nullptr);
+}
+
+TEST_F(StreamingRecoveryTest, ExistingCompletionBorrowSurvivesHandleRelease) {
+  auto spec = RecoverySpec();
+  const auto generator_id = spec.ReturnId(0);
+  Borrow(generator_id, GetRandomWorkerAddr());
+  rpc::ObjectReference ref;
+  ASSERT_TRUE(manager_.AddPendingStreamingTaskForRecovery(
+      addr_, spec, "recover", 0, 0, {}, &ref).ok());
+  ASSERT_EQ(reference_counter_->GetAllReferenceCounts().at(generator_id).first, 2);
+  CompletePendingStreamingTask(spec, addr_, 0);
+  ASSERT_FALSE(manager_.TryDelObjectRefStream(generator_id));
+  reference_counter_->RemoveLocalReference(generator_id, nullptr);
+  ASSERT_TRUE(reference_counter_->OwnedByUs(generator_id));
+  ASSERT_FALSE(manager_.TryDelObjectRefStream(generator_id));
+  reference_counter_->RemoveLocalReference(generator_id, nullptr);
+  ASSERT_TRUE(manager_.TryDelObjectRefStream(generator_id));
+  ASSERT_EQ(reference_counter_->NumObjectIDsInScope(), 0);
+}
+
+TEST_F(StreamingRecoveryTest, CursorInitializationCannotRewindAnExistingStream) {
+  auto spec = RecoverySpec();
+  ObjectRefStream stream(spec.ReturnId(0));
+  ASSERT_TRUE(stream.RestoreConsumedPrefixForRecovery(2).ok());
+  ASSERT_FALSE(stream.RestoreConsumedPrefixForRecovery(0).ok());
+  ASSERT_EQ(stream.LastConsumedIndex(), 1);
+  ASSERT_EQ(stream.TotalNumObjectConsumed(), 2);
+  ASSERT_FALSE(stream.IsFinished());
+
+  ObjectRefStream already_written(spec.ReturnId(0));
+  ASSERT_TRUE(already_written.InsertToStream(spec.StreamingGeneratorReturnId(0), 0));
+  ASSERT_FALSE(already_written.RestoreConsumedPrefixForRecovery(2).ok());
+  ASSERT_EQ(already_written.LastConsumedIndex(), -1);
+}
+
+TEST_F(StreamingRecoveryTest, FirstLocalCompletionChecksDeclaredCountIncludingZero) {
+  for (const auto &[expected, actual] :
+       std::vector<std::pair<int64_t, int64_t>>{{3, 2}, {2, 3}, {0, 1}, {2, 0}}) {
+    auto spec = RecoverySpec();
+    const auto generator_id = spec.ReturnId(0);
+    rpc::ObjectReference ref;
+    ASSERT_TRUE(manager_.AddPendingStreamingTaskForRecovery(
+        addr_, spec, "recover", expected, 0, {}, &ref).ok());
+    CompletePendingStreamingTask(spec, addr_, actual);
+    ASSERT_EQ(manager_.NumPendingTasks(), 0);
+    ASSERT_EQ(num_retries_, 0);
+    const auto result = store_->GetIfExists(generator_id);
+    ASSERT_NE(result, nullptr);
+    rpc::ErrorType error;
+    ASSERT_TRUE(result->IsException(&error));
+    ASSERT_EQ(error, rpc::ErrorType::STREAMING_GENERATOR_REPLAY_INCONSISTENT);
+    DeleteStreamAndRelease(generator_id, {});
+  }
+}
+
+TEST_F(StreamingRecoveryTest, FailureSettlesConsumedAndReportedPlasmaReturns) {
+  auto spec = RecoverySpec();
+  const auto generator_id = spec.ReturnId(0);
+  const auto consumed = spec.StreamingGeneratorReturnId(0);
+  const auto unread = spec.StreamingGeneratorReturnId(1);
+  Borrow(consumed, GetRandomWorkerAddr());
+  rpc::ObjectReference ref;
+  ASSERT_TRUE(manager_.AddPendingStreamingTaskForRecovery(
+      addr_, spec, "recover", 3, 1, {consumed}, &ref).ok());
+  auto request = GetIntermediateTaskReturn(
+      1, false, generator_id, unread, GenerateRandomBuffer(), true);
+  request.set_attempt_number(1);
+  ASSERT_TRUE(manager_.HandleReportGeneratorItemReturns(request, [](Status) {}));
+  manager_.FailPendingTask(spec.TaskId(), rpc::ErrorType::WORKER_DIED);
+  const auto result = store_->GetIfExists(consumed);
+  ASSERT_NE(result, nullptr);
+  rpc::ErrorType error;
+  ASSERT_TRUE(result->IsException(&error));
+  ASSERT_EQ(error, rpc::ErrorType::WORKER_DIED);
+  ASSERT_EQ(stored_in_plasma.count(unread), 1);
+  DeleteStreamAndRelease(generator_id, {consumed});
+}
+
 TEST_F(TaskManagerTest, TestRecordMetrics) {
   rpc::Address caller_address;
   auto spec = CreateTaskHelper(1, {});
