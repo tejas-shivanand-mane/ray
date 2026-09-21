@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         help="Use the public Dataset planner and iterator for declared-count recovery",
     )
     parser.add_argument(
+        "--head-failure-point", choices=["gated", "early", "middle", "late", "suite"],
+        default="gated",
+        help="Head failure at 10/50/90 percent output progress; suite runs all three",
+    )
+    parser.add_argument(
         "--disable-locality-hints",
         action="store_true",
         default=False,
@@ -158,6 +163,8 @@ class Trainer:
 def main(args: argparse.Namespace):
     benchmark = Benchmark()
 
+    if args.head_failure_point != "gated" and args.recovery_mode != "fixed_r_head_failure":
+        raise ValueError("--head-failure-point requires --recovery-mode fixed_r_head_failure")
     if args.recovery_mode != "original":
         run_recovery_cases(benchmark, args)
     elif args.case == "fast-producer-slow-consumer":
@@ -184,14 +191,9 @@ def run_recovery_cases(benchmark, args):
     if args.local_executor_nodes and (args.owner_node_id or args.executor_node_ids):
         raise ValueError("Choose local nodes or explicit cluster node IDs")
     if args.recovery_mode == "fixed_r_head_failure":
-        from streaming_recovery_head_failure import local_head_failure_cluster
+        from streaming_recovery_head_failure import run_head_failure_cases
 
-        with local_head_failure_cluster(args) as (case_args, crash_head):
-            benchmark.run_fn(
-                f"{args.case}/fixed_r_head_failure", run_controlled, case_args,
-                crash_owner=crash_head,
-            )
-            benchmark.write_result()
+        run_head_failure_cases(benchmark, args)
         return
     modes = MODES if args.recovery_mode == "suite" else (args.recovery_mode,)
     for mode in modes:

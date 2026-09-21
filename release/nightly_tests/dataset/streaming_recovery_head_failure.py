@@ -10,12 +10,63 @@ import argparse
 import sys
 import tempfile
 import time
+import traceback
 from contextlib import contextmanager
 
 import ray
 from ray.cluster_utils import Cluster
 
-from streaming_recovery_benchmark import recovery_system_config
+from streaming_recovery_benchmark import (
+    HEAD_FAILURE_FRACTIONS,
+    head_failure_target,
+    recovery_system_config,
+    run_controlled,
+)
+
+
+def run_head_failure_cases(benchmark, args):
+    point = getattr(args, "head_failure_point", "gated")
+    points = tuple(HEAD_FAILURE_FRACTIONS) if point == "suite" else (point,)
+    if point != "gated":
+        if args.recovery_plan != "dataset":
+            raise ValueError("Progress-triggered head failure requires --recovery-plan dataset")
+        for name in points:
+            head_failure_target(
+                name, args.num_input_blocks * args.output_batches_per_input_batch
+            )
+    failed = []
+    for name in points:
+        selected = argparse.Namespace(**vars(args))
+        selected.head_failure_point = name
+        key = f"{args.case}/fixed_r_head_failure"
+        if name != "gated":
+            key += f"/{name}"
+        diagnostics = {}
+        start = time.monotonic()
+        try:
+            # Every point gets fresh Ray processes and a separate GCS database.
+            with local_head_failure_cluster(selected) as (case_args, crash_head):
+                benchmark.run_fn(
+                    key, run_controlled, case_args, crash_owner=crash_head,
+                    diagnostics=diagnostics,
+                )
+            benchmark.result[key]["validation_status"] = "passed"
+        except Exception as exc:
+            failed.append(name)
+            # Never replace a failure with partial-output success. Preserve its
+            # phase, task observations and traceback, and exercise later points.
+            benchmark.result[key] = {
+                **benchmark.result.get(key, {}), **vars(selected), **diagnostics,
+                "validation_status": "failed", "error_type": type(exc).__name__,
+                "error": str(exc), "traceback": traceback.format_exc(),
+                "case_wall_time_s": time.monotonic() - start,
+            }
+        finally:
+            benchmark.write_result()
+    if failed:
+        raise RuntimeError(
+            f"Head-failure cases failed: {', '.join(failed)}; inspect the saved JSON"
+        )
 
 
 @contextmanager

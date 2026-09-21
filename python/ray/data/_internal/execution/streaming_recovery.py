@@ -297,10 +297,14 @@ def submit_stream(
 
 
 def new_metrics():
-    return dict.fromkeys((
+    metrics = dict.fromkeys((
         "fixed_r_enrolled_tasks", "fixed_r_survivor_tasks", "fixed_r_copy_baseline_tasks",
         "fixed_r_recovered_tasks", "fixed_r_copied_blocks", "fixed_r_closed_streams",
     ), 0)
+    # One owner failure: only the tasks still live at that loss can replay.
+    # Record identities, not every successful task in the Dataset.
+    metrics["fixed_r_recovered_task_details"] = []
+    return metrics
 
 
 class StreamingRecoveryDataOpTask(DataOpTask):
@@ -405,6 +409,10 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             # submitted, and synchronous gets have settled before reaching here.
             # Previously emitted copies and their downstream users can continue.
             self.stream.recover()
+            self.stream.stats["fixed_r_recovered_task_details"].append({
+                "task_index": self.task_index,
+                "task_id": self.stream.task_id.hex(),
+            })
             return 0
         except Exception as exc:
             self._finish(error=exc)

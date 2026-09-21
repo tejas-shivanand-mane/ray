@@ -11,6 +11,7 @@ import math
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 import numpy as np
 import pyarrow as pa
@@ -34,6 +35,15 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 MODES = ("ordinary", "copy", "fixed_r", "fixed_r_failure")
 FAILURE_MODES = ("fixed_r_failure", "fixed_r_head_failure")
+HEAD_FAILURE_FRACTIONS = {"early": 0.1, "middle": 0.5, "late": 0.9}
+
+
+def head_failure_target(point, expected):
+    if point not in HEAD_FAILURE_FRACTIONS:
+        raise ValueError(f"Unknown progress-triggered head failure: {point}")
+    if expected < 10:
+        raise ValueError("Progress-triggered head failure requires at least 10 outputs")
+    return min(expected - 1, math.ceil(expected * HEAD_FAILURE_FRACTIONS[point]))
 
 
 def recovery_system_config():
@@ -86,7 +96,16 @@ def validate_args(args):
         for node in config.executor_node_ids
     ):
         raise ValueError("Each executor needs at least one CPU")
-    if args.recovery_mode in FAILURE_MODES:
+    point = getattr(args, "head_failure_point", "gated")
+    if point != "gated":
+        if args.recovery_mode != "fixed_r_head_failure":
+            raise ValueError("Progress-triggered failure requires fixed_r_head_failure")
+        if getattr(args, "recovery_plan", "physical") != "dataset":
+            raise ValueError("Progress-triggered failure requires --recovery-plan dataset")
+        head_failure_target(
+            point, args.num_input_blocks * args.output_batches_per_input_batch
+        )
+    if args.recovery_mode in FAILURE_MODES and point == "gated":
         if args.output_batches_per_input_batch < 2:
             raise ValueError("Owner failure needs at least two producer output blocks")
         # All initial producers wait while the first consumer starts. Ensure a
@@ -222,9 +241,97 @@ def _operator_metrics(op):
         "tasks_failed": metrics.num_tasks_failed,
         "output_blocks": metrics.num_task_outputs_generated,
         "output_rows": metrics.rows_task_outputs_generated,
-        **{key: value for key, value in metrics.extra_metrics.items()
+        **{key: list(value) if isinstance(value, list) else value
+           for key, value in metrics.extra_metrics.items()
            if key.startswith("fixed_r_")},
     }
+
+
+class _OutputProgress:
+    def __init__(self):
+        self._lock = Lock()
+        self._outputs = 0
+        self.finished_at = None
+
+    def record(self, outputs):
+        with self._lock:
+            self._outputs = outputs
+
+    def count(self):
+        with self._lock:
+            return self._outputs
+
+
+def _failure_observation(capture, progress):
+    # Observation only: do not lock/pause the executor or the UDFs. Metrics and
+    # active-task lists may move between reads; they are not an atomic cut.
+    operators = {}
+    for op in capture.operators:
+        active = []
+        for task in op.get_active_tasks():
+            stream = getattr(task, "stream", None)
+            if stream is not None and stream.reader is not None and not stream.closed:
+                active.append({
+                    "task_index": task.task_index,
+                    "task_id": task.get_task_id().hex(),
+                    "accepted_returns": stream.next_index,
+                    "declared_returns": stream.expected_returns,
+                })
+        operators[op.name] = {**_operator_metrics(op), "active_enrolled_tasks": active}
+    return {"validated_outputs": progress.count(), "operators": operators}
+
+
+def _drain_with_progress_failure(
+    args, capture, progress, drain, crash_owner, failure_metrics,
+):
+    expected = args.num_input_blocks * args.output_batches_per_input_batch
+    target = head_failure_target(args.head_failure_point, expected)
+    failure_metrics.update(
+        failure_trigger="validated_output_progress", failure_gate_enabled=False,
+        target_validated_outputs=target,
+        target_output_fraction=HEAD_FAILURE_FRACTIONS[args.head_failure_point],
+        head_failure_requested=False,
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        drained = pool.submit(drain)
+        try:
+            deadline = time.monotonic() + args.recovery_timeout_s
+            while True:
+                if drained.done():
+                    drained.result()
+                    raise RuntimeError("Execution ended before progress-triggered failure")
+                observation = _failure_observation(capture, progress)
+                if (
+                    target <= observation["validated_outputs"] < expected
+                    and any(op["active_enrolled_tasks"]
+                            for op in observation["operators"].values())
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("No active enrolled stream reached the failure target")
+                time.sleep(0.01)
+            failure_metrics["observation_before_failure"] = observation
+            failure_metrics["head_failure_requested"] = True
+            print(
+                "FIXED_R_HEAD_FAILURE_PROGRESS "
+                f"point={args.head_failure_point} "
+                f"outputs={observation['validated_outputs']}/{expected} "
+                f"owner_node_id={args.owner_node_id}", flush=True,
+            )
+            start = time.monotonic()
+            # This runs on the controller thread while the Dataset executor and
+            # the drain thread keep running. No gate actor exists in this path.
+            replacement_metrics = crash_owner()
+            if replacement_metrics is not None:
+                failure_metrics.update(replacement_metrics)
+            failure_metrics["validated_outputs_at_replacement_ready"] = progress.count()
+            result = drained.result(timeout=args.recovery_timeout_s)
+            failure_metrics["failure_request_to_drain_s"] = progress.finished_at - start
+            return result
+        finally:
+            failure_metrics["last_observation"] = _failure_observation(capture, progress)
+            if capture.executor is not None:
+                capture.executor.shutdown(force=True)
 
 
 def _make_execution_capture():
@@ -286,7 +393,7 @@ def _dataset(args, context, gate_name, capture):
         )
 
 
-def run_controlled(args, crash_owner=None):
+def run_controlled(args, crash_owner=None, diagnostics=None):
     config = validate_args(args)
     public_dataset = getattr(args, "recovery_plan", "physical") == "dataset"
     if public_dataset and args.recovery_mode == "ordinary":
@@ -295,6 +402,7 @@ def run_controlled(args, crash_owner=None):
             "its no-enrollment baseline, or original for the unchanged benchmark"
         )
     failure = args.recovery_mode in FAILURE_MODES
+    progress_failure = failure and getattr(args, "head_failure_point", "gated") != "gated"
     if args.recovery_mode == "fixed_r_head_failure" and crash_owner is None:
         raise ValueError("Head failure requires the head replacement controller")
     context = DataContext.get_current().copy()
@@ -318,16 +426,18 @@ def run_controlled(args, crash_owner=None):
             preserve_batch_output_blocks=public_dataset,
         )
     context.set_config(CONFIG_KEY, recovery_config)
-    gate_name = "fixed-r-" + uuid.uuid4().hex if failure else None
-    gate = _make_gate(gate_name, args.recovery_timeout_s) if failure else None
+    gate_name = "fixed-r-" + uuid.uuid4().hex if failure and not progress_failure else None
+    gate = _make_gate(gate_name, args.recovery_timeout_s) if gate_name else None
     capture = _make_execution_capture()
+    progress = _OutputProgress()
+    failure_metrics = {}
     try:
         if public_dataset:
             dataset = _dataset(args, context, gate_name, capture)
 
             def iterate():
                 # Start inside drain(): this public call waits for the first
-                # output, which is deliberately blocked until head replacement.
+                # output, which the gated variant blocks until head replacement.
                 yield from dataset.iter_internal_ref_bundles()
 
             iterator = iterate()
@@ -387,16 +497,21 @@ def run_controlled(args, crash_owner=None):
                     producer_nodes.update(result["producer_node"])
                     consumer_nodes.update(result["consumer_node"])
                     output_count += 1
+                    progress.record(output_count)
             if output_count != expected:
                 raise ValueError(f"Got {output_count} outputs, expected {expected}")
+            progress.finished_at = time.monotonic()
             return {
                 "validated_output_blocks": output_count,
                 "observed_producer_nodes": sorted(producer_nodes),
                 "observed_consumer_nodes": sorted(consumer_nodes),
             }
 
-        failure_metrics = {}
-        if failure:
+        if progress_failure:
+            result = _drain_with_progress_failure(
+                args, capture, progress, drain, crash_owner, failure_metrics,
+            )
+        elif failure:
             with ThreadPoolExecutor(max_workers=1) as pool:
                 drained = pool.submit(drain)
                 try:
@@ -483,7 +598,22 @@ def run_controlled(args, crash_owner=None):
                 or actual["fixed_r_copied_blocks"] != blocks
             ):
                 raise ValueError(f"Copy/retirement count mismatch for {name}: {actual}")
-            if args.recovery_mode != "ordinary":
+            if progress_failure:
+                enrolled = actual["fixed_r_enrolled_tasks"]
+                recovered = actual["fixed_r_recovered_tasks"]
+                details = actual["fixed_r_recovered_task_details"]
+                if (
+                    enrolled + actual["fixed_r_survivor_tasks"] != tasks
+                    or not 0 <= recovered <= enrolled <= tasks
+                    or actual["fixed_r_copy_baseline_tasks"] != 0
+                    or len(details) != recovered
+                    or len({item["task_index"] for item in details}) != recovered
+                    or len({item["task_id"] for item in details}) != recovered
+                    or any(not 0 <= item["task_index"] < tasks for item in details)
+                ):
+                    raise ValueError(f"Submission/recovery accounting mismatch for {name}: {actual}")
+                actual["enrolled_completed_without_replay"] = enrolled - recovered
+            elif args.recovery_mode != "ordinary":
                 protected = (
                     (wave if name == "Produce" else 1) if failure else
                     (tasks if args.recovery_mode == "fixed_r" else 0)
@@ -496,6 +626,10 @@ def run_controlled(args, crash_owner=None):
                 }
                 if any(actual[key] != value for key, value in expected_counts.items()):
                     raise ValueError(f"Submission/recovery count mismatch for {name}: {actual}")
+        if progress_failure and not any(
+            op["fixed_r_recovered_tasks"] for op in metrics.values()
+        ):
+            raise RuntimeError("Head was replaced but no task replayed; failure timing missed recovery")
         return {
             **vars(args), **result, **failure_metrics, "operators": metrics,
             "workload_variant": (
@@ -512,6 +646,9 @@ def run_controlled(args, crash_owner=None):
             "coordinator_node_id": ray.get_runtime_context().get_node_id(),
         }
     finally:
+        if diagnostics is not None:
+            diagnostics.update(failure_metrics)
+            diagnostics["last_observation"] = _failure_observation(capture, progress)
         try:
             if capture.executor is not None:
                 capture.executor.shutdown(force=True)
