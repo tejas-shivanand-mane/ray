@@ -25,7 +25,7 @@ cluster and gives the one-time `python -m pip install matplotlib` command.
 
 The default runs eight observations total: one pair per case. Treat this as a
 preliminary estimate; one sample per mode cannot establish variance/significance.
-Each process has a 120-second limit, with cluster startup/cleanup extra. It stops
+Each process defaults to a 120-second limit, with cluster startup/cleanup extra. It stops
 on the first error/timeout and saves partial results; no automatic retry loop.
 The worst-case processing budget is 16 minutes for the default, not a prediction
 of runtime. Prior failure-run times are not valid no-failure estimates.
@@ -122,3 +122,39 @@ bash gossip_benchmarks/run_fixed_r_overhead.sh --case backpressure --case worker
 
 Original workload bodies and entry points are unchanged by this measurement
 runner. The fault-coverage results remain in their separate coverage reports.
+
+## Longer training on the same data
+
+XGBoost uses boosting rounds rather than epochs. The benchmark's ordinary
+`--num-boost-round` option defaults to 10; the overhead runner forwards the same
+value to both modes, records it in JSON and the plot, and checks the saved model's
+round count. Existing recovery coverage still uses 10 rounds by default.
+
+Start with one OFF/ON pair using two training workers and 1,000 rounds:
+
+```bash
+bash gossip_benchmarks/run_fixed_r_overhead.sh \
+  --case xgboost-multi --num-boost-round 1000 \
+  --output "$HOME/ray-coverage/overhead-1000-rounds.json"
+```
+
+This retains the 120-second per-process deadline and saves JSON, CSV, PNG and PDF
+under the separate `overhead-1000-rounds` name. There are only two observations;
+the other workloads are not rerun. Use `--case xgboost-single` for one worker.
+No rebuild is required. The assistant has not executed this measurement.
+
+Round count does not guarantee a particular runtime. For an intentionally longer
+experiment, explicitly set `--timeout-s`, allowing for training plus prediction
+and application startup in each mode. The default remains 120 seconds. A
+900-second limit permits up to 30 minutes across two application processes,
+plus cluster startup/cleanup and artifact validation, and still stops on the
+first failure. No failures are injected.
+
+Compare the **training** timings and both the absolute ON-minus-OFF difference
+and percentage overhead against the existing 10-round report. The data is
+materialized once before boosting, so more rounds increase computation without
+adding ingestion passes. A nearly constant time difference with a falling
+percentage would support the fixed-ingestion-cost explanation. More rounds also
+increase model/checkpoint size and can affect prediction time; the total timer
+therefore does not isolate training. This is not an experiment with neural-network
+epochs that reread the dataset each epoch.

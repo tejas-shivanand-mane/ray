@@ -82,7 +82,7 @@ def xgboost_train_loop_function(config: Dict):
     xgb.train(
         params,
         dtrain=dtrain,
-        num_boost_round=10,
+        num_boost_round=config.get("num_boost_round", 10),
         callbacks=[report_callback()],
     )
 
@@ -102,7 +102,7 @@ def lightgbm_train_loop_function(config: Dict):
     lgb.train(
         params,
         train_set=train_set,
-        num_boost_round=10,
+        num_boost_round=config.get("num_boost_round", 10),
         callbacks=[report_callback()],
     )
 
@@ -139,8 +139,10 @@ _FRAMEWORK_PARAMS = {
 
 def train(
     framework: str, data_path: str, num_workers: int, cpus_per_worker: int,
-    *, run_config=None, read_kwargs=None, placement_strategy="PACK",
+    *, run_config=None, read_kwargs=None, placement_strategy="PACK", num_boost_round=10,
 ) -> ray.train.Result:
+    if num_boost_round < 1:
+        raise ValueError("num_boost_round must be positive")
     ds = data.read_parquet(data_path, **(read_kwargs or {}))
     framework_params = _FRAMEWORK_PARAMS[framework]
     if framework_params["trainer_cls"] is None:
@@ -151,7 +153,9 @@ def train(
 
     trainer = trainer_cls(
         train_loop_per_worker=framework_train_loop_fn,
-        train_loop_config=framework_params["train_loop_config"],
+        train_loop_config={
+            **framework_params["train_loop_config"], "num_boost_round": num_boost_round,
+        },
         scaling_config=ScalingConfig(
             num_workers=num_workers,
             resources_per_worker={"CPU": cpus_per_worker},
@@ -212,6 +216,7 @@ def main(args):
     if getattr(args, "small_blocks", False):
         data.DataContext.get_current().target_min_block_size = 0
     storage_path = getattr(args, "storage_path", None)
+    num_boost_round = getattr(args, "num_boost_round", 10)
 
     print(f"Running {framework} training benchmark...")
     training_start = time.perf_counter()
@@ -220,6 +225,7 @@ def main(args):
         read_kwargs=read_kwargs,
         run_config=RunConfig(storage_path=storage_path, name=f"{framework}_benchmark") if storage_path else None,
         placement_strategy=getattr(args, "placement_strategy", "PACK"),
+        num_boost_round=num_boost_round,
     )
     training_time = time.perf_counter() - training_start
 
@@ -231,7 +237,10 @@ def main(args):
     )
     prediction_time = time.perf_counter() - prediction_start
 
-    times = {"training_time": training_time, "prediction_time": prediction_time}
+    times = {
+        "training_time": training_time, "prediction_time": prediction_time,
+        "num_boost_round": num_boost_round,
+    }
     print("Training result:\n", result)
     print("Training/prediction times:", times)
     test_output_json = os.environ.get("TEST_OUTPUT_JSON", "/tmp/result.json")
@@ -273,6 +282,8 @@ if __name__ == "__main__":
     # development machine. Recovery is enabled externally by the shared launcher.
     parser.add_argument("--data-path")
     parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--num-boost-round", type=int, default=10,
+                        help="Boosting rounds; increase to measure longer training on the same data")
     parser.add_argument("--cpus-per-worker", type=int)
     parser.add_argument("--storage-path")
     parser.add_argument("--prediction-output-path", default="/mnt/cluster_storage/predictions")
@@ -280,4 +291,6 @@ if __name__ == "__main__":
     parser.add_argument("--small-blocks", action="store_true")
     parser.add_argument("--placement-strategy", default="PACK", choices=("PACK", "SPREAD", "STRICT_SPREAD"))
     args = parser.parse_args()
+    if args.num_boost_round < 1:
+        parser.error("--num-boost-round must be positive")
     main(args)

@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CASES = ("backpressure", "worker-scaling-actors", "xgboost-single", "xgboost-multi")
 
 
-def workload(name, directory, input_path):
+def workload(name, directory, input_path, num_boost_round=10):
     if name == "backpressure":
         return "release/nightly_tests/dataset/backpressure_benchmark.py", [
             "--case", "fast-producer-slow-consumer", "--num-input-blocks", "16",
@@ -45,6 +45,7 @@ def workload(name, directory, input_path):
     return "release/train_tests/xgboost_lightgbm/train_batch_inference_benchmark.py", [
         "xgboost", "--data-path", str(input_path),
         "--num-workers", "1" if name == "xgboost-single" else "2",
+        "--num-boost-round", str(num_boost_round),
         "--cpus-per-worker", "1", "--placement-strategy", "STRICT_SPREAD",
         "--storage-path", str(directory / "checkpoints"),
         "--prediction-output-path", str(directory / "predictions"),
@@ -132,10 +133,10 @@ def save_report(report, output):
             destination.write_bytes(source.read_bytes())
 
 
-def run_observation(name, pair, mode, directory, input_path, timeout_s):
+def run_observation(name, pair, mode, directory, input_path, timeout_s, num_boost_round=10):
     directory.mkdir(parents=True)
     enabled = mode == "on"
-    script, script_args, count = workload(name, directory, input_path)
+    script, script_args, count = workload(name, directory, input_path, num_boost_round)
     sample = {"case": name, "pair": pair, "mode": mode, "logical_rows": count,
               "directory": str(directory), "status": "failed"}
     started = time.monotonic()
@@ -189,13 +190,17 @@ def run_observation(name, pair, mode, directory, input_path, timeout_s):
             sample["settings"] = audit
             sample["all_nodes_survived"] = True
             raw = json.loads((directory / "benchmark.json").read_text())
+            if name.startswith("xgboost-") and raw.get("num_boost_round") != num_boost_round:
+                raise ValueError("Benchmark reported a different boosting-round count")
             sample["benchmark_metrics"] = raw
             sample["benchmark_seconds"] = timings(name, raw)
         # Check prediction artifacts outside both the benchmark timer and the
         # cluster lifetime. The common input link is only for this validator.
         if name.startswith("xgboost-"):
             (directory / "input").symlink_to(input_path, target_is_directory=True)
-            sample["prediction_validation"] = validate_predictions(directory)
+            sample["prediction_validation"] = validate_predictions(
+                directory, expected_rounds=num_boost_round,
+            )
         sample["status"] = "passed"
     except Exception as exc:
         sample.update(error_type=type(exc).__name__, error=str(exc), traceback=traceback.format_exc())
@@ -211,10 +216,15 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=1, help="OFF/ON pairs per case; 1 is preliminary")
     parser.add_argument("--case", action="append", choices=CASES, help="Repeat to select cases; default all four")
-    parser.add_argument("--timeout-s", type=float, default=120)
+    parser.add_argument("--num-boost-round", type=int, default=10,
+                        help="XGBoost rounds in BOTH modes; dataset and worker counts stay fixed")
+    parser.add_argument("--timeout-s", type=float, default=120,
+                        help="Per-process deadline in seconds; explicitly increase for longer training")
     args = parser.parse_args()
-    if args.repeats < 1 or not math.isfinite(args.timeout_s) or not 0 < args.timeout_s <= 120:
-        parser.error("Use --repeats >= 1 and 0 < --timeout-s <= 120")
+    if args.repeats < 1 or not math.isfinite(args.timeout_s) or args.timeout_s <= 0:
+        parser.error("Use --repeats >= 1 and a finite --timeout-s > 0")
+    if args.num_boost_round < 1:
+        parser.error("--num-boost-round must be positive")
     if sys.platform != "linux":
         parser.error("The local process-cluster fixture requires Linux")
     # Prevent inherited launcher/callback settings from contaminating the
@@ -243,6 +253,7 @@ def main():
         "git_commit": commit, "python": sys.version, "platform": platform.platform(),
         "result_directory": str(directory), "cases": selected, "repeats": args.repeats,
         "expected_observations": 2 * args.repeats * len(selected), "timeout_s": args.timeout_s,
+        "xgboost_num_boost_round": args.num_boost_round,
         "method": "fresh cluster/process per observation; alternating paired order; no warmup",
         "primary_timing": "benchmark-reported wall time, excluding cluster startup/cleanup",
         "comparison": "ordinary native/Data recovery OFF vs full Fixed-R native/Data recovery ON",
@@ -257,6 +268,8 @@ def main():
         "preliminary": args.repeats == 1, "samples": [],
     }
     save_report(report, output)
+    if any(name.startswith("xgboost-") for name in selected):
+        print(f"XGBoost: {args.num_boost_round} boosting rounds per observation; fixed input data", flush=True)
     for case_index, name in enumerate(selected):
         for pair in range(1, args.repeats + 1):
             modes = ("off", "on") if (case_index + pair) % 2 else ("on", "off")
@@ -264,7 +277,8 @@ def main():
                 print(f"{name}: pair {pair}/{args.repeats}, recovery {mode.upper()} "
                       f"({args.timeout_s:g}s process limit)", flush=True)
                 sample = run_observation(
-                    name, pair, mode, directory / name / f"pair-{pair}-{mode}", input_path, args.timeout_s,
+                    name, pair, mode, directory / name / f"pair-{pair}-{mode}", input_path,
+                    args.timeout_s, args.num_boost_round,
                 )
                 report["samples"].append(sample)
                 if sample["status"] != "passed":

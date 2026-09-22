@@ -28,7 +28,7 @@ def make_input(directory):
         pq.write_table(pa.table(columns), directory / f"part-{index:04d}.parquet")
 
 
-def validate_predictions(work):
+def validate_predictions(work, *, expected_rounds=10):
     """Validate the normal benchmark's persisted artifacts outside its code."""
     import numpy as np
     import pyarrow.parquet as pq
@@ -39,7 +39,7 @@ def validate_predictions(work):
         raise ValueError(f"Expected one final XGBoost checkpoint, found {len(checkpoints)}")
     model = xgb.Booster()
     model.load_model(str(checkpoints[0]))
-    if model.num_boosted_rounds() != 10 or model.num_features() != 16:
+    if model.num_boosted_rounds() != expected_rounds or model.num_features() != 16:
         raise ValueError("The checkpoint has the wrong rounds or feature count")
     frame = pq.read_table(work / "input").to_pandas()
     predicted = pq.read_table(work / "predictions")

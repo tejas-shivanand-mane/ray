@@ -88,6 +88,10 @@ def render_report(report, prefix):
     missing = [LABELS.get(name, name) for name in report.get("cases", []) if name not in completed]
     status = str(report.get("status", "unknown")).upper()
     footer = f"{status} · {note}\nLocal benchmark timers exclude cluster startup/cleanup; no warmup."
+    if report.get("xgboost_num_boost_round") is not None and any(
+        name.startswith("xgboost-") for name in report.get("cases", [])
+    ):
+        footer += f" XGBoost: {report['xgboost_num_boost_round']} rounds."
     if missing:
         footer += "\nNo complete pair: " + ", ".join(missing)
     fig.text(0.02, 0.03, footer, fontsize=9, color="#555555", va="bottom")
