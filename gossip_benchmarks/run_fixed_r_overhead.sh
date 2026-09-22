@@ -13,5 +13,11 @@ for directory in "$result_root" "$TMPDIR"; do
 done
 export RAY_TMPDIR="$TMPDIR"
 result_dir="$(mktemp -d "$result_root/overhead.XXXXXX")"
+report_name=overhead.json
+for argument in "$@"; do
+  if [[ "$argument" == --long-all ]]; then
+    report_name=overhead-long-all.json
+  fi
+done
 exec python gossip_benchmarks/run_fixed_r_overhead.py \
-  --result-directory "$result_dir" --output "$result_root/overhead.json" "$@"
+  --result-directory "$result_dir" --output "$result_root/$report_name" "$@"

@@ -92,6 +92,12 @@ def render_report(report, prefix):
         name.startswith("xgboost-") for name in report.get("cases", [])
     ):
         footer += f" XGBoost: {report['xgboost_num_boost_round']} rounds."
+    if report.get("data_block_multiplier") is not None and any(
+        name in report.get("cases", []) for name in ("backpressure", "worker-scaling-actors")
+    ):
+        footer += f"\nBackpressure / actor scaling: {report['data_block_multiplier']}× input blocks."
+        if any(name.startswith("xgboost-") for name in report.get("cases", [])):
+            footer += " XGBoost training and prediction input sizes unchanged."
     if missing:
         footer += "\nNo complete pair: " + ", ".join(missing)
     fig.text(0.02, 0.03, footer, fontsize=9, color="#555555", va="bottom")
