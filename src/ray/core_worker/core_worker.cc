@@ -4633,6 +4633,24 @@ Status CoreWorker::AllocateReturnObject(const ObjectID &object_id,
       data_buffer = std::make_shared<LocalMemoryBuffer>(data_size);
       *task_output_inlined_bytes += static_cast<int64_t>(data_size);
     } else {
+      const auto current_task = worker_context_->GetCurrentTask();
+      const bool streaming_replay =
+          RayConfig::instance().enable_recovery_streaming_fixed_r() &&
+          current_task != nullptr && current_task->IsStreamingGenerator() &&
+          current_task->AttemptNumber() > 0 && object_id.ObjectIndex() >= 2 &&
+          current_task->GetMessage().has_recovery_stream_descriptor() &&
+          owner_address.SerializeAsString() ==
+              current_task->GetMessage()
+                  .recovery_stream_descriptor()
+                  .consumer_address()
+                  .SerializeAsString();
+      if (streaming_replay) {
+        const auto &descriptor = current_task->GetMessage().recovery_stream_descriptor();
+        if (descriptor.task_id() != object_id.TaskId().Binary()) {
+          return Status::Invalid("Streaming replay return belongs to a different task");
+        }
+        RAY_RETURN_NOT_OK(PrepareStreamingRecoveryReturn(descriptor, object_id));
+      }
       RAY_RETURN_NOT_OK(CreateExisting(metadata,
                                        data_size,
                                        object_id,
@@ -4640,6 +4658,11 @@ Status CoreWorker::AllocateReturnObject(const ObjectID &object_id,
                                        &data_buffer,
                                        /*created_by_worker=*/true));
       object_already_exists = data_buffer == nullptr;
+      if (streaming_replay && object_already_exists) {
+        // A concurrent stale producer/push must not silently resurrect an old
+        // ownership incarnation after the barrier. Fail this replay closed.
+        return Status::Invalid("Streaming replay return reappeared after cleanup");
+      }
     }
   }
   // Leave the return object as a nullptr if the object already exists.

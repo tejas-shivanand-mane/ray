@@ -139,7 +139,12 @@ void LocalObjectManager::FlushFreeObjects() {
 }
 
 bool LocalObjectManager::ObjectPendingDeletion(const ObjectID &object_id) {
-  return objects_pending_deletion_.find(object_id) != objects_pending_deletion_.end();
+  const auto it = local_objects_.find(object_id);
+  // Flushing the in-memory free batch does not finish deletion of a spilling
+  // or spilled incarnation. Do not repin/recreate that ID until its bookkeeping
+  // is removed as well.
+  return objects_pending_deletion_.contains(object_id) ||
+         (it != local_objects_.end() && it->second.is_freed_);
 }
 
 void LocalObjectManager::SpillObjectUptoMaxThroughput() {

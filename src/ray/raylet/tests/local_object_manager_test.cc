@@ -1228,6 +1228,33 @@ TEST_F(LocalObjectManagerTest, TestDeleteURLRefCountRaceCondition) {
   ASSERT_EQ(GetCurrentSpilledBytes(), 0);
 }
 
+TEST_F(LocalObjectManagerTest, FreedSpillingReturnRemainsPendingAfterFreeBatchFlush) {
+  rpc::Address owner;
+  owner.set_worker_id(WorkerID::FromRandom().Binary());
+  const auto id = ObjectID::FromRandom();
+  std::vector<std::unique_ptr<RayObject>> objects;
+  objects.push_back(std::make_unique<RayObject>(
+      std::make_shared<MockObjectBuffer>(object_size, id, unpins),
+      nullptr,
+      std::vector<rpc::ObjectReference>()));
+  manager.PinObjectsAndWaitForFree({id}, std::move(objects), owner);
+  manager.SpillObjects({id}, [](const Status &status) { ASSERT_TRUE(status.ok()); });
+  ASSERT_TRUE(worker_pool.FlushPopSpillWorkerCallbacks());
+
+  // Head loss releases the return while the spill RPC is still in flight.
+  // Flushing Plasma frees must not make this ID eligible for replay allocation
+  // or a new pin: the old spill completion still refers to the same ObjectID.
+  manager.ReleaseFreedLocalObject(id);
+  manager.FlushFreeObjects();
+  ASSERT_TRUE(manager.ObjectPendingDeletion(id));
+
+  ASSERT_TRUE(worker_pool.io_worker_client->ReplySpillObjects(
+      {BuildURL("old_stream_return", /*offset=*/0, /*num_objects=*/1)}));
+  manager.FlushFreeObjects();
+  ASSERT_FALSE(manager.ObjectPendingDeletion(id));
+  ASSERT_EQ(GetCurrentSpilledCount(), 0);
+}
+
 TEST_F(LocalObjectManagerTest, TestDuplicatePin) {
   rpc::Address owner_address;
   owner_address.set_worker_id(WorkerID::FromRandom().Binary());

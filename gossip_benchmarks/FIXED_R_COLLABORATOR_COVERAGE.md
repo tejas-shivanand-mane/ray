@@ -1,5 +1,9 @@
 # One combined step toward collaborator benchmark coverage
 
+Current next step: rebuild the native source fork and run only `--training-only`,
+as described in the final section. The earlier commands below record previous
+coverage steps; do not repeat them by default.
+
 The goal is head-process failure recovery with minimal application changes.
 This step adds one workload and removes the controlled coordinator pause from
 the failure runs. It is a finite coverage gate, not a repeated timing campaign.
@@ -238,3 +242,53 @@ for both workload families, as requested. This bounds the configured recovery /
 benchmark waits; cluster startup and cleanup are additional time. No rerun is
 requested with this log-collection step. The timeout and collector changes were
 reviewed as source only; no tests, builds, lint or benchmarks were run here.
+
+## Native log evidence and executor return cleanup
+
+The uploaded `training-prefetch-native-logs.json` matches the failed training
+session. The split coordinator completed all 11 replay dispatches and worker
+lease returns and received 44 generator-item reports. Replay execution therefore
+occurred. Its remaining pulls included a block advertised on an executor where
+the object manager repeatedly logged `Invalid Push request` for that same ID.
+The consumer had room for that pull. This points to an absent advertised payload,
+not merely a replay waiting for a CPU. The excerpts omit parts of the failure
+window, so they do not prove the exact deletion interleaving.
+
+Source review found a compatible race: replay uses deterministic return IDs,
+and `CreateExisting` can reuse an old Plasma copy. Pinning an existing ID under a
+different owner leaves the original owner bookkeeping in place. A pending free
+or spill completion from that owner can then remove the replay's advertised
+copy. The consumer-side ownership barrier did not drain executor-side cleanup.
+
+The native path now prepares each replayed Plasma yield on its executor before
+allocation. Its raylet must have observed the original owner node's death in
+GCS, flushed old frees, drained freed spill bookkeeping, and observed removal of
+any local copy. Freed spilling objects remain pending even after the free batch
+is flushed. Replay then creates a fresh copy with the surviving consumer as
+owner. A copy that reappears between this barrier and allocation is rejected
+instead of silently reused. This preparation has a 30-second deadline per
+return. Ordinary execution and inline returns do not use this barrier.
+
+This fixes the identified cleanup gap; successful training recovery remains
+unverified. It is not a claim that every possible stale transfer race is solved.
+A native regression source covers the freed-but-still-spilling state after a
+free-batch flush. No tests, build, lint, or benchmark were run by the assistant.
+
+In the existing `ray-dev` environment, rebuild the source fork (both native
+binaries and generated protocol bindings changed), then run only the remaining
+training-prefetch head-failure case:
+
+```bash
+cd /home/tejas/Downloads/ray &&
+git pull --ff-only &&
+SKIP_BAZEL_BUILD=0 RAY_BUILD_CORE=1 python -m pip install -e ./python --no-build-isolation --no-deps &&
+bash gossip_benchmarks/run_fixed_r_collaborator_coverage.sh --training-only
+```
+
+The report is `/home/tejas/ray-coverage/coverage-training.json`. The profile
+requires exactly one passing case, uses a fresh result directory, and retains
+the existing workload, eight trainers, and prefetch settings. Its configured
+benchmark/recovery timeout is 120 seconds; native compilation, cluster startup,
+and cleanup are additional time. The already-passing cases are skipped. If this
+case passes, the next implementation gap is actor-based worker scaling, not
+more repetitions of these task-based cases.

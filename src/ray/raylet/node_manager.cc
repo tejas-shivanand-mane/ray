@@ -4871,7 +4871,8 @@ void NodeManager::HandlePrepareStreamingRecovery(
       !RayConfig::instance().enable_recovery_succession() ||
       !RayConfig::instance().enable_recovery_witness_holder_baseline() ||
       !ValidateRecoveryStreamDescriptor(descriptor).ok() ||
-      descriptor.consumer_address().node_id() != self_node_id_.Binary()) {
+      (!request.prepare_executor_return() &&
+       descriptor.consumer_address().node_id() != self_node_id_.Binary())) {
     send_reply_callback(Status::Invalid("Streaming raylet barrier rejected"),
                         nullptr,
                         nullptr);
@@ -4900,6 +4901,37 @@ void NodeManager::HandlePrepareStreamingRecovery(
       return;
     }
     ids.push_back(id);
+  }
+  if (request.prepare_executor_return()) {
+    if (ids.size() != 1 || ids.front().ObjectIndex() < 2) {
+      send_reply_callback(Status::Invalid("Executor preparation requires one yield"),
+                          nullptr,
+                          nullptr);
+      return;
+    }
+    const auto &id = ids.front();
+    // The GCS death callback above has run on this same event loop, marking
+    // original-owner copies for deletion. Flush that batch before permitting a
+    // fresh allocation. Spilling copies can require another bounded poll.
+    local_object_manager_.FlushFreeObjects();
+    if (local_object_manager_.ObjectPendingDeletion(id)) {
+      send_reply_callback(Status::TimedOut("Streaming return cleanup is pending"),
+                          nullptr,
+                          nullptr);
+      return;
+    }
+    if (lease_dependency_manager_.CheckObjectLocal(id)) {
+      // Also remove evictable secondary copies and OWNER_DIED sentinels. Wait
+      // for the Plasma deletion notification before acknowledging the barrier.
+      FreeLocalObjects({id});
+      local_object_manager_.FlushFreeObjects();
+      send_reply_callback(Status::TimedOut("Waiting for old streaming return removal"),
+                          nullptr,
+                          nullptr);
+      return;
+    }
+    send_reply_callback(Status::OK(), nullptr, nullptr);
+    return;
   }
   for (const auto &id : ids) {
     const auto status = object_directory_.RebindStreamingRecoveryOwner(

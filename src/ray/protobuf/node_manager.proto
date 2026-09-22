@@ -464,6 +464,9 @@ message FreeLocalObjectsReply {}
 message PrepareStreamingRecoveryRequest {
   RecoveryStreamDescriptor stream_descriptor = 1;
   repeated bytes object_ids = 2;
+  // Executor-side barrier before allocating one replay return. Drain old
+  // owner cleanup and remove its local copy before reusing the ObjectID.
+  bool prepare_executor_return = 3;
 }
 message PrepareStreamingRecoveryReply {}
 

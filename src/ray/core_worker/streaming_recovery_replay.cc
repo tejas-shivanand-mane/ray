@@ -255,6 +255,36 @@ Status CoreWorker::RecoverStreamingTask(
   return Status::OK();
 }
 
+Status CoreWorker::PrepareStreamingRecoveryReturn(
+    const rpc::RecoveryStreamDescriptor &descriptor, const ObjectID &object_id) {
+  // Runs on the producer's task thread, never the IO thread. Reusing a Plasma
+  // copy from the dead owner leaves its old owner metadata and queued deletion
+  // in place; advertising that copy from the replay can then strand consumers.
+  auto raylet = GetRayletRpcClient(GetCurrentNodeId());
+  if (raylet == nullptr) {
+    return Status::Invalid("Streaming replay executor raylet is unavailable");
+  }
+  rpc::PrepareStreamingRecoveryRequest request;
+  request.mutable_stream_descriptor()->CopyFrom(descriptor);
+  request.add_object_ids(object_id.Binary());
+  request.set_prepare_executor_return(true);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (std::chrono::steady_clock::now() < deadline) {
+    rpc::PrepareStreamingRecoveryReply reply;
+    const auto status = AwaitStreamRpc<rpc::PrepareStreamingRecoveryReply>(
+        [raylet, request](auto callback) mutable {
+          raylet->PrepareStreamingRecovery(std::move(request), callback);
+        },
+        deadline,
+        &reply);
+    if (!status.IsTimedOut()) {
+      return status;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return Status::TimedOut("Old streaming return cleanup did not finish on executor");
+}
+
 Status CoreWorker::CloseStreamingRecovery(const std::string &serialized_descriptor,
                                          int64_t timeout_ms) {
   rpc::RecoveryStreamDescriptor descriptor;

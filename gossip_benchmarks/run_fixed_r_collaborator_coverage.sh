@@ -5,12 +5,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 profile=full
 if [[ $# -gt 1 ]]; then
-  echo "Usage: $0 [--failed-only]" >&2; exit 2
+  echo "Usage: $0 [--failed-only|--training-only]" >&2; exit 2
 fi
 case "${1:-}" in
   "") ;;
   --failed-only) profile=failed-only ;;
-  *) echo "Usage: $0 [--failed-only]" >&2; exit 2 ;;
+  --training-only) profile=training-only ;;
+  *) echo "Usage: $0 [--failed-only|--training-only]" >&2; exit 2 ;;
 esac
 result_root="${RAY_RECOVERY_OUTPUT_DIR:-$HOME/ray-coverage}"
 mkdir -p "$result_root"
@@ -48,6 +49,10 @@ if [[ "$profile" == failed-only ]]; then
   chain_mode=(--recovery-mode fixed_r_head_failure --recovery-failure-stage map)
   summary_name=coverage-retry.json
 fi
+if [[ "$profile" == training-only ]]; then
+  training_mode=fixed_r_head_failure
+  summary_name=coverage-training.json
+fi
 
 # New workload first: copy + enrolled no-failure + asynchronous producer failure.
 TEST_OUTPUT_JSON="$result_dir/training-prefetch.json" \
@@ -56,6 +61,7 @@ python release/nightly_tests/dataset/backpressure_benchmark.py \
   --recovery-mode "$training_mode" --recovery-head-timing middle || failed=1
 
 # Cover protected reads and a two-stage task map chain in one fresh-cluster suite.
+if [[ "$profile" != training-only ]]; then
 TEST_OUTPUT_JSON="$result_dir/worker-scaling-chain.json" \
 python release/nightly_tests/dataset/worker_scaling_benchmark.py \
   "${worker[@]}" --num-operators 2 --recovery-failure-operator 1 \
@@ -75,6 +81,7 @@ TEST_OUTPUT_JSON="$result_dir/backpressure-async.json" \
 python release/nightly_tests/dataset/backpressure_benchmark.py \
   "${backpressure[@]}" --case fast-producer-slow-consumer \
   --recovery-mode fixed_r_head_failure --recovery-head-timing suite || failed=1
+fi
 
 python - "$result_dir" "$result_root/$summary_name" "$profile" <<'PY' || failed=1
 import json
@@ -83,10 +90,12 @@ import sys
 
 directory = Path(sys.argv[1])
 profile = sys.argv[3]
-names = ["training-prefetch", "worker-scaling-chain", "backpressure-async"]
+names = ["training-prefetch"]
+if profile != "training-only":
+    names.extend(["worker-scaling-chain", "backpressure-async"])
 if profile == "full":
     names.append("worker-scaling-single")
-expected_count = 11 if profile == "full" else 5
+expected_count = {"full": 11, "failed-only": 5, "training-only": 1}[profile]
 summary = {"result_directory": str(directory), "profile": profile,
            "expected_case_count": expected_count, "cases": {}, "missing_results": []}
 for name in names:

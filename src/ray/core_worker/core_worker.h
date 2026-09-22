@@ -1081,6 +1081,8 @@ class CoreWorker : public std::enable_shared_from_this<CoreWorker> {
                               int64_t timeout_ms,
                               rpc::ObjectReference *generator_ref);
   Status CloseStreamingRecovery(const std::string &descriptor, int64_t timeout_ms);
+  Status PrepareStreamingRecoveryReturn(const rpc::RecoveryStreamDescriptor &descriptor,
+                                       const ObjectID &object_id);
 
   /// Create an actor.
   ///
