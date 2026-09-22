@@ -84,6 +84,11 @@ its own driver process attached to the coordinator. Two training workers use
 An evaluation-only observer chooses the first task read/map stage (skipping
 file listing and writes), requests failure after at least two output blocks
 while a protected task remains active, and does not pause the executor/UDF.
+For the short actor benchmark input reads, the acceptance harness selects
+`RAY_RECOVERY_FAILURE_TRIGGER=task-submission` instead: request failure as soon
+as the first protected read is admitted, before requiring output. The report
+records the trigger kind, row count and supervisor response delay. This is
+read recovery/actor survival coverage, not failure during actor method execution.
 The supervisor kills all head processes and restores the head from the same
 surviving RocksDB directory and endpoint. This does not simulate host/disk loss.
 
@@ -115,6 +120,37 @@ execution stops at the first failure. No runtime estimate is claimed before a ru
 Result: `/home/tejas/ray-coverage/coverage-entrypoints.json`. Each fresh run
 subdirectory also holds the normal benchmark JSON files and separate launcher
 reports. Older `coverage-xgboost*.json` and actor reports are preserved.
+
+To continue after a failed acceptance case without repeating earlier passes:
+
+```bash
+bash gossip_benchmarks/run_fixed_r_collaborator_coverage.sh --entrypoints-resume
+```
+
+This preserves a copy of the existing combined report, retains passed cases
+with matching workload arguments, and runs the failed/unrun cases in fresh
+clusters. Retained cases are explicitly historical evidence, not executions of
+the latest revision. The combined output stays at `coverage-entrypoints.json`.
+Each new launcher report includes `application_log` (complete stdout/stderr)
+and `application_output_tail` (last 32 KiB), including the child traceback on
+failure. Application output is written to the printed log path during execution.
+
+The first uploaded entry-point report (`run.skCNwx`) passed backpressure with
+six producer replays. The actor pipeline finished all 32 reads and 64 actor
+calls, but its script exited with status 1 and its read stage recorded zero
+replays. XGBoost was not run. That report omitted the child traceback, so it
+does not identify the exact exception. Source review found two blockers in
+normal post-execution reporting: the observer was a local class that standard
+schema pickle cannot serialize, and detailed scheduling statistics query the
+dashboard State API although the local fixture disables that dashboard.
+
+The observer is now module-level with plain settings carried in DataContext.
+For recovery-enabled Datasets, unavailable optional scheduling telemetry logs
+a warning and returns no overhead samples; the query uses a five-second HTTP
+timeout (API address resolution has its own existing retry behavior). Normal
+disabled behavior and execution failure handling remain unchanged. Actor-case
+injection is earlier and supervisor polling is faster, but a missed replay
+still fails validation. No benchmark workload change was needed for these fixes.
 
 The original UDFs, training loop, predictor and boosting parameters remain
 unchanged. Worker-scaling gains ordinary output-directory/skip-upload options;

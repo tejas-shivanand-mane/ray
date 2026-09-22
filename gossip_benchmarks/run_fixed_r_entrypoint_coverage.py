@@ -56,6 +56,7 @@ def validate_predictions(work):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--result-directory", type=Path, required=True)
+    parser.add_argument("--resume-from", type=Path)
     args = parser.parse_args()
     directory = args.result_directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
@@ -83,7 +84,50 @@ def main():
     ]
     results = {}
     output = Path(os.environ["TEST_OUTPUT_JSON"])
+    previous = None
+    if args.resume_from:
+        previous = json.loads(args.resume_from.read_text())
+        if previous.get("profile") != "entrypoints-only":
+            parser.error("--resume-from must be an entrypoints-only report")
+    reused = []
+
+    def write_summary():
+        summary = {
+            "profile": "entrypoints-only", "cases": results,
+            "expected_case_count": len(cases), "result_directory": str(directory),
+            "retained_cases": reused,
+            "retained_from": str(args.resume_from.resolve()) if args.resume_from else None,
+            "validation_status": "passed" if len(results) == len(cases) and all(
+                r["validation_status"] == "passed" for r in results.values()) else "failed",
+        }
+        temporary = output.with_suffix(output.suffix + ".tmp")
+        temporary.write_text(json.dumps(summary, indent=2))
+        temporary.replace(output)
+
     for name, script, script_args in cases:
+        prior = (previous or {}).get("cases", {}).get(name)
+        if prior and prior.get("validation_status") == "passed":
+            # Retain historical evidence only for the same workload arguments.
+            # Output/data directories differ between fresh local runs.
+            old_directory = prior.get("case_result_directory", previous["result_directory"])
+            normalized_args = [
+                str(directory) + arg[len(old_directory):]
+                if arg.startswith(old_directory + "/") else arg
+                for arg in prior.get("argv", [])
+            ]
+            if (prior.get("script", "").endswith("/" + script)
+                    and normalized_args == script_args and prior.get("exit_code") == 0
+                    and prior.get("original_head_processes_exited") is True):
+                from ray.experimental.recovery._observe import validate
+
+                validate(prior["observation"], require_replay=True)
+                prior["case_result_directory"] = old_directory
+                results[name] = prior
+                reused.append(name)
+                write_summary()
+                print(f" retained  {name} (earlier report; not rerun)", flush=True)
+                continue
+        print(f"Running {name} (120-second processing deadline)", flush=True)
         result = run_script(
             ROOT / script, script_args, local=True, inject_head_failure=True,
             timeout_s=120, report=directory / f"{name}-recovery.json",
@@ -93,6 +137,11 @@ def main():
                 "RAY_TRAIN_WORKER_HEALTH_CHECK_TIMEOUT_S": "30", "RAY_TRAIN_COLLECTIVE_TIMEOUT_S": "30",
                 "PROFILER_MODE": "none", "PYSPY_ENABLED": "0", "PERF_PROFILING_ENABLED": "0",
                 "GPU_MONITOR_ENABLED": "0", "NET_MONITOR_ENABLED": "0", "OBJECT_STORE_MONITOR_ENABLED": "0",
+                # ReadRange is too short to reliably catch after two outputs.
+                # Request failure upon admission; never pause the task or UDF.
+                "RAY_RECOVERY_FAILURE_TRIGGER": (
+                    "task-submission" if name == "worker-scaling-actors" else "output"
+                ),
             },
         )
         if name == "xgboost-multi" and result["validation_status"] == "passed":
@@ -100,13 +149,9 @@ def main():
                 result.update(validate_predictions(work))
             except Exception as exc:
                 result.update(validation_status="failed", error_type=type(exc).__name__, error=str(exc))
+        result["case_result_directory"] = str(directory)
         results[name] = result
-        output.write_text(json.dumps({
-            "profile": "entrypoints-only", "cases": results,
-            "expected_case_count": len(cases), "result_directory": str(directory),
-            "validation_status": "passed" if len(results) == len(cases) and all(
-                r["validation_status"] == "passed" for r in results.values()) else "failed",
-        }, indent=2))
+        write_summary()
         print(f"{result['validation_status']:>7}  {name}")
         if result["validation_status"] != "passed":
             break  # Fail fast; do not spend minutes on later cases after a shared failure.

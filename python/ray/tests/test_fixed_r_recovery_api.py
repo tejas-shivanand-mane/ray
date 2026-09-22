@@ -8,6 +8,7 @@ import ray
 from ray.data import DataContext
 from ray.data._internal.execution.streaming_recovery import CONFIG_KEY, FixedRDataConfig, get_config
 from ray.experimental import recovery
+from ray.util.state.exception import RayStateApiException
 
 
 def configured_context():
@@ -105,3 +106,39 @@ def test_generic_observer_requires_replay_in_the_actual_trigger_stage():
         validate(observed, True)
     read["fixed_r_recovered_tasks"] = 1
     validate(observed, True)
+
+
+def test_launcher_observer_preserves_standard_schema_pickle():
+    import pickle
+    import pyarrow as pa
+
+    from ray.data.dataset import Schema
+    from ray.experimental.recovery._observe import MONITOR_KEY, Observe
+
+    context = configured_context()
+    context.set_config(MONITOR_KEY, "test-monitor")
+    context.custom_execution_callback_classes.append(Observe)
+    schema = Schema(pa.schema([("id", pa.int64())]), data_context=context)
+    restored = pickle.loads(pickle.dumps(schema))
+    assert restored.names == ["id"]
+    assert restored._context.get_config(MONITOR_KEY) == "test-monitor"
+    assert Observe in restored._context.custom_execution_callback_classes
+
+
+@pytest.mark.parametrize("error_type", [ValueError, RuntimeError, RayStateApiException])
+def test_recovery_optional_statistics_preserve_strict_default(monkeypatch, error_type):
+    from ray.data._internal.scheduling_overhead import collect_scheduling_overhead
+    from ray.util.state import api
+
+    calls = []
+
+    def unavailable(**kwargs):
+        calls.append(kwargs)
+        raise error_type("Dashboard unavailable")
+
+    monkeypatch.setattr(api, "list_tasks", unavailable)
+    with pytest.raises(error_type, match="Dashboard unavailable"):
+        collect_scheduling_overhead(["ReadRange"])
+    assert "timeout" not in calls[-1]
+    assert collect_scheduling_overhead(["ReadRange"], best_effort=True) == {}
+    assert calls[-1]["timeout"] == 5

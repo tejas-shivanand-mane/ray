@@ -56,16 +56,26 @@ def run_script(script, script_args, *, local=False, address="auto", node_ip_addr
     child_env.pop("RAY_RECOVERY_MONITOR", None)
     child_env.pop("RAY_RECOVERY_DRIVER_NODE_IP", None)
     process = None
+    child_log = None
 
     def start(cluster_address, driver_ip=None, monitor_name=None):
+        nonlocal child_log
         child_env["RAY_ADDRESS"] = cluster_address
         if driver_ip:
             child_env["RAY_RECOVERY_DRIVER_NODE_IP"] = driver_ip
         if monitor_name:
             child_env["RAY_RECOVERY_MONITOR"] = monitor_name
+        child_env["PYTHONUNBUFFERED"] = "1"
+        if report:
+            log_path = Path(report).resolve().with_suffix(".log")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            child_log = log_path.open("w+b")
+            result["application_log"] = str(log_path)
+            print(f"Application output: {log_path}", flush=True)
         return subprocess.Popen(
             [sys.executable, "-m", "ray.experimental.recovery._script", str(script), *script_args],
             env=child_env, start_new_session=True,
+            stdout=child_log, stderr=subprocess.STDOUT if child_log else None,
         )
 
     try:
@@ -101,6 +111,11 @@ def run_script(script, script_args, *, local=False, address="auto", node_ip_addr
                             if status is not None:
                                 raise ValueError("Script exited before failure injection")
                             failed_at = time.monotonic()
+                            requested_ns = observation["trigger"].get("requested_ns")
+                            if requested_ns is not None:
+                                result["trigger_to_failure_request_s"] = (
+                                    time.monotonic_ns() - requested_ns
+                                ) / 1e9
                             args.recovery_timeout_s = min(30, max(.01, deadline-failed_at))
                             failure = crash_head()
                             failure["supervisor_driver_job_id"] = failure.pop("driver_job_id")
@@ -110,7 +125,7 @@ def run_script(script, script_args, *, local=False, address="auto", node_ip_addr
                             result["observation"] = observation
                             result["exit_code"] = status
                             if status:
-                                raise RuntimeError(f"Script exited with status {status}; see its output")
+                                raise RuntimeError(f"Script exited with status {status}; see application_output_tail/application_log")
                             if inject_head_failure and failed_at is None:
                                 raise ValueError("Head failure was not exercised")
                             validate(observation, inject_head_failure)
@@ -118,7 +133,9 @@ def run_script(script, script_args, *, local=False, address="auto", node_ip_addr
                             if failed_at is not None:
                                 result["failure_request_to_completion_s"] = time.monotonic() - failed_at
                             break
-                        time.sleep(.05)
+                        # Tiny ReadRange tasks can finish within the old 50-ms
+                        # polling interval. Poll promptly until failure injection.
+                        time.sleep(.005 if inject_head_failure and failed_at is None else .05)
                     else:
                         raise TimeoutError(f"Script exceeded the {timeout_s:g}-second case deadline")
                 finally:
@@ -129,7 +146,7 @@ def run_script(script, script_args, *, local=False, address="auto", node_ip_addr
             status = process.wait(timeout=timeout_s)
             result.update(exit_code=status, time=time.monotonic()-started)
             if status:
-                raise RuntimeError(f"Script exited with status {status}; see its output")
+                raise RuntimeError(f"Script exited with status {status}; see application_output_tail/application_log")
         result["validation_status"] = "passed"
     except Exception as exc:
         result.update(validation_status="failed", error_type=type(exc).__name__,
@@ -137,6 +154,17 @@ def run_script(script, script_args, *, local=False, address="auto", node_ip_addr
         traceback.print_exc()
     finally:
         _stop(process)
+        if child_log is not None:
+            # Read only after the child stops: seeking a shared file description
+            # while it writes could overwrite earlier log output.
+            child_log.seek(0, os.SEEK_END)
+            size = child_log.tell()
+            child_log.seek(max(0, size - 32768))
+            tail = child_log.read().decode("utf-8", errors="replace")
+            result["application_output_tail"] = tail
+            child_log.close()
+            if result.get("validation_status") != "passed":
+                print(tail, file=sys.stderr)
         if report:
             path = Path(report).resolve()
             path.parent.mkdir(parents=True, exist_ok=True)

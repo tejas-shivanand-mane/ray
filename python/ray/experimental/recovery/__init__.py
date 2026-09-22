@@ -102,6 +102,14 @@ def _enable_from_environment():
     context = enable(timeout_s=float(os.environ.get("RAY_RECOVERY_TIMEOUT_S", "120")))
     monitor = os.environ.get("RAY_RECOVERY_MONITOR")
     if monitor:
-        from ray.experimental.recovery._observe import callback_type
+        from ray.experimental.recovery._observe import MONITOR_KEY, TRIGGER_KEY, Observe
 
-        context.custom_execution_callback_classes.append(callback_type(monitor))
+        trigger = os.environ.get("RAY_RECOVERY_FAILURE_TRIGGER", "output")
+        if trigger not in ("output", "task-submission"):
+            raise ValueError("Unknown RAY_RECOVERY_FAILURE_TRIGGER")
+        # Store only a module-level class and plain settings in DataContext so
+        # normal pickle (including Dataset schemas) remains supported.
+        context.set_config(MONITOR_KEY, monitor)
+        context.set_config(TRIGGER_KEY, trigger)
+        if Observe not in context.custom_execution_callback_classes:
+            context.custom_execution_callback_classes.append(Observe)

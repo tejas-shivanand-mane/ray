@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 profile=full
 if [[ $# -gt 1 ]]; then
-  echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only|--xgboost-multi-only|--entrypoints-only]" >&2; exit 2
+  echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only|--xgboost-multi-only|--entrypoints-only|--entrypoints-resume]" >&2; exit 2
 fi
 case "${1:-}" in
   "") ;;
@@ -15,7 +15,8 @@ case "${1:-}" in
   --xgboost-only) profile=xgboost-only ;;
   --xgboost-multi-only) profile=xgboost-multi-only ;;
   --entrypoints-only) profile=entrypoints-only ;;
-  *) echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only|--xgboost-multi-only|--entrypoints-only]" >&2; exit 2 ;;
+  --entrypoints-resume) profile=entrypoints-resume ;;
+  *) echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only|--xgboost-multi-only|--entrypoints-only|--entrypoints-resume]" >&2; exit 2 ;;
 esac
 result_root="${RAY_RECOVERY_OUTPUT_DIR:-$HOME/ray-coverage}"
 mkdir -p "$result_root"
@@ -31,9 +32,15 @@ case "$(stat -f -c %T "$TMPDIR")" in
   tmpfs|ramfs) echo "Set RAY_RECOVERY_TEMP_DIR to a disk-backed directory." >&2; exit 2 ;;
 esac
 export RAY_TMPDIR="$TMPDIR"
-if [[ "$profile" == entrypoints-only ]]; then
+if [[ "$profile" == entrypoints-only || "$profile" == entrypoints-resume ]]; then
+  resume_args=()
+  if [[ "$profile" == entrypoints-resume ]]; then
+    # Preserve the source report before writing the combined resumed result.
+    cp "$result_root/coverage-entrypoints.json" "$result_dir/previous-entrypoints.json"
+    resume_args=(--resume-from "$result_dir/previous-entrypoints.json")
+  fi
   exec env TEST_OUTPUT_JSON="$result_root/coverage-entrypoints.json" \
-    python gossip_benchmarks/run_fixed_r_entrypoint_coverage.py --result-directory "$result_dir"
+    python gossip_benchmarks/run_fixed_r_entrypoint_coverage.py --result-directory "$result_dir" "${resume_args[@]}"
 fi
 failed=0
 backpressure=(

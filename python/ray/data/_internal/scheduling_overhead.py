@@ -1,12 +1,14 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
+import logging
 from typing import Dict, List, Tuple
 
 import numpy as np
 
 from ray.core.generated.common_pb2 import TaskStatus
 from ray.util.state.common import TaskState
+from ray.util.state.exception import RayStateApiException
 
 TaskName = str
 
@@ -172,6 +174,8 @@ class BucketedSchedulingOverhead:
 def collect_scheduling_overhead(
     operator_names: List[str],
     num_buckets: int = 4,
+    *,
+    best_effort: bool = False,
 ) -> Dict[TaskName, List[BucketedSchedulingOverhead]]:
     """Collect per-operator scheduling overhead from the Ray State API,
     bucketed into ``num_buckets`` equal time intervals.
@@ -181,14 +185,32 @@ def collect_scheduling_overhead(
     matched logical operator name.
 
     Global time range comes from ``creation_time_ms`` of the kept tasks.
+
+    With ``best_effort``, use a short State API request timeout and return no
+    samples if the query is unavailable. Used by recovery-enabled Datasets;
+    aggregation errors and ordinary strict callers still propagate failures.
     """
     from ray.util.state.api import list_tasks
 
-    unfiltered: List[TaskState] = list_tasks(
-        detail=True,
-        limit=10_000,
-        raise_on_missing_output=False,
-    )
+    # Recovery can complete without a dashboard/State API on the replacement
+    # head. Optional telemetry must not turn that completed execution into a
+    # workload failure. Preserve the ordinary error/timeout behavior by default.
+    try:
+        unfiltered: List[TaskState] = list_tasks(
+            detail=True,
+            limit=10_000,
+            raise_on_missing_output=False,
+            **({"timeout": 5} if best_effort else {}),
+        )
+    except (RayStateApiException, ValueError, RuntimeError):
+        if not best_effort:
+            raise
+        logging.getLogger(__name__).warning(
+            "Scheduling overhead statistics unavailable from the State API; "
+            "returning no scheduling overhead samples.",
+            exc_info=True,
+        )
+        return {}
 
     # task.name (Ray task display name) -> logical operator_name from operator_names
     task_name_to_operator: Dict[TaskName, str] = {}

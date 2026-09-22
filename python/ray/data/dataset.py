@@ -7300,7 +7300,8 @@ class Dataset:
 
         Args:
             detail: If True, also collect scheduling overhead statistics
-                via the Ray State API.
+                via the Ray State API. Recovery-enabled Datasets retain their
+                execution summary if this optional query is unavailable.
 
         Returns:
             DatasetStatsSummary object containing execution statistics.
@@ -7318,7 +7319,9 @@ class Dataset:
             )
 
             op_names = [op.operator_name for op in summary.operators_stats]
-            overhead_by_op = collect_scheduling_overhead(op_names)
+            overhead_by_op = collect_scheduling_overhead(
+                op_names, best_effort=self._context.enable_fixed_r_task_recovery
+            )
             for op in summary.operators_stats:
                 if op.operator_name in overhead_by_op:
                     op.scheduling_overhead = overhead_by_op[op.operator_name]
