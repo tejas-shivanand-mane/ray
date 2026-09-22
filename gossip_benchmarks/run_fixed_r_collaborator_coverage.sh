@@ -31,13 +31,13 @@ backpressure=(
   --recovery-plan runtime --local-executor-nodes 8 --local-object-store-mb 512
   --num-input-blocks 16 --output-batches-per-input-batch 8
   --output-batch-rows 32 --output-row-bytes 1048576 --consumer-sleep-s 0.1
-  --recovery-timeout-s 600
+  --recovery-timeout-s 120
 )
 worker=(
   --worker-type tasks --num-workers 8 --blocks-per-worker 4
   --num-scalar-cols 128 --num-array-cols 32
   --recovery-plan dataset --recovery-output-mode streaming
-  --local-executor-nodes 8 --local-object-store-mb 512 --recovery-timeout-s 600
+  --local-executor-nodes 8 --local-object-store-mb 512 --recovery-timeout-s 120
 )
 training_mode=suite
 chain_mode=(--recovery-mode suite)

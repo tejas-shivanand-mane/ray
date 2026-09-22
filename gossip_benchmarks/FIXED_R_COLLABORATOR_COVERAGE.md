@@ -171,7 +171,8 @@ does not guarantee a particular thread schedule.
 The training timeout is **not fixed or diagnosed** by these results. Its six
 remaining active tasks had accepted four returns each, but the report lacked
 pending-payload and scheduler wait states. The new remote observations preserve
-that evidence if the stall recurs. The 600-second timeout is unchanged.
+that evidence if the stall recurs. That follow-up retained the 600-second timeout; the subsequent change below
+reduces it at the user's request.
 
 Run only the five gaps, once each, using the existing source-built environment:
 
@@ -187,3 +188,53 @@ gaps above, not an automatic parser of arbitrary failure reports. It skips all
 six passing cases, requires five passing results, and does not relabel old
 results or merge them into a claim about the new revision. No native rebuild
 is required. The existing no-argument command still runs the full 11 cases.
+
+
+## Results from coverage-retry.json and the remaining stall
+
+Four of five follow-up cases passed on the user's local machine:
+
+| Case | Seconds | Replayed tasks |
+| --- | ---: | --- |
+| Chained worker maps, early final-map failure | 40.62 | Four first-map tasks, one final-map task |
+| Backpressure early failure | 62.74 | 16 producers |
+| Backpressure middle failure | 76.04 | Nine producers |
+| Backpressure late failure | 79.22 | Three producers |
+
+Each passing case completed all expected tasks, validated output, closed its
+streams, and reported no recovery errors. Each backpressure case also exercised
+one pre-submission failover. Do not repeat these four cases by default.
+
+Training-prefetch still timed out at 600 seconds. It attached 11 replays, finished
+eight tasks, and delivered 22 blocks / 2816 rows. Eight tasks remained in
+`waiting_for_pair_payload`, all with ready metadata but missing local block
+payloads. Six had accepted four returns and two had accepted two. The executor
+was polling payload readiness; output backpressure was false. All trainer get
+calls were waiting for split output, with no trainer progress reported.
+
+This establishes the location of the stall, not its native cause. The report
+does not show whether those replays are executing or which payload locations /
+object transfers are pending. Do not claim a fix or change the benchmark's
+splitting, locality, or prefetch semantics to hide the failure.
+
+Before another benchmark run, collect existing native logs:
+
+```bash
+cd /home/tejas/Downloads/ray &&
+git pull --ff-only &&
+python gossip_benchmarks/collect_fixed_r_training_logs.py
+```
+
+Upload `/home/tejas/ray-coverage/training-prefetch-native-logs.json`. This command
+uses only Python's standard library, starts no Ray processes, and runs no
+benchmark. It matches the failed report's node/cluster identifiers or GCS PIDs
+to existing session logs, avoiding `session_latest` from the later successful
+cases. It includes bounded excerpts of raylet, debug-state and core-worker logs;
+missing files and truncation are explicit. `--report`, `--temp-dir`, and `--output`
+are available for non-default paths. The original benchmark report is unchanged.
+
+The local coverage script now supplies `--recovery-timeout-s 120` instead of 600
+for both workload families, as requested. This bounds the configured recovery /
+benchmark waits; cluster startup and cleanup are additional time. No rerun is
+requested with this log-collection step. The timeout and collector changes were
+reviewed as source only; no tests, builds, lint or benchmarks were run here.
