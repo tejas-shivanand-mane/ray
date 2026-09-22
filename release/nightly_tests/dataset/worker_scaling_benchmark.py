@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recovery-mode", default="original",
         choices=["original", "copy", "fixed_r", "fixed_r_head_failure", "suite"],
-        help="Opt-in task-UDF correctness coverage; suite uses fresh local clusters",
+        help="Opt-in task recovery / surviving-actor coverage; suite uses fresh local clusters",
     )
     parser.add_argument("--local-executor-nodes", type=int, default=2)
     parser.add_argument("--local-object-store-mb", type=int, default=512)

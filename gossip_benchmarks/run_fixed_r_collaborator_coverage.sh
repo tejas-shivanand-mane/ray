@@ -5,13 +5,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 profile=full
 if [[ $# -gt 1 ]]; then
-  echo "Usage: $0 [--failed-only|--training-only]" >&2; exit 2
+  echo "Usage: $0 [--failed-only|--training-only|--actors-only]" >&2; exit 2
 fi
 case "${1:-}" in
   "") ;;
   --failed-only) profile=failed-only ;;
   --training-only) profile=training-only ;;
-  *) echo "Usage: $0 [--failed-only|--training-only]" >&2; exit 2 ;;
+  --actors-only) profile=actors-only ;;
+  *) echo "Usage: $0 [--failed-only|--training-only|--actors-only]" >&2; exit 2 ;;
 esac
 result_root="${RAY_RECOVERY_OUTPUT_DIR:-$HOME/ray-coverage}"
 mkdir -p "$result_root"
@@ -54,6 +55,19 @@ if [[ "$profile" == training-only ]]; then
   summary_name=coverage-training.json
 fi
 
+if [[ "$profile" == actors-only ]]; then
+summary_name=coverage-actors.json
+# Original actor UDF, pool and wide schema; reduce only local scale. Protect the
+# reads and verify the same initialized actor processes survive head replacement.
+TEST_OUTPUT_JSON="$result_dir/worker-scaling-actors.json" \
+python release/nightly_tests/dataset/worker_scaling_benchmark.py \
+  --worker-type actors --num-workers 8 --num-operators 2 --blocks-per-worker 4 \
+  --num-scalar-cols 200 --num-array-cols 400 \
+  --recovery-plan dataset --recovery-output-mode streaming \
+  --local-executor-nodes 4 --local-object-store-mb 512 --recovery-timeout-s 120 \
+  --recovery-mode fixed_r_head_failure --recovery-failure-stage read \
+  --recovery-head-timing early || failed=1
+else
 # New workload first: copy + enrolled no-failure + asynchronous producer failure.
 TEST_OUTPUT_JSON="$result_dir/training-prefetch.json" \
 python release/nightly_tests/dataset/backpressure_benchmark.py \
@@ -82,6 +96,7 @@ python release/nightly_tests/dataset/backpressure_benchmark.py \
   "${backpressure[@]}" --case fast-producer-slow-consumer \
   --recovery-mode fixed_r_head_failure --recovery-head-timing suite || failed=1
 fi
+fi
 
 python - "$result_dir" "$result_root/$summary_name" "$profile" <<'PY' || failed=1
 import json
@@ -90,12 +105,12 @@ import sys
 
 directory = Path(sys.argv[1])
 profile = sys.argv[3]
-names = ["training-prefetch"]
-if profile != "training-only":
+names = ["worker-scaling-actors"] if profile == "actors-only" else ["training-prefetch"]
+if profile in ("full", "failed-only"):
     names.extend(["worker-scaling-chain", "backpressure-async"])
 if profile == "full":
     names.append("worker-scaling-single")
-expected_count = {"full": 11, "failed-only": 5, "training-only": 1}[profile]
+expected_count = {"full": 11, "failed-only": 5, "training-only": 1, "actors-only": 1}[profile]
 summary = {"result_directory": str(directory), "profile": profile,
            "expected_case_count": expected_count, "cases": {}, "missing_results": []}
 for name in names:

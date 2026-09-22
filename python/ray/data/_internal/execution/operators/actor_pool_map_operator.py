@@ -153,6 +153,22 @@ class ActorPoolMapOperator(MapOperator):
                 with a default logical ``memory``. The method for choosing the
                 default is an implementation detail.
         """
+        from ray.data._internal.execution.streaming_recovery import get_config
+
+        self._streaming_recovery_config = get_config(data_context)
+        self._fixed_r_actors_created = 0
+        self._fixed_r_actor_node_offset = 0
+        if self._streaming_recovery_config is not None:
+            supports_fusion = False
+            # Continue placement across the chain instead of concentrating every
+            # stage's first actors on the same nodes (starving protected reads).
+            upstream = input_op
+            while upstream is not None:
+                if isinstance(upstream, ActorPoolMapOperator):
+                    self._fixed_r_actor_node_offset += upstream._actor_pool.initial_size()
+                dependencies = upstream.input_dependencies
+                upstream = dependencies[0] if len(dependencies) == 1 else None
+
         super().__init__(
             map_transformer,
             input_op,
@@ -177,6 +193,11 @@ class ActorPoolMapOperator(MapOperator):
         self._ray_actor_task_remote_args = self._apply_default_actor_task_remote_args(
             ray_actor_task_remote_args, self.data_context
         )
+        if self._streaming_recovery_config is not None:
+            # Stateful methods are never resubmitted by this survival-only path.
+            self._ray_actor_task_remote_args.update(
+                max_task_retries=0, retry_exceptions=False,
+            )
         map_worker_cls_name = get_map_worker_cls_name(self.name)
         # We set the actor class name to include operator name to disambiguate
         # logs in the Actor Pool
@@ -215,6 +236,7 @@ class ActorPoolMapOperator(MapOperator):
             create_actor_fn=self._start_actor,
             config=config,
             map_worker_cls_name=self._map_worker_cls_name,
+            require_actor_survival=self._streaming_recovery_config is not None,
         )
 
     def _create_actor_pool_config(
@@ -332,6 +354,17 @@ class ActorPoolMapOperator(MapOperator):
         """
         assert self._actor_cls is not None
         actual_remote_args = dict(self._merge_ray_remote_args())
+        if self._streaming_recovery_config is not None:
+            from ray.data._internal.execution.streaming_recovery import (
+                _owner_alive,
+                surviving_actor_options,
+            )
+
+            _owner_alive(self._streaming_recovery_config)
+            actual_remote_args = surviving_actor_options(
+                self._streaming_recovery_config, actual_remote_args,
+                self._fixed_r_actor_node_offset + self._fixed_r_actors_created,
+            )
         extra_labels = actual_remote_args.pop("_labels", {})
         actor_resource_usage = ExecutionResources(
             cpu=actual_remote_args.get("num_cpus", 0),
@@ -351,6 +384,8 @@ class ActorPoolMapOperator(MapOperator):
         res_ref = actor.get_location.options(
             _labels={self._OPERATOR_ID_LABEL_KEY: self.id}
         ).remote()
+        if self._streaming_recovery_config is not None:
+            self._fixed_r_actors_created += 1
 
         def _task_done_callback(res_ref):
             # res_ref is a future for a now-ready actor; move actor from pending to the
@@ -406,6 +441,13 @@ class ActorPoolMapOperator(MapOperator):
 
             self._metrics.on_input_dequeued(bundle, input_index=0)
             input_blocks = [entry.ref for entry in bundle.blocks]
+            if self._streaming_recovery_config is not None:
+                # Actor calls keep ordinary ownership. Their input blocks must
+                # already be independent, coordinator-owned values (as produced
+                # by protected reads and preceding surviving actor maps).
+                ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs(
+                    input_blocks
+                )
             self._actor_pool.on_task_submitted(actor)
 
             ctx = TaskContext(
@@ -567,6 +609,9 @@ class ActorPoolMapOperator(MapOperator):
             res["locality_misses"] = self._locality_misses
         res["pending_actors"] = self._actor_pool.num_pending_actors()
         res["restarting_actors"] = self._actor_pool.num_restarting_actors()
+        if self._streaming_recovery_config is not None:
+            res["fixed_r_actor_mode"] = "surviving_coordinator_owned"
+            res["fixed_r_actors_created"] = self._fixed_r_actors_created
         return res
 
     @staticmethod
@@ -674,6 +719,18 @@ class _MapWorker:
     def get_location(self) -> NodeIdStr:
         return ray.get_runtime_context().get_node_id()
 
+    def get_recovery_identity(self):
+        """Observe process continuity without invoking or replacing the UDF."""
+        import os
+
+        runtime = ray.get_runtime_context()
+        return {
+            "actor_id": runtime.get_actor_id(),
+            "worker_id": runtime.get_worker_id(),
+            "node_id": runtime.get_node_id(),
+            "pid": os.getpid(),
+        }
+
     def submit(
         self,
         data_context: DataContext,
@@ -752,6 +809,7 @@ class _ActorPool(AutoscalingActorPool):
         config: AutoscalingActorConfig,
         map_worker_cls_name: str = "MapWorker",
         debounce_period_s: int = _ACTOR_POOL_SCALE_DOWN_DEBOUNCE_PERIOD_S,
+        require_actor_survival: bool = False,
     ):
         """Initialize the actor pool.
 
@@ -765,12 +823,15 @@ class _ActorPool(AutoscalingActorPool):
                 purposes.
             debounce_period_s: Debounce period for scaling down after scaling
                 up.
+            require_actor_survival: Fail on actor death/restart instead of waiting
+                for actor reconstruction, which does not preserve arbitrary state.
         """
         super().__init__(config=config)
 
         self._create_actor_fn = create_actor_fn
         self._map_worker_cls_name = map_worker_cls_name
         self._debounce_period_s = debounce_period_s
+        self._require_actor_survival = require_actor_survival
         # Timestamp of the last scale up action
         self._last_upscaled_at: Optional[float] = None
         self._last_downscaling_debounce_warning_ts: Optional[float] = None
@@ -1082,6 +1143,13 @@ class _ActorPool(AutoscalingActorPool):
             actor: The running actor that needs state update.
         """
         actor_state = actor._get_local_state()
+        if self._require_actor_survival and actor_state in (
+            _ACTOR_STATE_DEAD, _ACTOR_STATE_RESTARTING,
+        ):
+            raise RuntimeError(
+                "Fixed-R actor map lost a required surviving actor; "
+                "actor state recovery is not supported"
+            )
 
         # 1) Check if actor is restarting
         running_actor_state = self._running_actors[actor]

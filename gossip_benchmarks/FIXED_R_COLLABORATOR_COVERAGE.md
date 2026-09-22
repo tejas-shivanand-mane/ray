@@ -1,8 +1,9 @@
 # One combined step toward collaborator benchmark coverage
 
-Current next step: rebuild the native source fork and run only `--training-only`,
-as described in the final section. The earlier commands below record previous
-coverage steps; do not repeat them by default.
+Current next step: run only `--actors-only`, as described in the final section.
+Training-prefetch has now passed. This actor-survival change is Python-only and
+uses the existing native build. Earlier commands below record previous coverage
+steps; do not repeat them by default.
 
 The goal is head-process failure recovery with minimal application changes.
 This step adds one workload and removes the controlled coordinator pause from
@@ -292,3 +293,66 @@ benchmark/recovery timeout is 120 seconds; native compilation, cluster startup,
 and cleanup are additional time. The already-passing cases are skipped. If this
 case passes, the next implementation gap is actor-based worker scaling, not
 more repetitions of these task-based cases.
+
+## Training-prefetch passed; next cover surviving actor maps
+
+The uploaded `coverage-training.json` passed its one asynchronous middle-failure
+case: 24.117 seconds total, 9.981 seconds from failure request to completion,
+13 producer replays, all 16 tasks finished and streams closed, and no recovery
+errors. All 4096 rows were validated; each of eight trainers consumed 512 rows.
+The executor and UDF were not paused. This is a Ray Data workload, not the
+collaborator's XGBoost Ray Train benchmark. Do not rerun it by default.
+
+The next implementation permits actor-map stages in the existing dynamic
+streaming Fixed-R Data chain. Ray Data's surviving coordinator creates the
+ordinary actors and owns their method calls and outputs. Fixed-R still protects
+task-based reads and any task-map stages; actor calls are not enrolled or
+replayed. The runtime selects hard affinity on the surviving executor nodes,
+disables fusion, enforces non-detached coordinator ownership, and disables
+actor/method retries. Initial actor placement continues across map stages to
+avoid concentrating each pool on the first few nodes. Incompatible placement,
+detached/reused actors, and observed actor death/restart are rejected. Actor
+inputs must be ready coordinator-owned values without nested ObjectRefs, checked
+by the existing native input validator. General actor-state recovery is outside
+this path; application references to unrelated head-owned objects remain outside
+the supported dependency contract.
+
+The benchmark keeps the original `RealisticSchemaUDF`, constructor, fixed actor
+pools, half-CPU actor resource request, normal streaming output and
+range/map_batches/materialize chain. No task replacement or UDF wrapper is used.
+The harness observes initialized actor/worker IDs, node IDs and PIDs before
+execution and after materialization, retaining handles until validation to avoid
+normal end-of-job actor collection. The same processes must remain on surviving
+workers. It also requires exact output schema, values and row counts, no failed
+tasks, unchanged pool counts, and actual protected-read replay. Actor maps have
+separate survival accounting; they are never reported as Fixed-R task replays.
+
+One local case uses eight actors split across two operators on four logical
+executor nodes, four blocks per worker, and the collaborator's original 200
+scalar / 400 array column schema. All actors are initialized before execution;
+head failure is triggered asynchronously after early read-output progress, with
+no pause in the executor or UDF. This checks survival of initialized actors and
+the mixed task/actor pipeline; it does not guarantee a particular actor method
+is in flight at the instant of head death. A missed read replay is a failure,
+not a successful recovery result.
+
+Run in the existing source-built `ray-dev` environment:
+
+```bash
+cd /home/tejas/Downloads/ray &&
+git pull --ff-only &&
+bash gossip_benchmarks/run_fixed_r_collaborator_coverage.sh --actors-only
+```
+
+The combined report is `/home/tejas/ray-coverage/coverage-actors.json`. It requires
+one passing case and uses a fresh result directory. Existing profiles and
+reports remain separate. The recovery/benchmark timeout is 120 seconds; actor
+identity probes are bounded at 30 seconds, and cluster startup/cleanup take
+additional time. No native rebuild is needed beyond the previous cleanup fix.
+
+Implementation and regression sources were reviewed, but no build, tests, lint
+or benchmark were run by the assistant. Regressions cover forbidden actor
+placement/ownership, disabled retries, actor loss, changed process identities,
+and unsupported benchmark modes. Actor recovery coverage remains unverified
+until the user runs this case. The 5000-actor/15-operator cloud configuration and
+both XGBoost Train sizes remain unvalidated; this does not claim Train support.

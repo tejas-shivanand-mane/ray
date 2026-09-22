@@ -44,6 +44,22 @@ def test_reject_unsupported_worker_recovery(worker_recovery, field, value):
         worker_recovery.validate_recovery_args(args)
 
 
+def test_actor_survival_requires_original_streaming_dataset_and_read_failure(worker_recovery):
+    args = arguments()
+    args.worker_type = "actors"
+    args.recovery_plan = "dataset"
+    args.recovery_output_mode = "streaming"
+    args.recovery_failure_stage = "read"
+    worker_recovery.validate_recovery_args(args)
+    for key, value in (("recovery_plan", "controlled"),
+                       ("recovery_output_mode", "buffered"),
+                       ("recovery_failure_stage", "map")):
+        invalid = copy.copy(args)
+        setattr(invalid, key, value)
+        with pytest.raises(ValueError):
+            worker_recovery.validate_recovery_args(invalid)
+
+
 def test_schema_validation_rejects_corrupted_values(worker_recovery):
     import worker_scaling_benchmark as original
 

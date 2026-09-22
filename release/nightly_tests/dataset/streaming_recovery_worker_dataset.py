@@ -18,6 +18,7 @@ from ray.data import DataContext
 from ray.data.block import BlockAccessor
 from ray.data._internal.execution.execution_callback import ExecutionCallback
 from ray.data._internal.execution.operators.map_operator import MapOperator
+from ray.data._internal.execution.operators.actor_pool_map_operator import ActorPoolMapOperator
 from ray.data._internal.execution.streaming_recovery import CONFIG_KEY, get_config
 
 from streaming_recovery_head_failure import local_head_failure_cluster
@@ -39,6 +40,8 @@ def execution_control(args):
             self.target = None
             self.execution_error_traceback = None
             self.trigger = None
+            self.actor_handles = []
+            self.actor_identities_before = []
 
         def __getstate__(self):
             # Callback classes travel in the DataContext, but the executor,
@@ -85,6 +88,25 @@ def execution_control(args):
             control.executor = executor
             control.operators = ops
             control.target = target_index
+            if args.worker_type == "actors":
+                actor_ops = [op for op in ops if isinstance(op, ActorPoolMapOperator)]
+                if len(actor_ops) != args.num_operators:
+                    raise ValueError("The original actor map chain was not preserved")
+                for op in actor_ops:
+                    pool = op._actor_pool
+                    actors = list(pool._running_actors) + list(pool._pending_actors.values())
+                    if len(actors) != args.num_workers // args.num_operators:
+                        raise ValueError("The original fixed actor pool size was not preserved")
+                    control.actor_handles.extend(actors)
+                # Initialization observation only: no UDF call or fault pause.
+                # Keep handles through validation to prevent ordinary end-of-job
+                # reference cleanup from terminating actors before the probe.
+                control.actor_identities_before = sorted(
+                    ray.get(
+                        [actor.get_recovery_identity.remote() for actor in control.actor_handles],
+                        timeout=min(timeout_s, 30),
+                    ), key=lambda item: item["actor_id"],
+                )
             if failure:
                 op = ops[target_index]
                 submit = op._submit_data_task
@@ -131,6 +153,20 @@ def execution_control(args):
     return control, Capture
 
 
+def actor_identities(handles, timeout_s):
+    identities = ray.get(
+        [actor.get_recovery_identity.remote() for actor in handles], timeout=timeout_s,
+    )
+    return sorted(identities, key=lambda item: item["actor_id"])
+
+
+def validate_actor_survival(before, after, executor_node_ids, expected_count):
+    if (len(before) != expected_count or before != after
+            or len({item["actor_id"] for item in before}) != expected_count
+            or any(item["node_id"] not in executor_node_ids for item in before)):
+        raise ValueError("Actor process identity or surviving-worker placement changed")
+
+
 def validate_accounting(args, operators, count, rows):
     if len(operators) != args.num_operators + 1:
         raise ValueError("Read/map operator accounting is incomplete")
@@ -138,8 +174,15 @@ def validate_accounting(args, operators, count, rows):
         expected = {
             "tasks_submitted": count, "tasks_finished": count, "tasks_failed": 0,
             "output_blocks": count, "output_rows": count * rows,
-            "fixed_r_closed_streams": count, "fixed_r_copied_blocks": count,
         }
+        if op["stage_index"] > 0 and args.worker_type == "actors":
+            if (any(op.get(key) != value for key, value in expected.items())
+                    or op.get("fixed_r_actor_mode") != "surviving_coordinator_owned"
+                    or op.get("fixed_r_actors_created") != args.num_workers // args.num_operators
+                    or op["active_enrolled_tasks"]):
+                raise ValueError(f"Actor-map output, pool, or ownership mismatch: {op}")
+            continue
+        expected.update(fixed_r_closed_streams=count, fixed_r_copied_blocks=count)
         if (any(op.get(key) != value for key, value in expected.items())
                 or op["active_enrolled_tasks"] or op["fixed_r_recovery_errors"]):
             raise ValueError(f"Read/map output or retirement mismatch: {op}")
@@ -224,6 +267,17 @@ def run_dataset(args, crash_head, diagnostics):
                 materialized = materializing.result(timeout=args.recovery_timeout_s)
                 if failure:
                     diagnostics["failure_request_to_materialize_s"] = time.monotonic() - started
+                if args.worker_type == "actors":
+                    after = actor_identities(control.actor_handles, min(args.recovery_timeout_s, 30))
+                    diagnostics.update(
+                        actor_identities_before=control.actor_identities_before,
+                        actor_identities_after=after,
+                    )
+                    validate_actor_survival(
+                        control.actor_identities_before, after, config.executor_node_ids,
+                        args.num_operators * (args.num_workers // args.num_operators),
+                    )
+                    diagnostics["actor_processes_survived"] = True
             except BaseException:
                 from streaming_recovery_backpressure_dataset import capture_wait_state
 
@@ -269,12 +323,20 @@ def run_dataset(args, crash_head, diagnostics):
             "block_shaping_enabled": True, "fusion_enabled": False,
             "output_validation": "exact_schema_all_scalar_and_array_values_and_row_counts",
             "coordinator_node_id": ray.get_runtime_context().get_node_id(),
+            "actor_map_recovery": ("surviving_coordinator_owned"
+                                   if args.worker_type == "actors" else None),
+            "actor_state_recovery": False,
         }
     finally:
         control.resume.set()
         if control.execution_error_traceback is not None:
             diagnostics["execution_error_traceback"] = control.execution_error_traceback
         diagnostics["last_observation"] = snapshot(control)
+        if args.worker_type == "actors":
+            diagnostics.setdefault("actor_identities_before", control.actor_identities_before)
+            for actor in control.actor_handles:
+                ray.kill(actor, no_restart=True)
+            control.actor_handles.clear()
         if not registered:
             cloudpickle.unregister_pickle_by_value(original)
 
@@ -291,6 +353,8 @@ def run_recovery_cases(args):
         if args.recovery_mode == "suite"
         else [(args.recovery_mode, args.recovery_failure_stage)]
     )
+    if args.worker_type == "actors" and args.recovery_mode == "suite":
+        cases = [(mode, "read") for mode in ("copy", "fixed_r", "fixed_r_head_failure")]
     timing = getattr(args, "recovery_head_timing", "paused")
     phases = tuple(FRACTIONS) if timing == "suite" else (timing,)
     cases = [(mode, stage, phase) for mode, stage in cases
@@ -305,6 +369,8 @@ def run_recovery_cases(args):
         selected.producer_concurrency = args.num_workers // args.num_operators
         diagnostics = {}
         key = f"worker_scaling/original_dataset/{args.num_operators}_operators/{mode}"
+        if args.worker_type == "actors":
+            key = f"worker_scaling/actors/original_dataset/{args.num_operators}_operators/{mode}"
         if mode == "fixed_r_head_failure":
             key += f"/{stage}"
             if phase != "paused":

@@ -225,7 +225,7 @@ def test_variable_outputs_and_duplicate_names_need_no_declarations(benchmark_mod
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Local GCS RocksDB requires Linux")
-def test_actor_map_is_rejected_before_execution(benchmark_modules):
+def test_buffered_actor_map_is_rejected_before_execution(benchmark_modules):
     class Identity:
         def __call__(self, batch):
             return batch
@@ -240,6 +240,53 @@ def test_actor_map_is_rejected_before_execution(benchmark_modules):
             )
             with pytest.raises(ValueError, match="task-map chains"):
                 ds.materialize()
+
+
+def test_surviving_actor_placement_excludes_head_and_disables_reexecution():
+    from ray.data._internal.execution.streaming_recovery import surviving_actor_options
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    head, first, second = [ray.NodeID.from_random().hex() for _ in range(3)]
+    config = FixedRDataConfig(head, (first, second), {}, dynamic_task_outputs=True)
+    options = {"scheduling_strategy": "SPREAD", "max_restarts": -1, "max_task_retries": -1}
+    placed = surviving_actor_options(config, options, 1)
+    assert placed["scheduling_strategy"].node_id == second
+    assert not placed["scheduling_strategy"].soft
+    assert placed["max_restarts"] == placed["max_task_retries"] == 0
+    assert placed["lifetime"] == "non_detached"
+    assert options["max_restarts"] == -1
+    for forbidden in (
+        {"scheduling_strategy": NodeAffinitySchedulingStrategy(head, soft=False)},
+        {"scheduling_strategy": NodeAffinitySchedulingStrategy(first, soft=True)},
+        {"lifetime": "detached"},
+        {"get_if_exists": True, "name": "foreign-owner"},
+        {"placement_group": object()},
+    ):
+        with pytest.raises(ValueError):
+            surviving_actor_options(config, forbidden, 0)
+
+
+@pytest.mark.parametrize("state", ["DEAD", "RESTARTING"])
+def test_surviving_actor_loss_fails_instead_of_reconstructing(state):
+    from ray.core.generated import gcs_pb2
+    from ray.data._internal.execution.operators.actor_pool_map_operator import _ActorPool
+
+    pool = object.__new__(_ActorPool)
+    pool._require_actor_survival = True
+    actor = Mock()
+    actor._get_local_state.return_value = getattr(gcs_pb2.ActorTableData.ActorState, state)
+    with pytest.raises(RuntimeError, match="lost a required surviving actor"):
+        pool._update_running_actor_state(actor)
+
+
+def test_actor_survival_evidence_rejects_restart_or_head_placement(benchmark_modules):
+    identity = {"actor_id": "actor", "worker_id": "process", "node_id": "worker", "pid": 1}
+    benchmark_modules.validate_actor_survival([identity], [dict(identity)], ("worker",), 1)
+    for changed in ({**identity, "pid": 2}, {**identity, "worker_id": "new-process"}):
+        with pytest.raises(ValueError, match="process identity"):
+            benchmark_modules.validate_actor_survival([identity], [changed], ("worker",), 1)
+    with pytest.raises(ValueError, match="surviving-worker placement"):
+        benchmark_modules.validate_actor_survival([identity], [identity], ("other",), 1)
 
 
 def buffered_context(limit=1024 * 1024):

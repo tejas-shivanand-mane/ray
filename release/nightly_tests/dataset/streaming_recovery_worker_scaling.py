@@ -42,8 +42,17 @@ MODES = ("copy", "fixed_r", "fixed_r_head_failure")
 def validate_recovery_args(args):
     if args.recovery_mode not in (*MODES, "suite"):
         raise ValueError("Unknown worker-schema recovery mode")
-    if args.worker_type != "tasks":
-        raise ValueError("Recovery currently requires --worker-type tasks; actors are unsupported")
+    if args.worker_type not in ("tasks", "actors"):
+        raise ValueError("Recovery requires tasks or actors")
+    if args.worker_type == "actors":
+        if (getattr(args, "recovery_plan", "controlled") != "dataset"
+                or getattr(args, "recovery_output_mode", "streaming") != "streaming"):
+            raise ValueError("Actor survival requires the dataset plan and streaming output mode")
+        if getattr(args, "recovery_failure_stage", "map") != "read":
+            raise ValueError(
+                "Actor survival uses --recovery-failure-stage read: "
+                "Fixed-R replays reads, while coordinator-owned actor calls survive"
+            )
     for name in ("num_workers", "num_operators", "blocks_per_worker"):
         if type(getattr(args, name)) is not int or getattr(args, name) < 1:
             raise ValueError(f"{name} must be a positive integer")

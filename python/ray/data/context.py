@@ -915,6 +915,8 @@ class DataContext:
     # Experimental finite task recovery with incremental output delivery. Requires
     # a surviving non-head driver and a cluster with native Fixed-R enabled.
     enable_fixed_r_task_recovery: bool = False
+    # Streaming mode also permits coordinator-owned actor maps on surviving
+    # executors. Actor state is not recovered; actor/method retries are disabled.
     # "streaming" uses version-2 native recovery without declared output counts.
     # "buffered" preserves the earlier finite-envelope validation path.
     fixed_r_task_recovery_output_mode: str = "streaming"

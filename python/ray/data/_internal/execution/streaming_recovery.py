@@ -6,6 +6,8 @@ dynamic-count streaming by default. No original protected output is exported:
 copies remain owned by the surviving coordinator.
 An optional final output splitter is supported when its coordinator and
 consumers survive; actor failures themselves are not recovered here.
+Dynamic streaming chains may also contain coordinator-owned actor maps placed
+on surviving executors. Their calls use ordinary Ray ownership, not task replay.
 """
 
 import math
@@ -206,6 +208,9 @@ def validate_execution(dag, context):
         TaskPoolMapOperator,
     )
     from ray.data._internal.execution.operators.output_splitter import OutputSplitter
+    from ray.data._internal.execution.operators.actor_pool_map_operator import (
+        ActorPoolMapOperator,
+    )
 
     names = []
     op = dag
@@ -216,7 +221,9 @@ def validate_execution(dag, context):
         if len(op.input_dependencies) != 1 or get_config(op.data_context) != config:
             raise ValueError("Fixed-R output splitting requires a consistent recovery configuration")
         op = op.input_dependencies[0]
-    while isinstance(op, TaskPoolMapOperator):
+    map_types = ((TaskPoolMapOperator, ActorPoolMapOperator)
+                 if config.dynamic_task_outputs else (TaskPoolMapOperator,))
+    while isinstance(op, map_types):
         if (
             len(op.input_dependencies) != 1
             or get_config(op.data_context) != config
@@ -227,7 +234,10 @@ def validate_execution(dag, context):
         names.append(op.name)
         op = op.input_dependencies[0]
     if not isinstance(op, InputDataBuffer):
-        raise ValueError("Fixed-R Data supports only InputDataBuffer -> task-map chains")
+        raise ValueError(
+            "Fixed-R Data supports only InputDataBuffer -> task-map chains; "
+            "surviving actor maps additionally require streaming output mode"
+        )
     if config.automatic_outputs and not names:
         # materialize() creates a new InputData-only Dataset from independent
         # coordinator-owned copies. It remains readable after owner-head loss.
@@ -255,6 +265,36 @@ def _owner_alive(config):
     if ray.get_runtime_context().get_node_id() == config.owner_node_id:
         raise ValueError("The Dataset coordinator must survive on a different node")
     return nodes[config.owner_node_id]["Alive"]
+
+
+def surviving_actor_options(config, options, actor_index):
+    """Place an ordinary coordinator-owned actor outside the protected head.
+
+    Actor state is never replayed by Fixed-R. Disabling actor/method retries makes
+    loss of these required survivors an error, rather than silently reconstructing
+    state or repeating a stateful call. Called after dynamic remote args are merged.
+    """
+    if not config.dynamic_task_outputs:
+        raise ValueError("Surviving actor maps require Fixed-R streaming output mode")
+    options = dict(options)
+    strategy = options.get("scheduling_strategy")
+    if isinstance(strategy, NodeAffinitySchedulingStrategy):
+        if strategy.node_id not in config.executor_node_ids or strategy.soft:
+            raise ValueError("Fixed-R actor affinity must select a surviving executor")
+    elif strategy is None or strategy in ("DEFAULT", "SPREAD"):
+        strategy = NodeAffinitySchedulingStrategy(
+            config.executor_for_task(actor_index), soft=False
+        )
+    else:
+        raise ValueError("Fixed-R actor placement requires surviving-node affinity")
+    if (options.get("lifetime") == "detached" or options.get("get_if_exists")
+            or options.get("placement_group") not in (None, "default")):
+        raise ValueError("Fixed-R actor maps require coordinator ownership and no placement group")
+    options.update(
+        scheduling_strategy=strategy, lifetime="non_detached",
+        max_restarts=0, max_task_retries=0,
+    )
+    return options
 
 
 class _DataStream:
