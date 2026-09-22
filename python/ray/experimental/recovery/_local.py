@@ -26,7 +26,9 @@ def local_system_config():
 
 
 @contextmanager
-def local_head_failure_cluster(args, *, coordinator_cpus=1):
+def local_head_failure_cluster(
+    args, *, coordinator_cpus=1, recovery_enabled=True, include_dashboard=False,
+):
     if sys.platform != "linux":
         raise ValueError("The local head-failure harness requires Linux RocksDB support")
     if not 2 <= args.local_executor_nodes <= 250:
@@ -43,6 +45,12 @@ def local_head_failure_cluster(args, *, coordinator_cpus=1):
         cluster = Cluster()
         try:
             config = local_system_config()
+            if not recovery_enabled:
+                # A fresh, genuinely disabled native baseline for no-fault
+                # performance comparisons; retain identical numeric settings.
+                for key in system_config():
+                    if key.startswith("enable_"):
+                        config[key] = False
             config.update(
                 gcs_storage="rocksdb",
                 gcs_storage_path=storage_path,
@@ -52,9 +60,11 @@ def local_head_failure_cluster(args, *, coordinator_cpus=1):
                 object_store_memory=args.local_object_store_mb * 1024**2,
             )
             head_options = dict(
-                num_cpus=0, include_dashboard=False, node_ip_address="127.0.0.2",
+                num_cpus=0, include_dashboard=include_dashboard, node_ip_address="127.0.0.2",
                 _system_config=config, **node_options,
             )
+            if include_dashboard:
+                head_options["dashboard_host"] = "127.0.0.2"
             head = cluster.add_node(**head_options)
             address = cluster.address
             cluster_id = head.cluster_id.hex()
@@ -88,6 +98,8 @@ def local_head_failure_cluster(args, *, coordinator_cpus=1):
 
             def crash_head():
                 nonlocal crashed
+                if not recovery_enabled:
+                    raise RuntimeError("Failure injection is disabled for the native baseline")
                 if crashed:
                     raise RuntimeError("The head-failure harness permits one failure")
                 crashed = True

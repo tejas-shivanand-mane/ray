@@ -1643,9 +1643,11 @@ def init(
         "object_spilling_directory", None
     )
     _node_ip_address: str = kwargs.pop("_node_ip_address", None)
-    if os.environ.get("RAY_EXPERIMENTAL_RECOVERY") == "1":
+    if os.environ.get("RAY_RECOVERY_DRIVER_NODE_IP"):
         # Local recovery launchers bind the ordinary script driver to a
-        # surviving raylet. Explicit caller placement still takes precedence.
+        # surviving raylet, including recovery-OFF comparison runs. This only
+        # selects placement; the separate opt-in hook enables recovery.
+        # Explicit caller placement still takes precedence.
         _node_ip_address = _node_ip_address or os.environ.get("RAY_RECOVERY_DRIVER_NODE_IP")
     _driver_object_store_memory: Optional[int] = kwargs.pop(
         "_driver_object_store_memory", None

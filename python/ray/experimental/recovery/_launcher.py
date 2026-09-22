@@ -30,13 +30,17 @@ def _stop(process):
 
 
 def run_script(script, script_args, *, local=False, address="auto", node_ip_address=None,
-               inject_head_failure=False, timeout_s=120, report=None, env=None):
+               inject_head_failure=False, timeout_s=120, report=None, env=None,
+               recovery_enabled=True):
     """Launch the script's normal main. Local mode is a Linux evaluation fixture.
 
     External mode attaches to an already-configured cluster and never kills or
     replaces its head. Its HA supervisor/storage must be supplied separately.
     Local observations prove execution/replay, not application-specific output
     equivalence; retain the application's own result checks as well.
+    ``recovery_enabled=False`` skips Data opt-in on an externally supplied
+    cluster. The caller must also disable native settings at cluster startup
+    when measuring a fully disabled baseline.
     """
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError("timeout_s must be positive and finite")
@@ -44,14 +48,18 @@ def run_script(script, script_args, *, local=False, address="auto", node_ip_addr
         raise ValueError("Local evaluation is limited to a 120-second case deadline")
     if inject_head_failure and not local:
         raise ValueError("Head injection is supported only in the isolated local fixture")
+    if not recovery_enabled and local:
+        raise ValueError("Use an externally supplied disabled cluster for the baseline")
     if address.startswith("ray://"):
         raise ValueError("Run the launcher on a surviving worker host using a native Ray address")
     script = Path(script).resolve(strict=True)
     result = {"script": str(script), "argv": list(script_args), "local": local,
+              "recovery_enabled": recovery_enabled,
               "failure_requested": inject_head_failure, "timeout_s": timeout_s,
               "validation_scope": "normal_entrypoint_completion_and_runtime_replay" if local else "script_exit_only"}
     child_env = {**os.environ, **(env or {})}
-    child_env.update(RAY_EXPERIMENTAL_RECOVERY="1", RAY_RECOVERY_TIMEOUT_S=str(timeout_s))
+    child_env.update(RAY_EXPERIMENTAL_RECOVERY="1" if recovery_enabled else "0",
+                     RAY_RECOVERY_TIMEOUT_S=str(timeout_s))
     # Do not inherit another supervisor's observer or driver placement.
     child_env.pop("RAY_RECOVERY_MONITOR", None)
     child_env.pop("RAY_RECOVERY_DRIVER_NODE_IP", None)
