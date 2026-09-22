@@ -214,7 +214,7 @@ def run_case(args, result_directory, diagnostics):
     import xgboost as xgb
     import train_batch_inference_benchmark as original
     from ray.train import FailureConfig, RunConfig
-    from ray.train.v2.xgboost import XGBoostTrainer
+    from ray.train.v2.xgboost.xgboost_trainer import XGBoostTrainer
 
     if original.XGBoostTrainer is not XGBoostTrainer:
         raise ValueError("Launch with RAY_TRAIN_V2_ENABLED=1 before importing Ray Train")
