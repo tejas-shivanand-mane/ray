@@ -40,6 +40,14 @@ def process_identity():
     }
 
 
+def train_worker_identity():
+    context = ray.train.get_context()
+    return {
+        **process_identity(), "world_rank": context.get_world_rank(),
+        "world_size": context.get_world_size(),
+    }
+
+
 class Monitor:
     def __init__(self):
         self.executions = {}
@@ -79,11 +87,11 @@ class TrainSurvivalProbe(WorkerGroupCallback, ControllerCallback):
         self.record("controller_after", process_identity())
 
     def after_worker_group_start(self, worker_group):
-        self.record("workers_before", ray.get(worker_group.execute_async(process_identity), timeout=15))
+        self.record("workers_before", ray.get(worker_group.execute_async(train_worker_identity), timeout=15))
 
     def before_worker_group_shutdown(self, worker_group):
         try:
-            identities = ray.get(worker_group.execute_async(process_identity), timeout=15)
+            identities = ray.get(worker_group.execute_async(train_worker_identity), timeout=15)
             self.record("workers_after", identities)
         except Exception:
             self.record("worker_probe_error", traceback.format_exc())
@@ -178,13 +186,21 @@ def make_input(directory, blocks=32, rows_per_block=1024):
     return blocks * rows_per_block
 
 
-def validate_observations(observation, total_rows, executor_nodes, coordinator_node):
+def validate_observations(
+    observation, total_rows, executor_nodes, coordinator_node, num_train_workers=1,
+):
     lifecycle = observation["lifecycle"]
     before, after = lifecycle.get("workers_before"), lifecycle.get("workers_after")
-    if (not before or len(before) != 1 or before != after
-            or before[0]["node_id"] not in executor_nodes
+    if (not before or len(before) != num_train_workers or before != after
+            or any(worker["node_id"] not in executor_nodes for worker in before)
+            or len({worker["actor_id"] for worker in before}) != num_train_workers
+            or len({worker["worker_id"] for worker in before}) != num_train_workers
+            or {worker.get("world_rank") for worker in before} != set(range(num_train_workers))
+            or any(worker.get("world_size") != num_train_workers for worker in before)
             or "worker_probe_error" in lifecycle):
-        raise ValueError("The original Train worker process did not survive")
+        raise ValueError("The original Train worker group did not survive with all expected ranks")
+    if len({worker["node_id"] for worker in before}) != num_train_workers:
+        raise ValueError("Local Train workers must occupy separate surviving executor nodes")
     controller = lifecycle.get("controller_before")
     if (not controller or controller != lifecycle.get("controller_after")
             or controller["node_id"] != coordinator_node):
@@ -239,7 +255,8 @@ def run_case(args, result_directory, diagnostics):
     diagnostics.update(
         input_rows=total_rows, input_blocks=32, input_features=16,
         input_source="local_synthetic_parquet",
-        num_train_workers=1, cpus_per_train_worker=1, num_boost_rounds=10,
+        num_train_workers=args.num_train_workers, cpus_per_train_worker=1, num_boost_rounds=10,
+        train_placement_strategy="STRICT_SPREAD" if args.num_train_workers > 1 else "PACK",
         recovery_timeout_s=args.recovery_timeout_s,
         failure_phase="training_data_ingestion", training_state_recovery=False,
         original_train_loop=True, original_predictor=True, ray_train_v2=True,
@@ -271,7 +288,9 @@ def run_case(args, result_directory, diagnostics):
                 with DataContext.current(context):
                     started = time.monotonic()
                     result = original.train(
-                        "xgboost", str(input_directory), 1, 1,
+                        "xgboost", str(input_directory), args.num_train_workers, 1,
+                        # Leave one CPU on each training node for read tasks.
+                        placement_strategy=("STRICT_SPREAD" if args.num_train_workers > 1 else "PACK"),
                         read_kwargs={"override_num_blocks": 32},
                         run_config=RunConfig(
                             name="fixed_r_xgboost", storage_path=str(result_directory / "checkpoints"),
@@ -346,7 +365,10 @@ def run_case(args, result_directory, diagnostics):
                     # case deadline for their final messages to reach the monitor.
                     if all(observed["executions"].get(phase, {}).get("state") == "finished"
                            for phase in ("training", "inference")):
-                        validate_observations(observed, total_rows, case_args.executor_node_ids, coordinator_node)
+                        validate_observations(
+                            observed, total_rows, case_args.executor_node_ids,
+                            coordinator_node, args.num_train_workers,
+                        )
                         return {
                             **diagnostics, **result, "time": time.monotonic() - started,
                             "failure_request_to_completion_s": time.monotonic() - crashed_at,
@@ -363,6 +385,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--result-directory", type=Path, required=True)
     parser.add_argument("--recovery-timeout-s", type=float, default=120)
+    parser.add_argument("--num-train-workers", type=int, choices=(1, 2), default=1)
     args = parser.parse_args()
     args.result_directory = args.result_directory.resolve()
     args.local_executor_nodes = 4
@@ -372,6 +395,8 @@ def main():
     output = Path(os.environ["TEST_OUTPUT_JSON"])
     diagnostics = {}
     key = "xgboost/train_v2/local_original_pipeline/head_failure_during_ingestion"
+    if args.num_train_workers > 1:
+        key = f"xgboost/train_v2/local_{args.num_train_workers}_workers/head_failure_during_ingestion"
     try:
         if not 0 < args.recovery_timeout_s <= 120:
             raise ValueError("Use a positive case timeout of at most 120 seconds")

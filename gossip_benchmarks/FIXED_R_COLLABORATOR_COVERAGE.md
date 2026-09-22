@@ -1,9 +1,9 @@
 # One combined step toward collaborator benchmark coverage
 
-Current next step: run only `--xgboost-only`, as described in the final section.
-Training-prefetch and the actor-survival case have now passed. This Train
-integration is Python-only and uses the existing native build. Earlier commands
-below record previous coverage steps; do not repeat them by default.
+Current next step: run only `--xgboost-multi-only`, as described in the final
+section. Training-prefetch, actor survival and single-worker XGBoost have passed.
+This two-worker extension is Python-only and uses the existing native build.
+Earlier commands below record previous steps; do not repeat them by default.
 
 The goal is head-process failure recovery with minimal application changes.
 This step adds one workload and removes the controlled coordinator pause from
@@ -440,3 +440,50 @@ block size to zero so the V2 partitioner can retain the requested 32 small read
 buckets. Training and prediction functions remain unchanged. Regression sources
 cover the V2 stage selection and reject listing-only replay; none were executed
 by the assistant. Rerun only `--xgboost-only`, without reinstalling or rebuilding.
+
+## Single-worker XGBoost passed; next run two training workers
+
+The uploaded `coverage-xgboost(1).json` (`run.RX1KYA`) passed in 39.623 seconds.
+All original head processes exited; the replacement was ready after 2.329
+seconds. Fixed-R replayed two Parquet-read tasks and one listing task. The same
+Train controller and worker processes completed training, a ten-round checkpoint
+was loaded, and all 32768 persisted predictions matched direct inference from
+that checkpoint. Failure request to full completion was 28.110 seconds, including
+the remaining training and inference; it is not a recovery-only latency.
+
+The next profile runs only the missing distributed-training case, with two
+one-CPU Train workers, the same 32768 rows and four two-CPU logical executor
+nodes. An optional `placement_strategy` argument to the original benchmark's
+`train()` selects `STRICT_SPREAD` for this local profile. This leaves one CPU
+available on each training node for the read tasks that its worker is waiting
+on. The default benchmark placement remains `PACK`. The training loop, ten
+boosting rounds, XGBoost collective backend, checkpoint callback and predictor
+are unchanged.
+
+The lifecycle probe records both ranks' world size, rank and process identities
+before training and before worker shutdown. Validation requires ranks 0 and 1
+in a world of size two, two distinct worker processes on distinct surviving
+executor nodes, and unchanged identities across the failure. Existing checks
+still require actual Parquet-read replay, completed Data stages, the same Train
+controller, a loadable checkpoint and correct persisted predictions. The head
+is still killed during shared data ingestion; successful distributed boosting
+after that fault is required, but failure during an active boosting collective
+and recovery of lost model state are not claimed.
+
+Run in the existing `ray-dev` environment:
+
+```bash
+cd /home/tejas/Downloads/ray &&
+git pull --ff-only &&
+bash gossip_benchmarks/run_fixed_r_collaborator_coverage.sh --xgboost-multi-only
+```
+
+No reinstall, native rebuild or repeat of the single-worker case is needed.
+Output: `/home/tejas/ray-coverage/coverage-xgboost-multi.json`. The new profile
+preserves the earlier `coverage-xgboost.json`. The case retains a 120-second
+processing deadline plus cluster startup/cleanup overhead, with the same shorter
+internal waits. No builds, tests, lint or benchmarks were run by the assistant.
+Source regressions reject missing/restarted workers, duplicate ranks, incorrect
+world size, packed placement and workers placed on the coordinator. The two-worker
+case remains unverified until the user runs it; the exact ten-worker/100G cloud
+configuration remains unvalidated even if the local case passes.

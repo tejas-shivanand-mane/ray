@@ -15,7 +15,8 @@ def coverage(monkeypatch):
 
 
 def completed_run():
-    worker = {"actor_id": "worker", "node_id": "executor", "worker_id": "worker-process", "pid": 1}
+    worker = {"actor_id": "worker", "node_id": "executor", "worker_id": "worker-process", "pid": 1,
+              "world_rank": 0, "world_size": 1}
     controller = {"actor_id": "controller", "node_id": "coordinator", "worker_id": "control-process", "pid": 2}
     task = {
         "name": "ReadParquet", "tasks_submitted": 4, "tasks_finished": 4,
@@ -82,3 +83,35 @@ def test_v2_parquet_listing_is_not_training_read_recovery(coverage):
 def test_parquet_stage_requires_one_actual_reader(coverage, names):
     with pytest.raises(ValueError, match="one Parquet ingestion stage"):
         coverage.parquet_read_stage(names)
+
+
+@pytest.mark.parametrize("gap", [
+    "missing_worker", "duplicate_rank", "wrong_world_size", "restarted_worker",
+    "packed_workers", "coordinator_worker",
+])
+def test_multi_worker_coverage_requires_both_ranks_to_survive(coverage, gap):
+    result = completed_run()
+    lifecycle = result["lifecycle"]
+    first = {**lifecycle["workers_before"][0], "world_size": 2}
+    second = {**first, "actor_id": "worker-2", "worker_id": "process-2",
+              "node_id": "executor-2", "pid": 3, "world_rank": 1}
+    lifecycle["workers_before"] = [first, second]
+    lifecycle["workers_after"] = copy.deepcopy([first, second])
+    executors = ("executor", "executor-2")
+    coverage.validate_observations(result, 100, executors, "coordinator", 2)
+    if gap == "missing_worker":
+        lifecycle["workers_before"] = [first]
+        lifecycle["workers_after"] = [dict(first)]
+    elif gap == "restarted_worker":
+        lifecycle["workers_after"][1]["pid"] = 4
+    else:
+        field, value = {
+            "duplicate_rank": ("world_rank", 0),
+            "wrong_world_size": ("world_size", 1),
+            "packed_workers": ("node_id", "executor"),
+            "coordinator_worker": ("node_id", "coordinator"),
+        }[gap]
+        second[field] = value
+        lifecycle["workers_after"] = copy.deepcopy(lifecycle["workers_before"])
+    with pytest.raises(ValueError):
+        coverage.validate_observations(result, 100, executors, "coordinator", 2)

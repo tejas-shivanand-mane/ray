@@ -139,7 +139,7 @@ _FRAMEWORK_PARAMS = {
 
 def train(
     framework: str, data_path: str, num_workers: int, cpus_per_worker: int,
-    *, run_config=None, read_kwargs=None,
+    *, run_config=None, read_kwargs=None, placement_strategy="PACK",
 ) -> ray.train.Result:
     ds = data.read_parquet(data_path, **(read_kwargs or {}))
     framework_params = _FRAMEWORK_PARAMS[framework]
@@ -155,6 +155,7 @@ def train(
         scaling_config=ScalingConfig(
             num_workers=num_workers,
             resources_per_worker={"CPU": cpus_per_worker},
+            placement_strategy=placement_strategy,
         ),
         datasets={"train": ds},
         run_config=run_config or RunConfig(
