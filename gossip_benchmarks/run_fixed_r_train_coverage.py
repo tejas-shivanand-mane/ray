@@ -89,6 +89,16 @@ class TrainSurvivalProbe(WorkerGroupCallback, ControllerCallback):
             self.record("worker_probe_error", traceback.format_exc())
 
 
+def parquet_read_stage(names):
+    # V2 lists file manifests before reading rows. Listing progress/replay is
+    # not evidence of recovery of the training data itself.
+    matches = [index for index, name in enumerate(names)
+               if name in ("ReadParquet", "ReadFilesParquetV2")]
+    if len(matches) != 1:
+        raise ValueError(f"Expected one Parquet ingestion stage, got {names}")
+    return matches[0]
+
+
 def capture_execution(monitor_name, phase, total_rows):
     class Capture(ExecutionCallback):
         def before_execution_starts(self, executor):
@@ -99,12 +109,13 @@ def capture_execution(monitor_name, phase, total_rows):
             if not self.control.operators:
                 return  # Train's materialized shard can execute an InputData-only plan.
             self.monitor = ray.get_actor(monitor_name, namespace=NAMESPACE)
-            self.trigger = ProgressTrigger(total_rows, "early", 0) if phase == "training" else None
+            self.trigger = None
+            if phase == "training":
+                stage = parquet_read_stage([op.name for op in self.control.operators])
+                self.trigger = ProgressTrigger(total_rows, "early", stage)
             self.last_report = 0
             if self.trigger is not None:
-                op = self.control.operators[0]
-                if not op.name.startswith("ReadParquet"):
-                    raise ValueError(f"Expected original Parquet ingestion, got {op.name}")
+                op = self.control.operators[self.trigger.stage]
                 submit = op._submit_data_task
 
                 def submit_and_observe(stream, *args, **kwargs):
@@ -192,8 +203,9 @@ def validate_observations(observation, total_rows, executor_nodes, coordinator_n
                 raise ValueError(f"Incomplete or failed operator: {op}")
             if "fixed_r_closed_streams" in op and op["fixed_r_closed_streams"] != op["tasks_submitted"]:
                 raise ValueError(f"Unclosed task streams: {op}")
-    reads = training["operators"][0]
-    if (not reads["name"].startswith("ReadParquet") or reads["output_rows"] != total_rows
+    stage = parquet_read_stage([op["name"] for op in training["operators"]])
+    reads = training["operators"][stage]
+    if (reads["output_rows"] != total_rows
             or reads.get("fixed_r_recovered_tasks", 0) < 1):
         raise ValueError("Training Parquet ingestion did not validate all rows and exercise replay")
     actors = [op for op in inference["operators"]
@@ -249,6 +261,9 @@ def run_case(args, result_directory, diagnostics):
                 context.fixed_r_task_recovery_output_mode = "streaming"
                 context.fixed_r_task_recovery_timeout_s = args.recovery_timeout_s
                 context.enable_progress_bars = False
+                # The V2 file partitioner otherwise combines these tiny files
+                # up to its minimum size despite override_num_blocks=32.
+                context.target_min_block_size = 0
                 get_config(context)  # Cache the original head before replacement.
                 context.custom_execution_callback_classes = [
                     capture_execution(monitor_name, "training", total_rows),

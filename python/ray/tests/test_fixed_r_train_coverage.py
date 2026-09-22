@@ -59,3 +59,26 @@ def test_train_coverage_rejects_false_success(coverage, gap):
         result["executions"]["inference"]["operators"][0]["output_rows"] = 99
     with pytest.raises(ValueError):
         coverage.validate_observations(result, 100, ("executor",), "coordinator")
+
+
+def test_v2_parquet_listing_is_not_training_read_recovery(coverage):
+    result = completed_run()
+    reads = result["executions"]["training"]["operators"][0]
+    reads["name"] = "ReadFilesParquetV2"
+    listing = {**reads, "name": "ListFiles", "output_rows": 32,
+               "fixed_r_recovered_tasks": 0}
+    result["executions"]["training"]["operators"].insert(0, listing)
+    assert coverage.parquet_read_stage(["ListFiles", "ReadFilesParquetV2"]) == 1
+    coverage.validate_observations(result, 100, ("executor",), "coordinator")
+    listing["fixed_r_recovered_tasks"] = 1
+    reads["fixed_r_recovered_tasks"] = 0
+    with pytest.raises(ValueError, match="exercise replay"):
+        coverage.validate_observations(result, 100, ("executor",), "coordinator")
+
+
+@pytest.mark.parametrize("names", [
+    ["ListFiles"], ["ReadCSV"], ["ReadParquet", "ReadFilesParquetV2"],
+])
+def test_parquet_stage_requires_one_actual_reader(coverage, names):
+    with pytest.raises(ValueError, match="one Parquet ingestion stage"):
+        coverage.parquet_read_stage(names)

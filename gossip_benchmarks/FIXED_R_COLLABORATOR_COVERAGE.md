@@ -430,3 +430,13 @@ are submitted from the coordinator without retries even when the head is alive.
 Train coverage remains unverified until this case passes. It does not claim
 recovery of lost model/actor state, failure during boosting, head-disk loss,
 multi-worker collective recovery, or either exact 10-GB/100-GB cloud configuration.
+
+The first executable XGBoost report (`run.fG6pcu`) failed in the observation
+callback before head injection: the V2 Parquet plan starts with `ListFiles`,
+followed by `ReadFilesParquetV2`. The callback and final validator now select the
+actual Parquet reader in either the V1 or V2 plan; listing replay cannot satisfy
+the training-read recovery requirement. The local context also sets the minimum
+block size to zero so the V2 partitioner can retain the requested 32 small read
+buckets. Training and prediction functions remain unchanged. Regression sources
+cover the V2 stage selection and reject listing-only replay; none were executed
+by the assistant. Rerun only `--xgboost-only`, without reinstalling or rebuilding.
