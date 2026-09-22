@@ -148,4 +148,16 @@ def _plan_write_op_internal(
         on_start=on_start,
     )
 
+    from ray.data._internal.execution.streaming_recovery import get_config
+
+    recovery_config = get_config(data_context)
+    if recovery_config is not None:
+        if not recovery_config.dynamic_task_outputs:
+            raise ValueError("Fixed-R writes require streaming output mode and surviving writers")
+        # External writes are not deterministic replayable computations. Keep
+        # calls owned by the surviving coordinator, on surviving executors, with
+        # retries disabled. This does not provide recovery of a lost writer or
+        # transactional/exactly-once output across additional failures.
+        map_op._streaming_recovery_survivor_only = True
+
     return map_op

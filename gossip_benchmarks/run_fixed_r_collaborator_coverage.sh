@@ -5,14 +5,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 profile=full
 if [[ $# -gt 1 ]]; then
-  echo "Usage: $0 [--failed-only|--training-only|--actors-only]" >&2; exit 2
+  echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only]" >&2; exit 2
 fi
 case "${1:-}" in
   "") ;;
   --failed-only) profile=failed-only ;;
   --training-only) profile=training-only ;;
   --actors-only) profile=actors-only ;;
-  *) echo "Usage: $0 [--failed-only|--training-only|--actors-only]" >&2; exit 2 ;;
+  --xgboost-only) profile=xgboost-only ;;
+  *) echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only]" >&2; exit 2 ;;
 esac
 result_root="${RAY_RECOVERY_OUTPUT_DIR:-$HOME/ray-coverage}"
 mkdir -p "$result_root"
@@ -55,7 +56,14 @@ if [[ "$profile" == training-only ]]; then
   summary_name=coverage-training.json
 fi
 
-if [[ "$profile" == actors-only ]]; then
+if [[ "$profile" == xgboost-only ]]; then
+summary_name=coverage-xgboost.json
+TEST_OUTPUT_JSON="$result_dir/xgboost.json" \
+RAY_TRAIN_V2_ENABLED=1 RAY_TRAIN_WORKER_GROUP_START_TIMEOUT_S=30 \
+RAY_TRAIN_WORKER_HEALTH_CHECK_TIMEOUT_S=30 RAY_TRAIN_COLLECTIVE_TIMEOUT_S=30 \
+python gossip_benchmarks/run_fixed_r_train_coverage.py \
+  --result-directory "$result_dir/xgboost-workload" --recovery-timeout-s 120 || failed=1
+elif [[ "$profile" == actors-only ]]; then
 summary_name=coverage-actors.json
 # Original actor UDF, pool and wide schema; reduce only local scale. Protect the
 # reads and verify the same initialized actor processes survive head replacement.
@@ -105,12 +113,16 @@ import sys
 
 directory = Path(sys.argv[1])
 profile = sys.argv[3]
-names = ["worker-scaling-actors"] if profile == "actors-only" else ["training-prefetch"]
+names = {
+    "actors-only": ["worker-scaling-actors"], "xgboost-only": ["xgboost"],
+}.get(profile, ["training-prefetch"])
 if profile in ("full", "failed-only"):
     names.extend(["worker-scaling-chain", "backpressure-async"])
 if profile == "full":
     names.append("worker-scaling-single")
-expected_count = {"full": 11, "failed-only": 5, "training-only": 1, "actors-only": 1}[profile]
+expected_count = {
+    "full": 11, "failed-only": 5, "training-only": 1, "actors-only": 1, "xgboost-only": 1,
+}[profile]
 summary = {"result_directory": str(directory), "profile": profile,
            "expected_case_count": expected_count, "cases": {}, "missing_results": []}
 for name in names:

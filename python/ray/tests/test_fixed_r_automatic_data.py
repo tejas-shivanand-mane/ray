@@ -279,6 +279,31 @@ def test_surviving_actor_loss_fails_instead_of_reconstructing(state):
         pool._update_running_actor_state(actor)
 
 
+def test_side_effecting_survivor_task_is_never_enrolled_even_while_head_alive(monkeypatch):
+    from ray.data._internal.execution import streaming_recovery as runtime
+
+    config = SimpleNamespace(
+        automatic_outputs=False, dynamic_task_outputs=True, mode="fixed_r",
+        executor_for_task=lambda index: ray.NodeID.from_random().hex(),
+    )
+    monkeypatch.setattr(runtime, "_owner_alive", lambda config: True)
+    core = SimpleNamespace(validate_streaming_recovery_inputs=lambda refs: None)
+    monkeypatch.setattr(ray._private.worker.global_worker, "core_worker", core, raising=False)
+    remote = Mock(side_effect=AssertionError("Writes must not create owner helpers"))
+    monkeypatch.setattr(ray, "remote", remote)
+    producer = Mock()
+    metrics = new_metrics()
+    stream = submit_stream(
+        config, producer, (), {}, {}, 1, metrics, survivor_only=True,
+    )
+    assert stream.reader is None
+    assert metrics["fixed_r_survivor_tasks"] == 1
+    assert metrics["fixed_r_enrolled_tasks"] == 0
+    assert producer.options.call_args.kwargs["max_retries"] == 0
+    assert producer.options.call_args.kwargs["retry_exceptions"] is False
+    remote.assert_not_called()
+
+
 def test_actor_survival_evidence_rejects_restart_or_head_placement(benchmark_modules):
     identity = {"actor_id": "actor", "worker_id": "process", "node_id": "worker", "pid": 1}
     benchmark_modules.validate_actor_survival([identity], [dict(identity)], ("worker",), 1)

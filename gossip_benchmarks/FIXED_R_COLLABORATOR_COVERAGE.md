@@ -1,9 +1,9 @@
 # One combined step toward collaborator benchmark coverage
 
-Current next step: run only `--actors-only`, as described in the final section.
-Training-prefetch has now passed. This actor-survival change is Python-only and
-uses the existing native build. Earlier commands below record previous coverage
-steps; do not repeat them by default.
+Current next step: run only `--xgboost-only`, as described in the final section.
+Training-prefetch and the actor-survival case have now passed. This Train
+integration is Python-only and uses the existing native build. Earlier commands
+below record previous coverage steps; do not repeat them by default.
 
 The goal is head-process failure recovery with minimal application changes.
 This step adds one workload and removes the controlled coordinator pause from
@@ -356,3 +356,77 @@ placement/ownership, disabled retries, actor loss, changed process identities,
 and unsupported benchmark modes. Actor recovery coverage remains unverified
 until the user runs this case. The 5000-actor/15-operator cloud configuration and
 both XGBoost Train sizes remain unvalidated; this does not claim Train support.
+
+## Actor case passed; next integrate the original XGBoost Train pipeline
+
+The uploaded `coverage-actors.json` passed: 9.822 seconds total, 3.414 seconds
+from failure request to materialization, one protected read replay, and all
+96 read/map tasks finished. All 10304 output rows were validated. Eight actors
+kept the same actor IDs, worker IDs, node IDs and PIDs through head replacement.
+At the trigger snapshot actors were initialized but no map calls were submitted,
+so this establishes initialized-actor survival and subsequent pipeline completion,
+not failure during an active actor method. Do not repeat this case by default.
+
+The next step uses Ray Train v2's original XGBoost benchmark functions:
+`train`, `xgboost_train_loop_function`, `RayTrainReportCallback`, `predict`, and
+`XGBoostPredictor`. The ten boosting rounds, training parameters, Dataset shard
+materialization, checkpoint loading, prediction batch size and actor concurrency
+formula are unchanged. Optional function arguments supply a local storage path,
+RunConfig and read block count. LightGBM is optional for an XGBoost invocation.
+
+The local harness uses one one-CPU Train worker, 32768 synthetic binary-label
+rows with 16 float features in 32 Parquet files, and four surviving logical CPU
+nodes. These are local integration data, not the collaborator's 10-GB S3 data or
+cloud machine sizes. A zero-CPU coordinator keeps Train workers off the driver;
+the head also has zero CPUs. Existing Train v2 placement keeps the controller,
+Rabit tracker, data manager and split coordinator with the surviving driver.
+The harness runs the original pipeline inside a separately owned job actor so
+an expired case can be terminated without waiting indefinitely in `Trainer.fit`.
+
+Head failure is requested asynchronously after early Parquet read progress
+during **training data ingestion**. The executor and UDF do not wait for failure
+injection. Validation requires actual Fixed-R read replay, successful completion
+of all Data stages and closed task streams, the same Train controller and worker
+processes, a loadable ten-round checkpoint, and actor-based inference followed
+by Parquet output. Persisted predictions must have the expected count/schema and
+match direct inference from the saved model as an unordered multiset of values.
+This does not independently establish per-row ordering or model equivalence to
+a separate no-failure training run. Train worker/controller retries are disabled.
+
+The runtime also distinguishes external writes from replayable computation.
+Write tasks remain owned by the surviving Dataset coordinator and execute on
+surviving nodes with retries disabled, even while the original head is alive.
+They are never enrolled in Fixed-R or replayed on head loss. This does not add
+transactional/exactly-once writes or recovery of a lost writer. Actor outputs
+remain coordinator-owned as in the previous actor-map integration.
+
+In `ray-dev`, install the Train dependencies from this source fork plus the
+repository's pinned XGBoost version, with native compilation explicitly skipped,
+then run the single new case:
+
+```bash
+cd /home/tejas/Downloads/ray &&
+git pull --ff-only &&
+SKIP_BAZEL_BUILD=1 python -m pip install -e './python[train]' 'xgboost==2.1.0' --no-build-isolation &&
+bash gossip_benchmarks/run_fixed_r_collaborator_coverage.sh --xgboost-only
+```
+
+If these dependencies are already installed, the pip line can be omitted. This
+does not install a released Ray package. The existing compiled fork must include
+the earlier native streaming cleanup change. No new native rebuild is required.
+
+The combined result is `/home/tejas/ray-coverage/coverage-xgboost.json`; generated
+input, checkpoint and predictions stay in its fresh result subdirectory. The
+job uses one 120-second processing deadline across training and inference;
+worker startup/health/collective settings are 30 seconds, identity probes at most
+15 seconds, and the head-replacement observation wait uses at most 30 seconds
+or the remaining case budget. Cluster startup/process replacement/cleanup and
+initial dependency installation add overhead. No earlier cases are repeated.
+
+Source review only: no build, tests, lint or benchmark were run by the assistant.
+Regression sources reject missing replay, changed worker processes, enrolled
+writes and missing prediction rows; an additional regression checks that writes
+are submitted from the coordinator without retries even when the head is alive.
+Train coverage remains unverified until this case passes. It does not claim
+recovery of lost model/actor state, failure during boosting, head-disk loss,
+multi-worker collective recovery, or either exact 10-GB/100-GB cloud configuration.

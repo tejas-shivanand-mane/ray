@@ -92,6 +92,7 @@ class TaskPoolMapOperator(MapOperator):
                 default is an implementation detail.
         """
         self._streaming_recovery_config = get_recovery_config(data_context)
+        self._streaming_recovery_survivor_only = False
         self._streaming_recovery_metrics = new_recovery_metrics()
         if self._streaming_recovery_config is not None:
             supports_fusion = False
@@ -225,6 +226,7 @@ class TaskPoolMapOperator(MapOperator):
                 1 if config.automatic_outputs else config.expected_blocks[self.name],
                 self._streaming_recovery_metrics,
                 task_index=self._next_data_task_idx,
+                survivor_only=self._streaming_recovery_survivor_only,
             )
 
         self._current_logical_usage = self._current_logical_usage.add(logical_usage)
@@ -255,6 +257,7 @@ class TaskPoolMapOperator(MapOperator):
         if self._streaming_recovery_config is not None:
             metrics.update(self._streaming_recovery_metrics)
             metrics["fixed_r_output_mode"] = self._streaming_recovery_config.mode
+            metrics["fixed_r_survivor_only"] = self._streaming_recovery_survivor_only
         return metrics
 
     def progress_str(self) -> str:

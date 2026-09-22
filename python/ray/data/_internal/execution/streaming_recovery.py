@@ -401,7 +401,8 @@ class _DataStream:
 
 
 def submit_stream(
-    config, producer, args, kwargs, options, expected_blocks, stats, *, task_index=0
+    config, producer, args, kwargs, options, expected_blocks, stats, *, task_index=0,
+    survivor_only=False,
 ):
     owner_alive = _owner_alive(config)
     if config.automatic_outputs:
@@ -424,7 +425,7 @@ def submit_stream(
         scheduling_strategy=NodeAffinitySchedulingStrategy(
             config.executor_for_task(task_index), soft=False
         ),
-        max_retries=1,
+        max_retries=0 if survivor_only else 1,
         retry_exceptions=False,
     )
     count = -1 if config.dynamic_task_outputs else 2 * expected_blocks
@@ -438,7 +439,7 @@ def submit_stream(
         stats[key] += 1
         return _DataStream(count, stats, generator=generator)
 
-    if config.mode == "copy" or not owner_alive:
+    if survivor_only or config.mode == "copy" or not owner_alive:
         return submit_from_coordinator()
 
     owner = ray.remote(num_cpus=0, max_restarts=0, max_task_retries=0)(

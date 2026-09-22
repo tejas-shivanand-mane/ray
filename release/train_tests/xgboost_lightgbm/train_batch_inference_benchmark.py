@@ -6,15 +6,19 @@ import time
 from typing import Dict
 
 import xgboost as xgb
-import lightgbm as lgb
 
 import ray
 from ray import data
-from ray.train.lightgbm import (
-    LightGBMTrainer,
-    RayTrainReportCallback as LightGBMReportCallback,
-    normalize_pandas_for_lightgbm,
-)
+try:
+    import lightgbm as lgb
+    from ray.train.lightgbm import (
+        LightGBMTrainer,
+        RayTrainReportCallback as LightGBMReportCallback,
+        normalize_pandas_for_lightgbm,
+    )
+except ImportError:
+    # XGBoost runs need not install the unused LightGBM framework.
+    lgb = LightGBMTrainer = LightGBMReportCallback = normalize_pandas_for_lightgbm = None
 from ray.train.xgboost import (
     RayTrainReportCallback as XGBoostReportCallback,
     XGBoostTrainer,
@@ -134,10 +138,13 @@ _FRAMEWORK_PARAMS = {
 
 
 def train(
-    framework: str, data_path: str, num_workers: int, cpus_per_worker: int
+    framework: str, data_path: str, num_workers: int, cpus_per_worker: int,
+    *, run_config=None, read_kwargs=None,
 ) -> ray.train.Result:
-    ds = data.read_parquet(data_path)
+    ds = data.read_parquet(data_path, **(read_kwargs or {}))
     framework_params = _FRAMEWORK_PARAMS[framework]
+    if framework_params["trainer_cls"] is None:
+        raise ImportError("Install lightgbm to run the LightGBM benchmark")
 
     trainer_cls = framework_params["trainer_cls"]
     framework_train_loop_fn = framework_params["train_loop_function"]
@@ -150,7 +157,7 @@ def train(
             resources_per_worker={"CPU": cpus_per_worker},
         ),
         datasets={"train": ds},
-        run_config=RunConfig(
+        run_config=run_config or RunConfig(
             storage_path="/mnt/cluster_storage", name=f"{framework}_benchmark"
         ),
     )
@@ -158,12 +165,15 @@ def train(
     return result
 
 
-def predict(framework: str, result: ray.train.Result, data_path: str):
+def predict(
+    framework: str, result: ray.train.Result, data_path: str,
+    *, output_path="/mnt/cluster_storage/predictions", read_kwargs=None,
+):
     framework_params = _FRAMEWORK_PARAMS[framework]
 
     predictor_cls = framework_params["predictor_cls"]
 
-    ds = data.read_parquet(data_path)
+    ds = data.read_parquet(data_path, **(read_kwargs or {}))
     ds = ds.drop_columns(["labels"])
 
     concurrency = int(ray.cluster_resources()["CPU"] // 2)
@@ -179,7 +189,7 @@ def predict(framework: str, result: ray.train.Result, data_path: str):
             "result": result,
         },
         batch_format="pandas",
-    ).write_parquet("/mnt/cluster_storage/predictions")
+    ).write_parquet(output_path)
 
 
 def main(args):
