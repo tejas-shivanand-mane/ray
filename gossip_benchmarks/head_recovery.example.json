@@ -1,0 +1,16 @@
+{
+  "address": "10.0.0.100:6379",
+  "old_head_ip": "10.0.0.10",
+  "replacement_head_ip": "10.0.0.11",
+  "redis_address": "10.0.0.20:6379",
+  "storage_namespace": "fixed-r-host-failure-001",
+  "survivor_node_ips": ["10.0.0.30", "10.0.0.31", "10.0.0.32"],
+  "fence_command": ["/opt/ray-recovery/fence-old-head"],
+  "start_command": ["/opt/ray-recovery/start-replacement", "{session_name}"],
+  "switch_command": ["/opt/ray-recovery/switch-gcs-endpoint"],
+  "recovery_timeout_s": 120,
+  "probe_timeout_s": 5,
+  "poll_interval_s": 1,
+  "failure_threshold": 3,
+  "reconnect_timeout_s": 300
+}

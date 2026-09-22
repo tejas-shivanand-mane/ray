@@ -18,7 +18,9 @@ def system_config():
 
     Merge these into the head's ``--system-config`` JSON (or ``_system_config``
     for a local Cluster). Persistent GCS storage and head supervision are
-    deployment responsibilities, configured separately.
+    deployment responsibilities, configured separately. The experimental
+    ``ray.experimental.recovery._head_supervisor`` module provides a bounded
+    one-head replacement workflow with external Redis and deployment hooks.
     """
     return {
         "enable_recovery_succession": True,
