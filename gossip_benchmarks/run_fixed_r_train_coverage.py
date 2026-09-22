@@ -1,4 +1,4 @@
-"""One bounded XGBoost Train-v2 ingestion failure and end-to-end inference run.
+"""One bounded XGBoost Train-v2 head failure and end-to-end inference run.
 
 Uses the collaborator's original train loop, report callback and predictor.
 Only local data/resources/storage, observations and head replacement live here.
@@ -6,6 +6,7 @@ Only local data/resources/storage, observations and head replacement live here.
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -20,7 +21,9 @@ from ray.data import DataContext
 from ray.data._internal.execution.execution_callback import ExecutionCallback
 from ray.data._internal.execution.operators.map_operator import MapOperator
 from ray.data._internal.execution.streaming_recovery import get_config
-from ray.train.v2._internal.execution.callback import ControllerCallback, WorkerGroupCallback
+from ray.train.v2._internal.execution.callback import (
+    ControllerCallback, ReportCallback, WorkerGroupCallback,
+)
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,10 +52,47 @@ def train_worker_identity():
 
 
 class Monitor:
-    def __init__(self):
+    def __init__(self, num_boost_round=10, failure_after_round=None, num_train_workers=1):
         self.executions = {}
         self.lifecycle = {}
         self.trigger = None
+        self.num_boost_round = num_boost_round
+        self.failure_after_round = failure_after_round
+        self.num_train_workers = num_train_workers
+        self.training_reports = 0
+        self.boosting_rounds = 0
+        self.final_checkpoint_reported = False
+        self.rounds_at_head_replacement = None
+
+    def training_report(self, report_number, worker_count, has_checkpoint):
+        if report_number != self.training_reports + 1 or worker_count != self.num_train_workers:
+            raise ValueError("Training reports are missing, repeated, or have the wrong worker count")
+        self.training_reports = report_number
+        if report_number <= self.num_boost_round:
+            if has_checkpoint:
+                raise ValueError("Expected the original callback's final-only checkpoint policy")
+            self.boosting_rounds = report_number
+            if report_number == self.failure_after_round:
+                self.trigger = {
+                    "failure_phase": "training_boosting",
+                    "completed_boosting_rounds": report_number,
+                    "reporting_workers": worker_count,
+                    "observed_ns": time.monotonic_ns(),
+                }
+        elif report_number == self.num_boost_round + 1 and has_checkpoint:
+            self.final_checkpoint_reported = True
+        else:
+            raise ValueError("Unexpected report sequence from the original XGBoost callback")
+
+    def head_replaced(self):
+        if self.rounds_at_head_replacement is not None:
+            raise ValueError("Head replacement was recorded more than once")
+        self.rounds_at_head_replacement = self.boosting_rounds
+        # The original synchronous report can have one queued result and one
+        # iteration blocked on enqueue. Leave room beyond those buffered rounds.
+        if not self.failure_after_round <= self.boosting_rounds < self.num_boost_round - 2:
+            raise ValueError("Head replacement finished too late to prove continued boosting")
+        return self.rounds_at_head_replacement
 
     def record(self, event, value):
         if event in self.lifecycle:
@@ -69,7 +109,32 @@ class Monitor:
             self.trigger = observation["trigger"]
 
     def read(self):
-        return {"executions": self.executions, "lifecycle": self.lifecycle, "trigger": self.trigger}
+        return {
+            "executions": self.executions, "lifecycle": self.lifecycle, "trigger": self.trigger,
+            "training_progress": {
+                "reports": self.training_reports, "boosting_rounds": self.boosting_rounds,
+                "final_checkpoint_reported": self.final_checkpoint_reported,
+                "rounds_at_head_replacement": self.rounds_at_head_replacement,
+            },
+        }
+
+
+class TrainingProgressProbe(ReportCallback):
+    """Observe the original callback's per-round, all-worker reports; never gate training."""
+
+    def __init__(self, monitor_name):
+        self.monitor_name = monitor_name
+        self.monitor = None
+        self.reports = 0
+
+    def after_report(self, training_report, metrics):
+        if self.monitor is None:
+            # Resolve before failure and retain the surviving actor handle.
+            self.monitor = ray.get_actor(self.monitor_name, namespace=NAMESPACE)
+        self.reports += 1
+        ray.get(self.monitor.training_report.remote(
+            self.reports, len(metrics), training_report.checkpoint is not None,
+        ), timeout=5)
 
 
 class TrainSurvivalProbe(WorkerGroupCallback, ControllerCallback):
@@ -107,7 +172,7 @@ def parquet_read_stage(names):
     return matches[0]
 
 
-def capture_execution(monitor_name, phase, total_rows):
+def capture_execution(monitor_name, phase, total_rows, *, trigger_ingestion=True):
     class Capture(ExecutionCallback):
         def before_execution_starts(self, executor):
             self.control = SimpleNamespace(
@@ -118,7 +183,7 @@ def capture_execution(monitor_name, phase, total_rows):
                 return  # Train's materialized shard can execute an InputData-only plan.
             self.monitor = ray.get_actor(monitor_name, namespace=NAMESPACE)
             self.trigger = None
-            if phase == "training":
+            if phase == "training" and trigger_ingestion:
                 stage = parquet_read_stage([op.name for op in self.control.operators])
                 self.trigger = ProgressTrigger(total_rows, "early", stage)
             self.last_report = 0
@@ -188,6 +253,7 @@ def make_input(directory, blocks=32, rows_per_block=1024):
 
 def validate_observations(
     observation, total_rows, executor_nodes, coordinator_node, num_train_workers=1,
+    *, failure_phase="ingestion", num_boost_round=10, failure_after_round=None,
 ):
     lifecycle = observation["lifecycle"]
     before, after = lifecycle.get("workers_before"), lifecycle.get("workers_after")
@@ -206,7 +272,20 @@ def validate_observations(
             or controller["node_id"] != coordinator_node):
         raise ValueError("The Train controller process did not survive")
     if observation.get("trigger") is None:
-        raise ValueError("Head failure was not triggered during training ingestion")
+        raise ValueError("Head failure was not triggered during the selected training phase")
+    if failure_phase == "boosting":
+        progress = observation["training_progress"]
+        trigger = observation["trigger"]
+        replaced_at = progress["rounds_at_head_replacement"]
+        if (trigger.get("failure_phase") != "training_boosting"
+                or trigger.get("completed_boosting_rounds") != failure_after_round
+                or trigger.get("reporting_workers") != num_train_workers
+                or replaced_at is None
+                or not failure_after_round <= replaced_at < num_boost_round - 2
+                or progress["boosting_rounds"] != num_boost_round
+                or progress["reports"] != num_boost_round + 1
+                or not progress["final_checkpoint_reported"]):
+            raise ValueError("Training did not demonstrate all-worker progress after head replacement")
     training = observation["executions"].get("training", {})
     inference = observation["executions"].get("inference", {})
     for execution in (training, inference):
@@ -221,9 +300,10 @@ def validate_observations(
                 raise ValueError(f"Unclosed task streams: {op}")
     stage = parquet_read_stage([op["name"] for op in training["operators"]])
     reads = training["operators"][stage]
-    if (reads["output_rows"] != total_rows
-            or reads.get("fixed_r_recovered_tasks", 0) < 1):
-        raise ValueError("Training Parquet ingestion did not validate all rows and exercise replay")
+    if reads["output_rows"] != total_rows:
+        raise ValueError("Training Parquet ingestion did not validate all rows")
+    if failure_phase == "ingestion" and reads.get("fixed_r_recovered_tasks", 0) < 1:
+        raise ValueError("Training Parquet ingestion did not exercise replay")
     actors = [op for op in inference["operators"]
               if op.get("fixed_r_actor_mode") == "surviving_coordinator_owned"]
     writes = [op for op in inference["operators"] if op["name"] == "Write"]
@@ -255,10 +335,17 @@ def run_case(args, result_directory, diagnostics):
     diagnostics.update(
         input_rows=total_rows, input_blocks=32, input_features=16,
         input_source="local_synthetic_parquet",
-        num_train_workers=args.num_train_workers, cpus_per_train_worker=1, num_boost_rounds=10,
+        num_train_workers=args.num_train_workers, cpus_per_train_worker=1,
+        num_boost_rounds=args.num_boost_round,
         train_placement_strategy="STRICT_SPREAD" if args.num_train_workers > 1 else "PACK",
         recovery_timeout_s=args.recovery_timeout_s,
-        failure_phase="training_data_ingestion", training_state_recovery=False,
+        failure_phase=("training_boosting" if args.failure_phase == "boosting"
+                       else "training_data_ingestion"),
+        failure_after_round=args.failure_after_round,
+        training_state_recovery=False,
+        replay_required=args.failure_phase == "ingestion",
+        validation_scope=("same_workers_continue_boosting_after_head_replacement"
+                          if args.failure_phase == "boosting" else "training_ingestion_replay"),
         original_train_loop=True, original_predictor=True, ray_train_v2=True,
     )
 
@@ -269,26 +356,36 @@ def run_case(args, result_directory, diagnostics):
         placement = NodeAffinitySchedulingStrategy(coordinator_node, soft=False)
         monitor = ray.remote(num_cpus=0, max_restarts=0)(Monitor).options(
             name=monitor_name, namespace=NAMESPACE, scheduling_strategy=placement,
-        ).remote()
+        ).remote(args.num_boost_round, args.failure_after_round, args.num_train_workers)
 
         class Job:
             def run(self):
                 context = DataContext.get_current().copy()
                 context.enable_fixed_r_task_recovery = True
                 context.fixed_r_task_recovery_output_mode = "streaming"
-                context.fixed_r_task_recovery_timeout_s = args.recovery_timeout_s
+                context.fixed_r_task_recovery_timeout_s = (
+                    min(30, args.recovery_timeout_s) if args.failure_phase == "boosting"
+                    else args.recovery_timeout_s
+                )
                 context.enable_progress_bars = False
                 # The V2 file partitioner otherwise combines these tiny files
                 # up to its minimum size despite override_num_blocks=32.
                 context.target_min_block_size = 0
                 get_config(context)  # Cache the original head before replacement.
                 context.custom_execution_callback_classes = [
-                    capture_execution(monitor_name, "training", total_rows),
+                    capture_execution(
+                        monitor_name, "training", total_rows,
+                        trigger_ingestion=args.failure_phase == "ingestion",
+                    ),
                 ]
+                callbacks = [TrainSurvivalProbe(monitor_name)]
+                if args.failure_phase == "boosting":
+                    callbacks.append(TrainingProgressProbe(monitor_name))
                 with DataContext.current(context):
                     started = time.monotonic()
                     result = original.train(
                         "xgboost", str(input_directory), args.num_train_workers, 1,
+                        num_boost_round=args.num_boost_round,
                         # Leave one CPU on each training node for read tasks.
                         placement_strategy=("STRICT_SPREAD" if args.num_train_workers > 1 else "PACK"),
                         read_kwargs={"override_num_blocks": 32},
@@ -297,14 +394,14 @@ def run_case(args, result_directory, diagnostics):
                             failure_config=FailureConfig(
                                 max_failures=0, controller_failure_limit=0, max_preemption_failures=0,
                             ),
-                            callbacks=[TrainSurvivalProbe(monitor_name)],
+                            callbacks=callbacks,
                         ),
                     )
                     training_s = time.monotonic() - started
                 if result.checkpoint is None:
                     raise ValueError("Original training callback did not produce a checkpoint")
                 model = original.XGBoostReportCallback.get_model(result.checkpoint)
-                if model.num_boosted_rounds() != 10 or model.num_features() != 16:
+                if model.num_boosted_rounds() != args.num_boost_round or model.num_features() != 16:
                     raise ValueError("Checkpoint has the wrong training rounds or feature count")
                 prediction_context = context.copy()
                 prediction_context.custom_execution_callback_classes = [
@@ -353,14 +450,33 @@ def run_case(args, result_directory, diagnostics):
                     if ready:
                         ray.get(future)
                         raise ValueError("Training/inference finished before head failure was exercised")
+                    if args.failure_phase == "boosting":
+                        ingestion = observed["executions"].get("training", {})
+                        if ingestion.get("state") != "finished":
+                            # The ingestion observer and training controller are
+                            # different actors; await the terminal ingestion report.
+                            time.sleep(0.05)
+                            continue
+                        if observed["training_progress"]["boosting_rounds"] >= args.num_boost_round:
+                            raise ValueError("Boosting finished before head failure was requested")
                     diagnostics.update(observed["trigger"])
+                    print(f"Requesting head failure during {args.failure_phase}: "
+                          f"{observed['trigger']}", flush=True)
                     crashed_at = time.monotonic()
                     cluster_args.recovery_timeout_s = min(30, max(0.01, deadline - crashed_at))
                     diagnostics.update(crash_head())
+                    if args.failure_phase == "boosting":
+                        diagnostics["boosting_rounds_at_head_replacement"] = ray.get(
+                            monitor.head_replaced.remote(),
+                            timeout=min(5, max(0.01, deadline - time.monotonic())),
+                        )
+                        print("Head replaced; completed rounds observed: "
+                              f"{diagnostics['boosting_rounds_at_head_replacement']}. "
+                              "Waiting for training and prediction validation.", flush=True)
                 if ready:
                     result = ray.get(future)
                     if crashed_at is None:
-                        raise ValueError("Original training ingestion did not trigger head failure")
+                        raise ValueError("The selected training phase did not trigger head failure")
                     # Reports originate in multiple actors. Allow only the remaining
                     # case deadline for their final messages to reach the monitor.
                     if all(observed["executions"].get(phase, {}).get("state") == "finished"
@@ -368,6 +484,8 @@ def run_case(args, result_directory, diagnostics):
                         validate_observations(
                             observed, total_rows, case_args.executor_node_ids,
                             coordinator_node, args.num_train_workers,
+                            failure_phase=args.failure_phase, num_boost_round=args.num_boost_round,
+                            failure_after_round=args.failure_after_round,
                         )
                         return {
                             **diagnostics, **result, "time": time.monotonic() - started,
@@ -386,7 +504,24 @@ def main():
     parser.add_argument("--result-directory", type=Path, required=True)
     parser.add_argument("--recovery-timeout-s", type=float, default=120)
     parser.add_argument("--num-train-workers", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--num-boost-round", type=int, default=10)
+    parser.add_argument("--failure-phase", choices=("ingestion", "boosting"), default="ingestion")
+    parser.add_argument("--failure-after-round", type=int,
+                        help="Completed all-worker boosting rounds before requesting head failure")
     args = parser.parse_args()
+    if args.num_boost_round < 1:
+        parser.error("--num-boost-round must be positive")
+    if args.failure_phase == "boosting":
+        if args.failure_after_round is None:
+            args.failure_after_round = args.num_boost_round // 2
+        if not 1 <= args.failure_after_round < args.num_boost_round - 2:
+            parser.error("Use 1 <= --failure-after-round < --num-boost-round - 2")
+    elif args.failure_after_round is not None:
+        parser.error("--failure-after-round requires --failure-phase boosting")
+    if not math.isfinite(args.recovery_timeout_s) or args.recovery_timeout_s <= 0:
+        parser.error("Use a positive finite case timeout")
+    if args.failure_phase == "ingestion" and args.recovery_timeout_s > 120:
+        parser.error("Ingestion coverage retains its 120-second maximum case timeout")
     args.result_directory = args.result_directory.resolve()
     args.local_executor_nodes = 4
     args.local_object_store_mb = 512
@@ -397,9 +532,9 @@ def main():
     key = "xgboost/train_v2/local_original_pipeline/head_failure_during_ingestion"
     if args.num_train_workers > 1:
         key = f"xgboost/train_v2/local_{args.num_train_workers}_workers/head_failure_during_ingestion"
+    if args.failure_phase == "boosting":
+        key = f"xgboost/train_v2/local_{args.num_train_workers}_workers/head_failure_during_boosting"
     try:
-        if not 0 < args.recovery_timeout_s <= 120:
-            raise ValueError("Use a positive case timeout of at most 120 seconds")
         args.result_directory.mkdir(parents=True, exist_ok=True)
         result = run_case(args, args.result_directory, diagnostics)
     except Exception as exc:

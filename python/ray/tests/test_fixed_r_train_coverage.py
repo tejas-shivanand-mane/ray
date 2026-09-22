@@ -115,3 +115,36 @@ def test_multi_worker_coverage_requires_both_ranks_to_survive(coverage, gap):
         lifecycle["workers_after"] = copy.deepcopy(lifecycle["workers_before"])
     with pytest.raises(ValueError):
         coverage.validate_observations(result, 100, executors, "coordinator", 2)
+
+
+@pytest.mark.parametrize("gap", [
+    "no_replacement", "late_replacement", "unfinished_rounds", "missing_checkpoint",
+    "missing_report", "wrong_trigger",
+])
+def test_boosting_failure_requires_progress_after_replacement(coverage, gap):
+    result = completed_run()
+    # Ingestion finished before the injected fault; replay is not expected.
+    result["executions"]["training"]["operators"][0]["fixed_r_recovered_tasks"] = 0
+    result["trigger"] = {
+        "failure_phase": "training_boosting", "completed_boosting_rounds": 50,
+        "reporting_workers": 1,
+    }
+    result["training_progress"] = {
+        "reports": 101, "boosting_rounds": 100, "final_checkpoint_reported": True,
+        "rounds_at_head_replacement": 52,
+    }
+    kwargs = dict(failure_phase="boosting", num_boost_round=100, failure_after_round=50)
+    coverage.validate_observations(result, 100, ("executor",), "coordinator", **kwargs)
+    if gap == "wrong_trigger":
+        result["trigger"]["failure_phase"] = "training_data_ingestion"
+    else:
+        field, value = {
+            "no_replacement": ("rounds_at_head_replacement", None),
+            "late_replacement": ("rounds_at_head_replacement", 98),
+            "unfinished_rounds": ("boosting_rounds", 99),
+            "missing_checkpoint": ("final_checkpoint_reported", False),
+            "missing_report": ("reports", 100),
+        }[gap]
+        result["training_progress"][field] = value
+    with pytest.raises(ValueError, match="progress after head replacement"):
+        coverage.validate_observations(result, 100, ("executor",), "coordinator", **kwargs)

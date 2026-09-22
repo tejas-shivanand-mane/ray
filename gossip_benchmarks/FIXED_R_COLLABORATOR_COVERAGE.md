@@ -506,3 +506,44 @@ their normal entry points with the common launcher, or add `recovery.enable()`
 after initialization. Recovery-specific legacy CLI dispatch moved out of the
 two Data benchmark bodies. See `FIXED_R_USER_INTERFACE.md` for API, cluster setup,
 disable semantics, the single combined acceptance command and remaining scope.
+
+## Head failure during longer training
+
+The longer no-failure report completed **100** rounds (despite its
+`overhead-1000-rounds.json` filename): two-worker training took 211.07 seconds
+with recovery OFF and 235.35 seconds ON. That report did not inject a failure.
+
+Run just one 100-round recovery case, requesting head failure after both workers
+report round 50:
+
+```bash
+cd /home/tejas/Downloads/ray &&
+git pull --ff-only &&
+bash gossip_benchmarks/run_fixed_r_collaborator_coverage.sh --xgboost-long-training-only
+```
+
+This uses the same synthetic input, two one-CPU workers on separate logical
+executor nodes, and one native thread per worker. It has a 300-second case
+budget, plus cluster startup/cleanup, and does not run an OFF baseline or any
+other workload. The original benchmark's training loop, XGBoost report callback,
+and predictor run unchanged. A harness-only Train report observer counts the
+existing per-round reports from both workers. Training is not paused to await
+failure, so the round-50 trigger is a threshold rather than a guarantee that
+the crash lands inside a particular boosting collective.
+
+All original head processes are killed, and GCS is restored at the same endpoint
+from surviving RocksDB storage. Acceptance requires unchanged controller/worker
+process identities and both original ranks; ingestion must already have finished
+when failure is requested. Additional all-worker boosting progress must be
+observed after replacement, followed by the final 100-round checkpoint and all
+32768 persisted predictions matching that model. Train worker/controller retries
+are disabled. Failure after training has already finished is rejected.
+
+The summary is `$HOME/ray-coverage/coverage-xgboost-long-training.json`; individual
+results and model/prediction artifacts are under the printed `run.XXXXXX`
+directory. Existing overhead and ingestion-coverage reports are preserved.
+This profile checks continued training through head-process loss with surviving
+driver, workers, and storage. It does not claim replay during already-completed
+ingestion, recovery of lost model state, host/disk failure, or the original cloud
+scale. No rebuild is needed. Source reviewed only: the assistant has not run
+builds, tests, lint, or benchmarks. The new case remains unverified until run.
