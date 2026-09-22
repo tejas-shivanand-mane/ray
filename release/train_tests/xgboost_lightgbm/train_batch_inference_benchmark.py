@@ -204,15 +204,31 @@ def main(args):
         experiment_params["num_workers"],
         experiment_params["cpus_per_worker"],
     )
+    data_path = getattr(args, "data_path", None) or data_path
+    num_workers = getattr(args, "num_workers", None) or num_workers
+    cpus_per_worker = getattr(args, "cpus_per_worker", None) or cpus_per_worker
+    read_blocks = getattr(args, "read_blocks", None)
+    read_kwargs = {"override_num_blocks": read_blocks} if read_blocks else None
+    if getattr(args, "small_blocks", False):
+        data.DataContext.get_current().target_min_block_size = 0
+    storage_path = getattr(args, "storage_path", None)
 
     print(f"Running {framework} training benchmark...")
     training_start = time.perf_counter()
-    result = train(framework, data_path, num_workers, cpus_per_worker)
+    result = train(
+        framework, data_path, num_workers, cpus_per_worker,
+        read_kwargs=read_kwargs,
+        run_config=RunConfig(storage_path=storage_path, name=f"{framework}_benchmark") if storage_path else None,
+        placement_strategy=getattr(args, "placement_strategy", "PACK"),
+    )
     training_time = time.perf_counter() - training_start
 
     print(f"Running {framework} prediction benchmark...")
     prediction_start = time.perf_counter()
-    predict(framework, result, data_path)
+    predict(
+        framework, result, data_path, read_kwargs=read_kwargs,
+        output_path=getattr(args, "prediction_output_path", "/mnt/cluster_storage/predictions"),
+    )
     prediction_time = time.perf_counter() - prediction_start
 
     times = {"training_time": training_time, "prediction_time": prediction_time}
@@ -253,5 +269,15 @@ if __name__ == "__main__":
         help="disable runtime error on benchmark timeout",
     )
     parser.add_argument("--smoke-test", action="store_true")
+    # Ordinary workload/resource options also make this entry point usable on a
+    # development machine. Recovery is enabled externally by the shared launcher.
+    parser.add_argument("--data-path")
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--cpus-per-worker", type=int)
+    parser.add_argument("--storage-path")
+    parser.add_argument("--prediction-output-path", default="/mnt/cluster_storage/predictions")
+    parser.add_argument("--read-blocks", type=int)
+    parser.add_argument("--small-blocks", action="store_true")
+    parser.add_argument("--placement-strategy", default="PACK", choices=("PACK", "SPREAD", "STRICT_SPREAD"))
     args = parser.parse_args()
     main(args)

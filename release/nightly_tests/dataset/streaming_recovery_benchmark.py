@@ -51,19 +51,10 @@ def head_failure_target(point, expected):
 
 
 def recovery_system_config():
-    return {
-        "enable_recovery_succession": True,
-        "enable_recovery_witness_holder_baseline": True,
-        "enable_recovery_streaming_fixed_r": True,
-        "recovery_succession_target_holder_count": 2,
-        "recovery_succession_witness_count": 2,
-        "recovery_frontier_group_size": 1,
-        "recovery_baseline_perf_protect_every_n": 1,
-        "health_check_initial_delay_ms": 1000,
-        "health_check_period_ms": 1000,
-        "health_check_timeout_ms": 3000,
-        "health_check_failure_threshold": 3,
-    }
+    # Kept for existing experiment imports; settings live in the shared package.
+    from ray.experimental.recovery._local import local_system_config
+
+    return local_system_config()
 
 
 def validate_args(args):

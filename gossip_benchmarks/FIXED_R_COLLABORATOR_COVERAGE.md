@@ -1,9 +1,10 @@
 # One combined step toward collaborator benchmark coverage
 
-Current next step: run only `--xgboost-multi-only`, as described in the final
-section. Training-prefetch, actor survival and single-worker XGBoost have passed.
-This two-worker extension is Python-only and uses the existing native build.
-Earlier commands below record previous steps; do not repeat them by default.
+Current next step: the shared API/launcher acceptance command, `--entrypoints-only`,
+documented in `FIXED_R_USER_INTERFACE.md`. The specialized local backpressure,
+actor survival, single-worker and two-worker XGBoost cases have passed. The shared
+interface is Python-only and uses the existing native build. Earlier commands
+below record previous steps; do not repeat them by default.
 
 The goal is head-process failure recovery with minimal application changes.
 This step adds one workload and removes the controlled coordinator pause from
@@ -487,3 +488,21 @@ Source regressions reject missing/restarted workers, duplicate ranks, incorrect
 world size, packed placement and workers placed on the coordinator. The two-worker
 case remains unverified until the user runs it; the exact ten-worker/100G cloud
 configuration remains unvalidated even if the local case passes.
+
+## Two-worker XGBoost passed; simplify application enablement
+
+The uploaded `coverage-xgboost-multi.json` (`run.RXclvg`) passed in 39.602 seconds.
+Both ranks 0 and 1 reported world size two, occupied separate surviving executor
+nodes, and retained their actor/worker/node IDs and PIDs. All head processes
+exited; replacement took 2.329 seconds. Two Parquet reads and one listing task
+replayed. A ten-round checkpoint and all 32768 persisted predictions validated.
+Failure request to full completion was 28.050 seconds. This establishes the
+local two-worker ingestion-failure case, not an active boosting failure or the
+ten-worker/100G cloud configuration.
+
+The next change consolidates configuration, local cluster supervision and generic
+failure observation under `ray.experimental.recovery`. Benchmarks can run through
+their normal entry points with the common launcher, or add `recovery.enable()`
+after initialization. Recovery-specific legacy CLI dispatch moved out of the
+two Data benchmark bodies. See `FIXED_R_USER_INTERFACE.md` for API, cluster setup,
+disable semantics, the single combined acceptance command and remaining scope.

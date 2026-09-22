@@ -37,6 +37,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 CONFIG_KEY = "streaming_recovery_fixed_r_copy"
+_EAGER_FREE_KEY = "streaming_recovery_previous_eager_free"
 
 
 @dataclass(frozen=True)
@@ -153,8 +154,21 @@ class FixedRDataConfig:
             raise ValueError("Protected owner and task executor must be separate nodes")
 
 
+def clear_config(context):
+    previous = context.get_config(_EAGER_FREE_KEY)
+    if previous is not None:
+        context.eager_free = previous
+    context.remove_config(_EAGER_FREE_KEY)
+    context.remove_config(CONFIG_KEY)
+
+
 def get_config(context):
     config = context.get_config(CONFIG_KEY)
+    if (not context.enable_fixed_r_task_recovery
+            and isinstance(config, FixedRDataConfig) and config.automatic_outputs
+            and context.get_config(_EAGER_FREE_KEY) is not None):
+        clear_config(context)
+        return None
     if context.enable_fixed_r_task_recovery:
         if context.fixed_r_task_recovery_output_mode not in ("streaming", "buffered"):
             raise ValueError("Fixed-R output mode must be streaming or buffered")
@@ -186,6 +200,8 @@ def get_config(context):
         if config.dynamic_task_outputs != (context.fixed_r_task_recovery_output_mode == "streaming"):
             raise ValueError("Fixed-R output mode conflicts with cached recovery configuration")
         # Retention is a runtime responsibility in this mode, not a UDF change.
+        if context.get_config(_EAGER_FREE_KEY) is None:
+            context.set_config(_EAGER_FREE_KEY, context.eager_free)
         context.eager_free = False
     if config is not None:
         if not isinstance(config, FixedRDataConfig):
