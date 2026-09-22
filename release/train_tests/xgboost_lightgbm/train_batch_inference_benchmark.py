@@ -23,7 +23,7 @@ from ray.train.xgboost import (
     RayTrainReportCallback as XGBoostReportCallback,
     XGBoostTrainer,
 )
-from ray.train import RunConfig, ScalingConfig
+from ray.train import FailureConfig, RunConfig, ScalingConfig
 
 _TRAINING_TIME_THRESHOLD = 600
 _PREDICTION_TIME_THRESHOLD = 450
@@ -69,7 +69,51 @@ class LightGBMPredictor(BasePredictor):
         return {"predictions": self.model.predict(normalize_pandas_for_lightgbm(data))}
 
 
+class ResumableXGBoostReportCallback(XGBoostReportCallback):
+    """Checkpoint on absolute model rounds, including after a worker restart."""
+
+    def __init__(self, frequency, restored_rounds):
+        super().__init__(frequency=frequency)
+        self.restored_rounds = restored_rounds
+        self.completed_rounds = restored_rounds
+
+    def _with_progress(self, report_dict):
+        return {
+            **report_dict,
+            "boosting_rounds": self.completed_rounds,
+            "restored_checkpoint_rounds": self.restored_rounds,
+        }
+
+    def _report_metrics(self, report_dict):
+        return super()._report_metrics(self._with_progress(report_dict))
+
+    def _save_and_report_checkpoint(self, report_dict, model):
+        return super()._save_and_report_checkpoint(self._with_progress(report_dict), model)
+
+    def after_iteration(self, model, epoch, evals_log):
+        self.completed_rounds = model.num_boosted_rounds()
+        # XGBoost restarts `epoch` at zero when appending to a loaded model.
+        # Use absolute rounds for both checkpoint frequency and final deduplication.
+        return super().after_iteration(model, self.completed_rounds - 1, evals_log)
+
+
 def xgboost_train_loop_function(config: Dict):
+    report_callback = config["report_callback_cls"]
+    checkpoint = ray.train.get_checkpoint()
+    starting_model = report_callback.get_model(checkpoint) if checkpoint else None
+    restored_rounds = starting_model.num_boosted_rounds() if starting_model is not None else 0
+    remaining_rounds = config.get("num_boost_round", 10) - restored_rounds
+    if remaining_rounds < 0:
+        raise ValueError("Checkpoint contains more rounds than the requested training target")
+    if remaining_rounds == 0:
+        # A failure can occur after the final checkpoint but before Train finishes.
+        # Re-report that model without consuming data or adding extra trees.
+        ray.train.report(
+            {"boosting_rounds": restored_rounds, "restored_checkpoint_rounds": restored_rounds},
+            checkpoint=checkpoint if ray.train.get_context().get_world_rank() == 0 else None,
+        )
+        return
+
     train_ds_iter = ray.train.get_dataset_shard("train")
     train_df = train_ds_iter.materialize().to_pandas()
 
@@ -78,12 +122,17 @@ def xgboost_train_loop_function(config: Dict):
 
     dtrain = xgb.DMatrix(train_X, label=train_y)
 
-    report_callback = config["report_callback_cls"]
+    frequency = config.get("checkpoint_frequency", 0)
+    callback = (
+        ResumableXGBoostReportCallback(frequency, restored_rounds)
+        if frequency or restored_rounds else report_callback()
+    )
     xgb.train(
         params,
         dtrain=dtrain,
-        num_boost_round=config.get("num_boost_round", 10),
-        callbacks=[report_callback()],
+        num_boost_round=remaining_rounds,
+        xgb_model=starting_model,
+        callbacks=[callback],
     )
 
 
@@ -140,9 +189,12 @@ _FRAMEWORK_PARAMS = {
 def train(
     framework: str, data_path: str, num_workers: int, cpus_per_worker: int,
     *, run_config=None, read_kwargs=None, placement_strategy="PACK", num_boost_round=10,
+    checkpoint_frequency=0,
 ) -> ray.train.Result:
     if num_boost_round < 1:
         raise ValueError("num_boost_round must be positive")
+    if checkpoint_frequency < 0 or (checkpoint_frequency and framework != "xgboost"):
+        raise ValueError("Periodic checkpoint recovery requires XGBoost and a nonnegative frequency")
     ds = data.read_parquet(data_path, **(read_kwargs or {}))
     framework_params = _FRAMEWORK_PARAMS[framework]
     if framework_params["trainer_cls"] is None:
@@ -155,6 +207,7 @@ def train(
         train_loop_per_worker=framework_train_loop_fn,
         train_loop_config={
             **framework_params["train_loop_config"], "num_boost_round": num_boost_round,
+            "checkpoint_frequency": checkpoint_frequency,
         },
         scaling_config=ScalingConfig(
             num_workers=num_workers,
@@ -223,9 +276,13 @@ def main(args):
     result = train(
         framework, data_path, num_workers, cpus_per_worker,
         read_kwargs=read_kwargs,
-        run_config=RunConfig(storage_path=storage_path, name=f"{framework}_benchmark") if storage_path else None,
+        run_config=RunConfig(
+            storage_path=storage_path or "/mnt/cluster_storage", name=f"{framework}_benchmark",
+            failure_config=FailureConfig(max_failures=args.max_failures),
+        ),
         placement_strategy=getattr(args, "placement_strategy", "PACK"),
         num_boost_round=num_boost_round,
+        checkpoint_frequency=args.checkpoint_frequency,
     )
     training_time = time.perf_counter() - training_start
 
@@ -240,6 +297,7 @@ def main(args):
     times = {
         "training_time": training_time, "prediction_time": prediction_time,
         "num_boost_round": num_boost_round,
+        "checkpoint_frequency": args.checkpoint_frequency, "max_failures": args.max_failures,
     }
     print("Training result:\n", result)
     print("Training/prediction times:", times)
@@ -284,6 +342,10 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--num-boost-round", type=int, default=10,
                         help="Boosting rounds; increase to measure longer training on the same data")
+    parser.add_argument("--checkpoint-frequency", type=int, default=0,
+                        help="XGBoost: save every N model rounds; 0 retains final-only checkpoints")
+    parser.add_argument("--max-failures", type=int, default=0,
+                        help="Worker failure retry budget; XGBoost resumes from its latest checkpoint")
     parser.add_argument("--cpus-per-worker", type=int)
     parser.add_argument("--storage-path")
     parser.add_argument("--prediction-output-path", default="/mnt/cluster_storage/predictions")
@@ -293,4 +355,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.num_boost_round < 1:
         parser.error("--num-boost-round must be positive")
+    if args.checkpoint_frequency < 0 or (args.checkpoint_frequency and args.framework != "xgboost"):
+        parser.error("--checkpoint-frequency must be nonnegative and requires XGBoost")
+    if args.max_failures < 0 or (args.max_failures and args.framework != "xgboost"):
+        parser.error("--max-failures must be nonnegative and requires XGBoost")
     main(args)

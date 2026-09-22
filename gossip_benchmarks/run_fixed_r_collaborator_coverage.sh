@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 profile=full
 if [[ $# -gt 1 ]]; then
-  echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only|--xgboost-multi-only|--xgboost-long-training-only|--entrypoints-only|--entrypoints-resume]" >&2; exit 2
+  echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only|--xgboost-multi-only|--xgboost-long-training-only|--xgboost-checkpoint-only|--entrypoints-only|--entrypoints-resume]" >&2; exit 2
 fi
 case "${1:-}" in
   "") ;;
@@ -15,9 +15,10 @@ case "${1:-}" in
   --xgboost-only) profile=xgboost-only ;;
   --xgboost-multi-only) profile=xgboost-multi-only ;;
   --xgboost-long-training-only) profile=xgboost-long-training-only ;;
+  --xgboost-checkpoint-only) profile=xgboost-checkpoint-only ;;
   --entrypoints-only) profile=entrypoints-only ;;
   --entrypoints-resume) profile=entrypoints-resume ;;
-  *) echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only|--xgboost-multi-only|--xgboost-long-training-only|--entrypoints-only|--entrypoints-resume]" >&2; exit 2 ;;
+  *) echo "Usage: $0 [--failed-only|--training-only|--actors-only|--xgboost-only|--xgboost-multi-only|--xgboost-long-training-only|--xgboost-checkpoint-only|--entrypoints-only|--entrypoints-resume]" >&2; exit 2 ;;
 esac
 result_root="${RAY_RECOVERY_OUTPUT_DIR:-$HOME/ray-coverage}"
 mkdir -p "$result_root"
@@ -70,7 +71,7 @@ if [[ "$profile" == training-only ]]; then
   summary_name=coverage-training.json
 fi
 
-if [[ "$profile" == xgboost-only || "$profile" == xgboost-multi-only || "$profile" == xgboost-long-training-only ]]; then
+if [[ "$profile" == xgboost-only || "$profile" == xgboost-multi-only || "$profile" == xgboost-long-training-only || "$profile" == xgboost-checkpoint-only ]]; then
 summary_name=coverage-xgboost.json
 train_workers=1
 train_timeout=120
@@ -87,6 +88,13 @@ if [[ "$profile" == xgboost-long-training-only ]]; then
   # Match the longer no-failure measurement's native thread limits.
   export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
   echo "One 100-round run with two workers; fail head after round 50; 300-second case budget."
+fi
+if [[ "$profile" == xgboost-checkpoint-only ]]; then
+  summary_name=coverage-xgboost-checkpoint.json
+  train_workers=2
+  train_args=(--num-boost-round 10 --failure-phase checkpoint --failure-after-round 5 --checkpoint-frequency 5)
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+  echo "One 10-round run with two workers; checkpoint at 5, replace head, kill one worker, resume; 120-second case budget."
 fi
 TEST_OUTPUT_JSON="$result_dir/xgboost.json" \
 RAY_TRAIN_V2_ENABLED=1 RAY_TRAIN_WORKER_GROUP_START_TIMEOUT_S=30 \
@@ -148,6 +156,7 @@ names = {
     "actors-only": ["worker-scaling-actors"], "xgboost-only": ["xgboost"],
     "xgboost-multi-only": ["xgboost"],
     "xgboost-long-training-only": ["xgboost"],
+    "xgboost-checkpoint-only": ["xgboost"],
 }.get(profile, ["training-prefetch"])
 if profile in ("full", "failed-only"):
     names.extend(["worker-scaling-chain", "backpressure-async"])
@@ -157,6 +166,7 @@ expected_count = {
     "full": 11, "failed-only": 5, "training-only": 1, "actors-only": 1, "xgboost-only": 1,
     "xgboost-multi-only": 1,
     "xgboost-long-training-only": 1,
+    "xgboost-checkpoint-only": 1,
 }[profile]
 summary = {"result_directory": str(directory), "profile": profile,
            "expected_case_count": expected_count, "cases": {}, "missing_results": []}

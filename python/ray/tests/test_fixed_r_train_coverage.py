@@ -2,6 +2,7 @@
 
 import copy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -148,3 +149,102 @@ def test_boosting_failure_requires_progress_after_replacement(coverage, gap):
         result["training_progress"][field] = value
     with pytest.raises(ValueError, match="progress after head replacement"):
         coverage.validate_observations(result, 100, ("executor",), "coordinator", **kwargs)
+
+
+@pytest.mark.parametrize("gap", [
+    "no_kill", "no_restart", "wrong_checkpoint", "wrong_path", "restart_from_zero",
+    "missing_round", "extra_rounds", "no_final_checkpoint",
+])
+def test_checkpoint_recovery_rejects_false_resume(coverage, gap):
+    result = completed_run()
+    lifecycle = result["lifecycle"]
+    before = {**lifecycle["workers_before"][0], "restored_checkpoint_rounds": 0,
+              "restored_checkpoint_path": None}
+    after = {**before, "actor_id": "replacement", "worker_id": "replacement-process", "pid": 3,
+             "restored_checkpoint_rounds": 5, "restored_checkpoint_path": "/checkpoint-5"}
+    lifecycle["workers_before"] = [before]
+    lifecycle["workers_after"] = [
+        {k: v for k, v in after.items() if not k.startswith("restored_checkpoint_")}
+    ]
+    result["trigger"] = {"failure_phase": "training_checkpoint_restart", "checkpoint_rounds": 5,
+                         "checkpoint_path": "/checkpoint-5"}
+    reports = [
+        {"attempt": 2, "boosting_rounds": i, "restored_checkpoint_rounds": 5,
+         "reporting_workers": 1, "checkpoint": {"rounds": 10} if i == 10 else None}
+        for i in range(6, 11)
+    ]
+    recovery = {"worker_groups": [[before], [after]], "worker_failure_injected": True, "reports": reports}
+    result["checkpoint_recovery"] = recovery
+    result["executions"]["training"]["operators"][0]["fixed_r_recovered_tasks"] = 0
+    kwargs = dict(failure_phase="checkpoint", num_boost_round=10, failure_after_round=5)
+    coverage.validate_observations(result, 100, ("executor",), "coordinator", **kwargs)
+    if gap == "no_kill":
+        recovery["worker_failure_injected"] = False
+    elif gap == "no_restart":
+        after["actor_id"] = before["actor_id"]
+    elif gap == "wrong_checkpoint":
+        after["restored_checkpoint_rounds"] = 4
+    elif gap == "wrong_path":
+        after["restored_checkpoint_path"] = "/unrelated-checkpoint"
+    elif gap == "restart_from_zero":
+        reports[0]["restored_checkpoint_rounds"] = 0
+    elif gap == "missing_round":
+        reports.pop(0)
+    elif gap == "extra_rounds":
+        reports.append({**reports[-1], "boosting_rounds": 11})
+    else:
+        reports[-1]["checkpoint"] = None
+    with pytest.raises(ValueError):
+        coverage.validate_observations(result, 100, ("executor",), "coordinator", **kwargs)
+
+
+def test_checkpoint_monitor_requires_persisted_checkpoint_and_all_worker_agreement(coverage):
+    monitor = coverage.CheckpointMonitor(10, 5, 2)
+    monitor.worker_group_started([{}, {}], ["first", "second"])
+    with pytest.raises(ValueError, match="disagree"):
+        monitor.checkpoint_report([
+            {"boosting_rounds": 1, "restored_checkpoint_rounds": 0},
+            {"boosting_rounds": 2, "restored_checkpoint_rounds": 0},
+        ], None)
+    for i in range(1, 5):
+        monitor.checkpoint_report([{"boosting_rounds": i, "restored_checkpoint_rounds": 0}] * 2, None)
+    with pytest.raises(ValueError, match="persisted"):
+        monitor.checkpoint_report([{"boosting_rounds": 5, "restored_checkpoint_rounds": 0}] * 2, None)
+
+
+@pytest.mark.parametrize("restored_rounds", [0, 5, 10, 11])
+def test_xgboost_resume_preserves_model_and_total_round_budget(coverage, monkeypatch, restored_rounds):
+    import train_batch_inference_benchmark as benchmark
+
+    checkpoint = object() if restored_rounds else None
+    model = SimpleNamespace(num_boosted_rounds=lambda: restored_rounds)
+    monkeypatch.setattr(benchmark.ray.train, "get_checkpoint", lambda: checkpoint)
+    monkeypatch.setattr(benchmark.XGBoostReportCallback, "get_model", lambda checkpoint: model)
+    monkeypatch.setattr(benchmark.ray.train, "get_context", lambda: SimpleNamespace(get_world_rank=lambda: 0))
+    reports, training_calls, reads = [], [], []
+    monkeypatch.setattr(benchmark.ray.train, "report", lambda metrics, **kw: reports.append((metrics, kw)))
+    frame = benchmark.pd.DataFrame({"feature": [0.0, 1.0], "labels": [0, 1]})
+
+    def get_shard(name):
+        reads.append(name)
+        return SimpleNamespace(materialize=lambda: SimpleNamespace(to_pandas=lambda: frame))
+
+    monkeypatch.setattr(benchmark.ray.train, "get_dataset_shard", get_shard)
+    monkeypatch.setattr(benchmark.xgb, "DMatrix", lambda *a, **kw: object())
+    monkeypatch.setattr(benchmark.xgb, "train", lambda params, **kw: training_calls.append(kw))
+    config = {**benchmark._FRAMEWORK_PARAMS["xgboost"]["train_loop_config"],
+              "num_boost_round": 10, "checkpoint_frequency": 5}
+    if restored_rounds > 10:
+        with pytest.raises(ValueError, match="more rounds"):
+            benchmark.xgboost_train_loop_function(config)
+        assert not reads and not training_calls and not reports
+        return
+    benchmark.xgboost_train_loop_function(config)
+    if restored_rounds == 10:
+        assert not reads and not training_calls
+        assert reports == [({"boosting_rounds": 10, "restored_checkpoint_rounds": 10},
+                            {"checkpoint": checkpoint})]
+    else:
+        assert len(training_calls) == 1
+        assert training_calls[0]["num_boost_round"] == 10 - restored_rounds
+        assert training_calls[0]["xgb_model"] is (model if restored_rounds else None)

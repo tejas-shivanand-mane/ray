@@ -5,6 +5,7 @@ Only local data/resources/storage, observations and head replacement live here.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -137,6 +138,145 @@ class TrainingProgressProbe(ReportCallback):
         ), timeout=5)
 
 
+def checkpoint_worker_identity():
+    from ray.train.xgboost import RayTrainReportCallback
+
+    checkpoint = ray.train.get_checkpoint()
+    return {
+        **train_worker_identity(),
+        "restored_checkpoint_rounds": (
+            RayTrainReportCallback.get_model(checkpoint).num_boosted_rounds() if checkpoint else 0
+        ),
+        "restored_checkpoint_path": checkpoint.path if checkpoint else None,
+    }
+
+
+def model_tree_digest(model):
+    return hashlib.sha256("\n".join(model.get_dump(dump_format="json")).encode()).hexdigest()
+
+
+class CheckpointMonitor(Monitor):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.worker_groups = []
+        self.checkpoint_reports = []
+        self.worker_failure_injected = False
+        self.worker_target = None
+
+    def worker_group_started(self, identities, actors):
+        if len(self.worker_groups) >= 2:
+            raise ValueError("Unexpected extra training worker restart")
+        self.worker_groups.append(identities)
+        if len(self.worker_groups) == 1:
+            self.lifecycle["workers_before"] = identities
+            self.worker_target = actors[0]
+
+    def failure_target(self):
+        return self.worker_target
+
+    def mark_worker_failure(self):
+        if self.worker_failure_injected or self.trigger is None:
+            raise ValueError("Worker failure must follow exactly one checkpoint trigger")
+        self.worker_failure_injected = True
+
+    def failure_injected(self):
+        return self.worker_failure_injected
+
+    def checkpoint_report(self, metrics, checkpoint_info):
+        rounds = {m["boosting_rounds"] for m in metrics}
+        restored = {m["restored_checkpoint_rounds"] for m in metrics}
+        if len(metrics) != self.num_train_workers or len(rounds) != 1 or len(restored) != 1:
+            raise ValueError("Workers disagree on model progress or restored checkpoint")
+        completed, origin = rounds.pop(), restored.pop()
+        attempt = len(self.worker_groups)
+        expected_origin = 0 if attempt == 1 else self.failure_after_round
+        if origin != expected_origin or not origin < completed <= self.num_boost_round:
+            raise ValueError("Training restarted from the wrong checkpoint or added extra rounds")
+        prior = [r for r in self.checkpoint_reports if r["attempt"] == attempt]
+        if completed != (prior[-1]["boosting_rounds"] if prior else origin) + 1:
+            raise ValueError("Training reports skipped or repeated model rounds")
+        if checkpoint_info and checkpoint_info["rounds"] != completed:
+            raise ValueError("Persisted model does not match the reported training round")
+        self.checkpoint_reports.append({
+            "attempt": attempt, "boosting_rounds": completed,
+            "restored_checkpoint_rounds": origin, "checkpoint": checkpoint_info,
+            "reporting_workers": len(metrics),
+        })
+        if attempt == 1 and completed == self.failure_after_round:
+            if not checkpoint_info:
+                raise ValueError("Failure point must have a persisted, controller-registered checkpoint")
+            self.trigger = {
+                "failure_phase": "training_checkpoint_restart",
+                "checkpoint_rounds": completed, "checkpoint_path": checkpoint_info["path"],
+                "checkpoint_tree_digest": checkpoint_info["tree_digest"],
+                "observed_ns": time.monotonic_ns(),
+            }
+            return True
+        return False
+
+    def read(self):
+        return {
+            **super().read(),
+            "checkpoint_recovery": {
+                "worker_groups": self.worker_groups, "reports": self.checkpoint_reports,
+                "worker_failure_injected": self.worker_failure_injected,
+            },
+        }
+
+
+class CheckpointRecoveryProbe(WorkerGroupCallback, ControllerCallback, ReportCallback):
+    """Observe actual restored models; gate one report while injecting the faults."""
+
+    def __init__(self, monitor_name):
+        self.monitor_name = monitor_name
+        self.monitor = None
+        self.attempt = 0
+
+    def get_monitor(self):
+        if self.monitor is None:
+            self.monitor = ray.get_actor(self.monitor_name, namespace=NAMESPACE)
+        return self.monitor
+
+    def after_controller_start(self, train_run_context):
+        ray.get(self.get_monitor().record.remote("controller_before", process_identity()), timeout=5)
+
+    def after_controller_finish(self, result):
+        ray.get(self.get_monitor().record.remote("controller_after", process_identity()), timeout=5)
+
+    def after_worker_group_start(self, worker_group):
+        self.attempt += 1
+        identities = ray.get(worker_group.execute_async(checkpoint_worker_identity), timeout=15)
+        ray.get(self.get_monitor().worker_group_started.remote(
+            identities, [worker.actor for worker in worker_group.get_workers()],
+        ), timeout=5)
+
+    def before_worker_group_shutdown(self, worker_group):
+        # The first group deliberately contains a dead actor; probe only the
+        # successful replacement group at its normal shutdown.
+        if self.attempt == 2:
+            identities = ray.get(worker_group.execute_async(train_worker_identity), timeout=15)
+            ray.get(self.get_monitor().record.remote("workers_after", identities), timeout=5)
+
+    def after_report(self, training_report, metrics):
+        from ray.train.xgboost import RayTrainReportCallback
+
+        info = None
+        if training_report.checkpoint is not None:
+            model = RayTrainReportCallback.get_model(training_report.checkpoint)
+            info = {"path": training_report.checkpoint.path, "rounds": model.num_boosted_rounds(),
+                    "tree_digest": model_tree_digest(model)}
+        # Train invokes CheckpointManager before user ReportCallbacks, so this
+        # checkpoint is both on storage and registered for the next worker group.
+        gate = ray.get(self.get_monitor().checkpoint_report.remote(metrics, info), timeout=5)
+        if gate:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if ray.get(self.get_monitor().failure_injected.remote(), timeout=5):
+                    return
+                time.sleep(0.05)
+            raise TimeoutError("Head/worker fault injection did not finish within 60 seconds")
+
+
 class TrainSurvivalProbe(WorkerGroupCallback, ControllerCallback):
     def __init__(self, monitor_name):
         self.monitor_name = monitor_name
@@ -257,7 +397,10 @@ def validate_observations(
 ):
     lifecycle = observation["lifecycle"]
     before, after = lifecycle.get("workers_before"), lifecycle.get("workers_after")
-    if (not before or len(before) != num_train_workers or before != after
+    if failure_phase == "checkpoint":
+        validate_checkpoint_restart(observation, executor_nodes, num_train_workers,
+                                    num_boost_round, failure_after_round)
+    elif (not before or len(before) != num_train_workers or before != after
             or any(worker["node_id"] not in executor_nodes for worker in before)
             or len({worker["actor_id"] for worker in before}) != num_train_workers
             or len({worker["worker_id"] for worker in before}) != num_train_workers
@@ -316,6 +459,45 @@ def validate_observations(
         raise ValueError("External writes must be coordinator-owned and never enrolled or replayed")
 
 
+def validate_checkpoint_restart(observation, executor_nodes, num_workers, target_rounds, saved_rounds):
+    recovery = observation["checkpoint_recovery"]
+    groups = recovery["worker_groups"]
+    trigger = observation.get("trigger", {})
+    if (len(groups) != 2 or not recovery["worker_failure_injected"]
+            or trigger.get("failure_phase") != "training_checkpoint_restart"
+            or trigger.get("checkpoint_rounds") != saved_rounds):
+        raise ValueError("Expected one checkpoint-triggered failure and one worker group restart")
+    for index, group in enumerate(groups):
+        if (len(group) != num_workers
+                or {w["world_rank"] for w in group} != set(range(num_workers))
+                or any(w["world_size"] != num_workers or w["node_id"] not in executor_nodes for w in group)
+                or len({w["node_id"] for w in group}) != num_workers
+                or len({w["actor_id"] for w in group}) != num_workers
+                or len({w["worker_id"] for w in group}) != num_workers
+                or any(w["restored_checkpoint_rounds"] != (saved_rounds if index else 0) for w in group)
+                or any(w["restored_checkpoint_path"] != (trigger["checkpoint_path"] if index else None)
+                       for w in group)):
+            raise ValueError("Worker group ranks, placement, or restored checkpoint are incorrect")
+    # get_checkpoint() advances when a worker reports a newer checkpoint. Compare
+    # only process/rank identity at shutdown, preserving the start-time restore evidence.
+    replacement_identities = [
+        {k: v for k, v in w.items() if not k.startswith("restored_checkpoint_")}
+        for w in groups[1]
+    ]
+    if ({w["actor_id"] for w in groups[0]} & {w["actor_id"] for w in groups[1]}
+            or {w["worker_id"] for w in groups[0]} & {w["worker_id"] for w in groups[1]}
+            or groups[0] != observation["lifecycle"].get("workers_before")
+            or replacement_identities != observation["lifecycle"].get("workers_after")):
+        raise ValueError("Expected new worker processes that survive through completion")
+    resumed = [r for r in recovery["reports"] if r["attempt"] == 2]
+    if ([r["boosting_rounds"] for r in resumed] != list(range(saved_rounds + 1, target_rounds + 1))
+            or any(r["restored_checkpoint_rounds"] != saved_rounds
+                   or r["reporting_workers"] != num_workers for r in resumed)
+            or not resumed[-1]["checkpoint"]
+            or resumed[-1]["checkpoint"]["rounds"] != target_rounds):
+        raise ValueError("Replacement workers did not complete exactly the remaining model rounds")
+
+
 def run_case(args, result_directory, diagnostics):
     import numpy as np
     import pyarrow.parquet as pq
@@ -331,6 +513,7 @@ def run_case(args, result_directory, diagnostics):
     cloudpickle.register_pickle_by_value(original)
     input_directory = result_directory / "input"
     total_rows = make_input(input_directory)
+    checkpoint_recovery = args.failure_phase == "checkpoint"
     monitor_name = f"fixed-r-xgboost-{uuid.uuid4().hex}"
     diagnostics.update(
         input_rows=total_rows, input_blocks=32, input_features=16,
@@ -339,12 +522,18 @@ def run_case(args, result_directory, diagnostics):
         num_boost_rounds=args.num_boost_round,
         train_placement_strategy="STRICT_SPREAD" if args.num_train_workers > 1 else "PACK",
         recovery_timeout_s=args.recovery_timeout_s,
-        failure_phase=("training_boosting" if args.failure_phase == "boosting"
+        failure_phase=("training_checkpoint_restart" if checkpoint_recovery else
+                       "training_boosting" if args.failure_phase == "boosting"
                        else "training_data_ingestion"),
         failure_after_round=args.failure_after_round,
-        training_state_recovery=False,
+        training_state_recovery=checkpoint_recovery,
+        checkpoint_frequency=args.checkpoint_frequency,
+        worker_failure_retry_budget=1 if checkpoint_recovery else 0,
+        controller_failure_retry_budget=0,
+        checkpoint_storage_scope="shared_local_disk_survives_injected_process_failures",
         replay_required=args.failure_phase == "ingestion",
-        validation_scope=("same_workers_continue_boosting_after_head_replacement"
+        validation_scope=("checkpoint_resume_after_head_replacement_and_worker_loss"
+                          if checkpoint_recovery else "same_workers_continue_boosting_after_head_replacement"
                           if args.failure_phase == "boosting" else "training_ingestion_replay"),
         original_train_loop=True, original_predictor=True, ray_train_v2=True,
     )
@@ -354,7 +543,8 @@ def run_case(args, result_directory, diagnostics):
     with local_head_failure_cluster(cluster_args, coordinator_cpus=0) as (case_args, crash_head):
         coordinator_node = ray.get_runtime_context().get_node_id()
         placement = NodeAffinitySchedulingStrategy(coordinator_node, soft=False)
-        monitor = ray.remote(num_cpus=0, max_restarts=0)(Monitor).options(
+        monitor_cls = CheckpointMonitor if checkpoint_recovery else Monitor
+        monitor = ray.remote(num_cpus=0, max_restarts=0)(monitor_cls).options(
             name=monitor_name, namespace=NAMESPACE, scheduling_strategy=placement,
         ).remote(args.num_boost_round, args.failure_after_round, args.num_train_workers)
 
@@ -364,7 +554,7 @@ def run_case(args, result_directory, diagnostics):
                 context.enable_fixed_r_task_recovery = True
                 context.fixed_r_task_recovery_output_mode = "streaming"
                 context.fixed_r_task_recovery_timeout_s = (
-                    min(30, args.recovery_timeout_s) if args.failure_phase == "boosting"
+                    min(30, args.recovery_timeout_s) if args.failure_phase != "ingestion"
                     else args.recovery_timeout_s
                 )
                 context.enable_progress_bars = False
@@ -378,7 +568,8 @@ def run_case(args, result_directory, diagnostics):
                         trigger_ingestion=args.failure_phase == "ingestion",
                     ),
                 ]
-                callbacks = [TrainSurvivalProbe(monitor_name)]
+                callbacks = [CheckpointRecoveryProbe(monitor_name) if checkpoint_recovery
+                             else TrainSurvivalProbe(monitor_name)]
                 if args.failure_phase == "boosting":
                     callbacks.append(TrainingProgressProbe(monitor_name))
                 with DataContext.current(context):
@@ -386,13 +577,15 @@ def run_case(args, result_directory, diagnostics):
                     result = original.train(
                         "xgboost", str(input_directory), args.num_train_workers, 1,
                         num_boost_round=args.num_boost_round,
+                        checkpoint_frequency=args.checkpoint_frequency,
                         # Leave one CPU on each training node for read tasks.
                         placement_strategy=("STRICT_SPREAD" if args.num_train_workers > 1 else "PACK"),
                         read_kwargs={"override_num_blocks": 32},
                         run_config=RunConfig(
                             name="fixed_r_xgboost", storage_path=str(result_directory / "checkpoints"),
                             failure_config=FailureConfig(
-                                max_failures=0, controller_failure_limit=0, max_preemption_failures=0,
+                                max_failures=1 if checkpoint_recovery else 0,
+                                controller_failure_limit=0, max_preemption_failures=0,
                             ),
                             callbacks=callbacks,
                         ),
@@ -403,6 +596,18 @@ def run_case(args, result_directory, diagnostics):
                 model = original.XGBoostReportCallback.get_model(result.checkpoint)
                 if model.num_boosted_rounds() != args.num_boost_round or model.num_features() != 16:
                     raise ValueError("Checkpoint has the wrong training rounds or feature count")
+                checkpoint_validation = {}
+                if checkpoint_recovery:
+                    observed = ray.get(monitor.read.remote(), timeout=5)
+                    trigger = observed["trigger"]
+                    prefix_digest = model_tree_digest(model[:args.failure_after_round])
+                    if prefix_digest != trigger["checkpoint_tree_digest"]:
+                        raise ValueError("Final model did not retain the saved checkpoint's trees")
+                    checkpoint_validation = {
+                        "restored_checkpoint_rounds": args.failure_after_round,
+                        "checkpoint_prefix_preserved": True,
+                        "checkpoint_prefix_tree_digest": prefix_digest,
+                    }
                 prediction_context = context.copy()
                 prediction_context.custom_execution_callback_classes = [
                     capture_execution(monitor_name, "inference", total_rows),
@@ -427,6 +632,7 @@ def run_case(args, result_directory, diagnostics):
                     raise ValueError("Persisted predictions contain invalid probabilities")
                 np.testing.assert_allclose(np.sort(values), np.sort(expected), rtol=1e-6, atol=1e-7)
                 return {
+                    **checkpoint_validation,
                     "training_s": training_s, "prediction_s": prediction_s,
                     "checkpoint_path": result.checkpoint.path,
                     "validated_prediction_rows": len(values), "checkpoint_rounds": model.num_boosted_rounds(),
@@ -450,7 +656,7 @@ def run_case(args, result_directory, diagnostics):
                     if ready:
                         ray.get(future)
                         raise ValueError("Training/inference finished before head failure was exercised")
-                    if args.failure_phase == "boosting":
+                    if args.failure_phase in ("boosting", "checkpoint"):
                         ingestion = observed["executions"].get("training", {})
                         if ingestion.get("state") != "finished":
                             # The ingestion observer and training controller are
@@ -460,11 +666,21 @@ def run_case(args, result_directory, diagnostics):
                         if observed["training_progress"]["boosting_rounds"] >= args.num_boost_round:
                             raise ValueError("Boosting finished before head failure was requested")
                     diagnostics.update(observed["trigger"])
+                    worker_target = None
+                    if checkpoint_recovery:
+                        # Borrow the controller-owned target handle before head loss.
+                        worker_target = ray.get(monitor.failure_target.remote(), timeout=5)
                     print(f"Requesting head failure during {args.failure_phase}: "
                           f"{observed['trigger']}", flush=True)
                     crashed_at = time.monotonic()
                     cluster_args.recovery_timeout_s = min(30, max(0.01, deadline - crashed_at))
                     diagnostics.update(crash_head())
+                    if checkpoint_recovery:
+                        ray.kill(worker_target, no_restart=True)
+                        diagnostics["worker_failure_requested_after_head_replacement"] = True
+                        ray.get(monitor.mark_worker_failure.remote(), timeout=5)
+                        print("Head replaced; killed one training worker. "
+                              "Waiting for checkpoint restoration and predictions.", flush=True)
                     if args.failure_phase == "boosting":
                         diagnostics["boosting_rounds_at_head_replacement"] = ray.get(
                             monitor.head_replaced.remote(),
@@ -477,6 +693,10 @@ def run_case(args, result_directory, diagnostics):
                     result = ray.get(future)
                     if crashed_at is None:
                         raise ValueError("The selected training phase did not trigger head failure")
+                    observed = ray.get(monitor.read.remote(), timeout=min(
+                        5, max(0.01, deadline - time.monotonic()),
+                    ))
+                    diagnostics["observation"] = observed
                     # Reports originate in multiple actors. Allow only the remaining
                     # case deadline for their final messages to reach the monitor.
                     if all(observed["executions"].get(phase, {}).get("state") == "finished"
@@ -505,19 +725,26 @@ def main():
     parser.add_argument("--recovery-timeout-s", type=float, default=120)
     parser.add_argument("--num-train-workers", type=int, choices=(1, 2), default=1)
     parser.add_argument("--num-boost-round", type=int, default=10)
-    parser.add_argument("--failure-phase", choices=("ingestion", "boosting"), default="ingestion")
+    parser.add_argument("--failure-phase", choices=("ingestion", "boosting", "checkpoint"), default="ingestion")
+    parser.add_argument("--checkpoint-frequency", type=int, default=0)
     parser.add_argument("--failure-after-round", type=int,
                         help="Completed all-worker boosting rounds before requesting head failure")
     args = parser.parse_args()
     if args.num_boost_round < 1:
         parser.error("--num-boost-round must be positive")
-    if args.failure_phase == "boosting":
+    if args.failure_phase in ("boosting", "checkpoint"):
         if args.failure_after_round is None:
             args.failure_after_round = args.num_boost_round // 2
         if not 1 <= args.failure_after_round < args.num_boost_round - 2:
             parser.error("Use 1 <= --failure-after-round < --num-boost-round - 2")
     elif args.failure_after_round is not None:
-        parser.error("--failure-after-round requires --failure-phase boosting")
+        parser.error("--failure-after-round requires --failure-phase boosting or checkpoint")
+    if args.failure_phase == "checkpoint":
+        if (args.checkpoint_frequency < 3 or args.failure_after_round % args.checkpoint_frequency
+                or args.num_boost_round % args.checkpoint_frequency):
+            parser.error("Checkpoint coverage requires frequency >= 3, dividing both failure and final rounds")
+    elif args.checkpoint_frequency:
+        parser.error("Periodic checkpoints in this harness require --failure-phase checkpoint")
     if not math.isfinite(args.recovery_timeout_s) or args.recovery_timeout_s <= 0:
         parser.error("Use a positive finite case timeout")
     if args.failure_phase == "ingestion" and args.recovery_timeout_s > 120:
@@ -534,6 +761,8 @@ def main():
         key = f"xgboost/train_v2/local_{args.num_train_workers}_workers/head_failure_during_ingestion"
     if args.failure_phase == "boosting":
         key = f"xgboost/train_v2/local_{args.num_train_workers}_workers/head_failure_during_boosting"
+    elif args.failure_phase == "checkpoint":
+        key = f"xgboost/train_v2/local_{args.num_train_workers}_workers/checkpoint_resume_after_head_and_worker_loss"
     try:
         args.result_directory.mkdir(parents=True, exist_ok=True)
         result = run_case(args, args.result_directory, diagnostics)
