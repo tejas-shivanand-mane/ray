@@ -119,6 +119,11 @@ def summarize(samples):
 
 def save_report(report, output):
     report["summary"] = summarize(report["samples"])
+    report["failed_observations"] = [
+        {"case": s["case"], "pair": s["pair"], "mode": s["mode"], "error": s.get("error")}
+        for s in report["samples"] if s["status"] != "passed"
+    ]
+    report["remaining_observations"] = report["expected_observations"] - len(report["samples"])
     serialized = json.dumps(report, indent=2)
     archive = Path(report["result_directory"]) / "overhead.json"
     for target in {output, archive}:
@@ -224,10 +229,54 @@ def run_observation(name, pair, mode, directory, input_path, timeout_s, num_boos
     return sample
 
 
+def continue_observations(report, source, directory):
+    """Retain every attempted observation, including failures; run only missing ones."""
+    original = source.read_text()
+    previous = json.loads(original)
+    for key in ("profile", "cases", "repeats", "timeout_s", "xgboost_num_boost_round",
+                "data_block_multiplier", "workload_extension", "topology", "python", "platform"):
+        if previous.get(key) != report.get(key):
+            raise ValueError(f"Cannot continue with changed {key}; use the original run options/environment")
+    old_commit = previous.get("git_commit", "")
+    if len(old_commit) != 40 or any(c not in "0123456789abcdef" for c in old_commit):
+        raise ValueError("Continuation report must identify its full source commit")
+    changed = subprocess.check_output(
+        ["git", "diff", "--name-only", old_commit, report["git_commit"], "--"],
+        cwd=ROOT, text=True,
+    ).splitlines()
+    runner_files = {
+        "gossip_benchmarks/run_fixed_r_overhead.py", "gossip_benchmarks/run_fixed_r_overhead.sh",
+        "gossip_benchmarks/plot_fixed_r_overhead.py",
+    }
+    if set(changed) - runner_files:
+        raise ValueError("Workload/runtime source changed since the report; start fresh OFF/ON pairs")
+    attempted = set()
+    for sample in previous.get("samples", []):
+        key = (sample["case"], sample["pair"], sample["mode"])
+        if (key in attempted or sample["case"] not in report["cases"]
+                or not 1 <= sample["pair"] <= report["repeats"]
+                or sample["mode"] not in ("off", "on") or sample["status"] not in ("passed", "failed")):
+            raise ValueError("Invalid or duplicate observation in the continuation report")
+        attempted.add(key)
+        sample.setdefault("git_commit", old_commit)
+        report["samples"].append(sample)
+    # The supplied path may also be the output path; archive before overwriting it.
+    snapshot_path = directory / "continued-from.json"
+    snapshot_path.write_text(original)
+    report["continuation"] = {
+        "source_report": str(source), "archived_report": str(snapshot_path),
+        "source_git_commit": old_commit, "retained_observations": len(attempted),
+        "policy": "keep passed and failed observations; execute only unattempted observations",
+    }
+    return attempted
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-directory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--continue-from", type=Path,
+                        help="Keep prior successes AND failures; run only unattempted observations with matching settings")
     parser.add_argument("--repeats", type=int, default=1, help="OFF/ON pairs per case; 1 is preliminary")
     parser.add_argument("--case", action="append", choices=CASES, help="Repeat to select cases; default all four")
     parser.add_argument("--long-all", action="store_true",
@@ -273,8 +322,6 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     input_path = directory / "input"
     selected = list(dict.fromkeys(args.case or CASES))
-    if any(name.startswith("xgboost-") for name in selected):
-        make_input(input_path)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     report = {
         "profile": "fixed-r-no-failure-overhead", "status": "running",
@@ -306,7 +353,15 @@ def main():
         "scope": "local cold-job cost including worker startup, placement/fusion/copying policy; not isolated native overhead or an unmodified upstream build",
         "preliminary": args.repeats == 1, "samples": [],
     }
+    attempted = (continue_observations(report, args.continue_from.resolve(), directory)
+                 if args.continue_from else set())
+    if any(name.startswith("xgboost-") and (name, pair, mode) not in attempted
+           for name in selected for pair in range(1, args.repeats + 1) for mode in ("off", "on")):
+        make_input(input_path)
     save_report(report, output)
+    if attempted:
+        print(f"Retaining {len(attempted)} observations, including prior failures; "
+              f"running {report['remaining_observations']} remaining observations", flush=True)
     if any(name in selected for name in ("backpressure", "worker-scaling-actors")):
         print(f"Ray Data: {args.data_block_multiplier}x input blocks; unchanged batch sizes, "
               "worker pools, schema and consumer delay in both modes", flush=True)
@@ -316,21 +371,23 @@ def main():
         for pair in range(1, args.repeats + 1):
             modes = ("off", "on") if (case_index + pair) % 2 else ("on", "off")
             for mode in modes:
+                if (name, pair, mode) in attempted:
+                    continue
                 print(f"{name}: pair {pair}/{args.repeats}, recovery {mode.upper()} "
                       f"({args.timeout_s:g}s process limit)", flush=True)
                 sample = run_observation(
                     name, pair, mode, directory / name / f"pair-{pair}-{mode}", input_path,
                     args.timeout_s, args.num_boost_round, args.data_block_multiplier,
                 )
+                sample["git_commit"] = commit
                 report["samples"].append(sample)
-                if sample["status"] != "passed":
-                    report["status"] = "failed"
-                    save_report(report, output)
-                    print(f"Stopped at first failure. Partial report: {output}", flush=True)
-                    return 1
                 save_report(report, output)
-                print(f"  {sample['benchmark_seconds']['total']:.3f}s benchmark time", flush=True)
-    report["status"] = "passed"
+                if sample["status"] != "passed":
+                    print(f"Recorded failure for {name} / {mode}; continuing remaining observations. "
+                          f"Report: {output}", flush=True)
+                else:
+                    print(f"  {sample['benchmark_seconds']['total']:.3f}s benchmark time", flush=True)
+    report["status"] = "failed" if report["failed_observations"] else "passed"
     save_report(report, output)
     print("\nCase / phase                         OFF(s)     ON(s)   overhead")
     for row in report["summary"]:
@@ -339,9 +396,12 @@ def main():
               f"{row['runtime_overhead_pct_mean']:+8.2f}%")
     if report["preliminary"]:
         print("One pair per case: preliminary measurements, no variance estimate.")
+    if report["failed_observations"]:
+        print(f"{len(report['failed_observations'])} failed observations retained in JSON; "
+              "CSV/overhead bars contain only complete successful pairs.")
     print(f"JSON: {output}\nCSV: {output.with_suffix('.csv')}\n"
           f"Plots: {output.with_suffix('.png')} and {output.with_suffix('.pdf')}")
-    return 0
+    return 0 if report["status"] == "passed" else 1
 
 
 if __name__ == "__main__":
