@@ -11,6 +11,8 @@ bash gossip_benchmarks/run_fixed_r_overhead.sh
 No reinstall or native rebuild is needed. This is a performance measurement,
 not another failure/recovery acceptance suite. The assistant has only reviewed
 the measurement implementation; no builds, tests, lint or benchmarks were run.
+Plotting uses Matplotlib. If it is absent, the script stops before creating any
+cluster and gives the one-time `python -m pip install matplotlib` command.
 
 ## What runs
 
@@ -30,10 +32,11 @@ of runtime. Prior failure-run times are not valid no-failure estimates.
 
 Each observation starts a fresh cluster and fresh application process. Both
 modes have the same zero-CPU head and driver node, four two-CPU executor nodes,
-512 MiB object stores per node, surviving RocksDB storage, and an enabled
-dashboard for the original actor benchmark's State API statistics. This requires
-the full dashboard dependencies in the existing environment; a missing dependency
-is reported as a startup error, not silently worked around in only one mode.
+512 MiB object stores per node and surviving RocksDB storage. The dashboard is
+disabled in both modes; no frontend build is required. The actor benchmark uses
+the ordinary `--skip-state-api-stats` option in BOTH modes, retaining local
+Dataset execution statistics while omitting dashboard scheduling and runtime-env
+queries. Its UDF, actor pool, pipeline and normal entry point are unchanged.
 Data, seeds, workload arguments, thread limits, and storage medium match. Each
 observation writes to fresh output/checkpoint directories. XGBoost input is
 generated once and shared by all observations. No page-cache eviction is done.
@@ -51,8 +54,9 @@ is from this fork, not a separately built pristine upstream Ray.
 Primary runtime comes from the existing benchmark's own timer, excluding cluster
 startup and cleanup. The JSON separately records launcher process time, cluster
 startup time, and total observation wall time. Data timers include work performed
-inside the original benchmark function, including actor-benchmark statistics
-collection. XGBoost reports training and prediction separately, plus their sum.
+inside the original benchmark function, including local actor-benchmark
+statistics collection. Optional State API queries are excluded symmetrically.
+XGBoost reports training and prediction separately, plus their sum.
 They include cold-job worker initialization and ordinary training coordination;
 these are not warmed steady-state throughput measurements.
 
@@ -77,8 +81,24 @@ not establish overhead on the collaborators' original cloud configurations.
 
 - Latest report: `$HOME/ray-coverage/overhead.json`
 - Latest summary: `$HOME/ray-coverage/overhead.csv`
+- Latest plots: `$HOME/ray-coverage/overhead.png` and `overhead.pdf`
 - Archived report, raw metrics, settings and application logs:
   `$HOME/ray-coverage/overhead.XXXXXX/`
+
+Plots show runtime overhead for Data totals and XGBoost training, prediction and
+total. Positive bars indicate a slowdown and negative bars a measured speedup.
+With repetitions, whiskers show ±1 sample standard deviation of the paired
+percentage changes (not confidence intervals). Single pairs are explicitly
+marked preliminary. Incomplete pairs are never plotted as zero overhead;
+partial/failed runs are labeled, with unmeasured cases listed. Plot generation
+runs outside all workload timing intervals and plots are archived with their
+source JSON. A startup failure has no measured bars.
+
+Regenerate plots from an existing report without rerunning benchmarks:
+
+```bash
+python gossip_benchmarks/plot_fixed_r_overhead.py "$HOME/ray-coverage/overhead.json"
+```
 
 Set `RAY_RECOVERY_OUTPUT_DIR` and `RAY_RECOVERY_TEMP_DIR` before invoking the shell
 wrapper to override disk locations. Default temporary storage is `$HOME/raytmp`.

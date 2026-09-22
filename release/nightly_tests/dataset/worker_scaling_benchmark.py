@@ -112,6 +112,10 @@ def parse_args() -> argparse.Namespace:
     add_worker_arguments(parser)
     parser.add_argument("--output-dir", default=SHARED_OUTDIR)
     parser.add_argument("--skip-upload", action="store_true", help="Keep profiling outputs local")
+    parser.add_argument(
+        "--skip-state-api-stats", action="store_true",
+        help="Collect local Dataset statistics without dashboard scheduling/runtime-env queries",
+    )
     args = parser.parse_args()
     if args.num_scalar_cols + args.num_array_cols <= 0:
         parser.error(
@@ -252,8 +256,10 @@ def main(args: argparse.Namespace):
         num_rows = num_blocks * rows_per_block
         workers_per_operator = args.num_workers // args.num_operators
         ds = build_dataset(args).materialize()
-        metrics = collect_dataset_stats(ds)
-        metrics["runtime_env_setup"] = RuntimeEnvSetupTracker.collect()
+        use_state_api = not getattr(args, "skip_state_api_stats", False)
+        metrics = collect_dataset_stats(ds, detail=use_state_api)
+        metrics["runtime_env_setup"] = RuntimeEnvSetupTracker.collect() if use_state_api else []
+        metrics["state_api_stats_enabled"] = use_state_api
         metrics["num_blocks"] = num_blocks
         metrics["num_rows"] = num_rows
         metrics["num_scalar_cols"] = args.num_scalar_cols

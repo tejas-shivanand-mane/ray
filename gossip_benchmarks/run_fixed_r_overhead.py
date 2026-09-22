@@ -23,6 +23,7 @@ from ray.experimental.recovery import system_config
 from ray.experimental.recovery._launcher import run_script
 from ray.experimental.recovery._local import local_head_failure_cluster
 from run_fixed_r_entrypoint_coverage import make_input, validate_predictions
+from plot_fixed_r_overhead import require_matplotlib, render_report
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("backpressure", "worker-scaling-actors", "xgboost-single", "xgboost-multi")
@@ -39,7 +40,7 @@ def workload(name, directory, input_path):
         return "release/nightly_tests/dataset/worker_scaling_benchmark.py", [
             "--worker-type", "actors", "--num-workers", "8", "--num-operators", "2",
             "--blocks-per-worker", "4", "--num-scalar-cols", "200", "--num-array-cols", "400",
-            "--output-dir", str(directory / "profiling"), "--skip-upload",
+            "--output-dir", str(directory / "profiling"), "--skip-upload", "--skip-state-api-stats",
         ], 10304
     return "release/train_tests/xgboost_lightgbm/train_batch_inference_benchmark.py", [
         "xgboost", "--data-path", str(input_path),
@@ -60,6 +61,8 @@ def timings(name, raw):
         result = {"total": raw[key]["time"]}
         if name == "worker-scaling-actors" and raw[key]["num_rows"] != 10304:
             raise ValueError("Unexpected worker-scaling workload size")
+        if name == "worker-scaling-actors" and raw[key].get("state_api_stats_enabled", True):
+            raise ValueError("Overhead measurements must skip State API statistics in both modes")
     if any(not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
            for v in result.values()):
         raise ValueError(f"Invalid benchmark timing: {result}")
@@ -119,6 +122,14 @@ def save_report(report, output):
     else:
         # A new/failed run must not leave the previous run's CSV looking current.
         csv_path.write_text("case,phase,pairs,off_seconds_mean,on_seconds_mean,runtime_overhead_pct_mean\n")
+    # Plot outside every measurement interval. Also archive the plot alongside
+    # its source JSON so subsequent runs cannot separate figures from data.
+    render_report(report, output.with_suffix(""))
+    for extension in (".png", ".pdf"):
+        source = output.with_suffix(extension)
+        destination = archive.with_suffix(extension)
+        if source != destination:
+            destination.write_bytes(source.read_bytes())
 
 
 def run_observation(name, pair, mode, directory, input_path, timeout_s):
@@ -134,11 +145,10 @@ def run_observation(name, pair, mode, directory, input_path, timeout_s):
             owner_node_id=None, executor_node_ids=None, producer_concurrency=None,
             recovery_timeout_s=30,
         )
-        # The normal actor benchmark queries State API scheduling statistics.
-        # Keep the full dashboard available in BOTH modes so neither receives
-        # missing-telemetry fallbacks or different query failures/timeouts.
+        # Optional State API telemetry is explicitly skipped in BOTH modes.
+        # Local Dataset statistics remain; frontend assets are not required.
         with local_head_failure_cluster(
-            args, coordinator_cpus=0, recovery_enabled=enabled, include_dashboard=True,
+            args, coordinator_cpus=0, recovery_enabled=enabled, include_dashboard=False,
         ) as (_, _unused_failure_function):
             sample["cluster_startup_seconds"] = time.monotonic() - started
             before = {node["NodeID"] for node in ray.nodes() if node["Alive"]}
@@ -217,6 +227,8 @@ def main():
     os.environ.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
     if os.environ.get("RAY_DATA_EXECUTION_CALLBACKS"):
         parser.error("Unset RAY_DATA_EXECUTION_CALLBACKS for an observer-free comparison")
+    # Fail immediately if plotting support is missing, before any cluster work.
+    require_matplotlib()
     directory = args.result_directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
     output = args.output.resolve()
@@ -236,7 +248,8 @@ def main():
         "comparison": "ordinary native/Data recovery OFF vs full Fixed-R native/Data recovery ON",
         "topology": {"head_cpus": 0, "driver_node_cpus": 0,
                      "executor_nodes": 4, "cpus_per_executor": 2,
-                     "object_store_mb_per_node": 512, "dashboard_enabled": True},
+                     "object_store_mb_per_node": 512, "dashboard_enabled": False},
+        "state_api_statistics": "skipped in both modes; local Dataset statistics retained",
         "runtime_overhead_formula": "100 * (ON seconds / OFF seconds - 1), mean of paired ratios",
         "throughput_change_formula": "100 * (OFF seconds / ON seconds - 1), mean of paired ratios",
         "throughput_unit": "logical rows/s; producer rows for backpressure; input rows otherwise",
@@ -270,7 +283,8 @@ def main():
               f"{row['runtime_overhead_pct_mean']:+8.2f}%")
     if report["preliminary"]:
         print("One pair per case: preliminary measurements, no variance estimate.")
-    print(f"JSON: {output}\nCSV: {output.with_suffix('.csv')}")
+    print(f"JSON: {output}\nCSV: {output.with_suffix('.csv')}\n"
+          f"Plots: {output.with_suffix('.png')} and {output.with_suffix('.pdf')}")
     return 0
 
 
