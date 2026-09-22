@@ -3,7 +3,8 @@
 import math
 import sys
 import time
-from threading import Event
+import traceback
+from threading import Event, enumerate as enumerate_threads
 
 from ray import cloudpickle
 
@@ -39,6 +40,76 @@ def snapshot(control):
     return result
 
 
+def capture_wait_state(control):
+    """Best-effort local observation before cancellation clears active tasks.
+
+    Never poll a stream or call Ray/GCS APIs here. In particular, do not acquire
+    consumer locks: recovery can hold one while waiting for a native operation.
+    The concurrently running executor can advance during this observation.
+    """
+    now = time.monotonic()
+    names = {thread.ident: thread.name for thread in enumerate_threads()}
+    result = {
+        "captured_before_shutdown": True,
+        "atomic_snapshot": False,
+        "thread_stacks": {
+            f"{names.get(ident, 'unknown')}:{ident}": "".join(
+                traceback.format_stack(frame, limit=40)
+            )
+            for ident, frame in sys._current_frames().items()
+        },
+        "operators": snapshot(control),
+    }
+
+    def ref_id(ref):
+        return None if ref is None or ref.is_nil() else ref.hex()
+
+    topology = getattr(control.executor, "_topology", None) or {}
+    for op, record in zip(control.operators, result["operators"]):
+        record.update(
+            output_backpressured=getattr(op, "_in_task_output_backpressure", None),
+            submission_backpressured=getattr(op, "_in_task_submission_backpressure", None),
+            output_backpressure_policy=getattr(op, "_task_output_backpressure_policy", None),
+            submission_backpressure_policy=getattr(op, "_task_submission_backpressure_policy", None),
+        )
+        state = topology.get(op)
+        if state is not None:
+            record["queued_input_blocks"] = state.total_enqueued_input_blocks()
+            record["waiting_consumers"] = state.num_waiting_consumers
+        tasks = []
+        for task in op.get_active_tasks():
+            stream = getattr(task, "stream", None)
+            if stream is None:
+                continue
+            reader = stream.reader
+            consumer = reader.consumer if reader is not None else None
+            last_progress = getattr(task, "_recovery_last_progress_s", now)
+            tasks.append({
+                "task_id": stream.task_id.hex(), "task_index": task.task_index(),
+                "stream_closed": stream.closed, "accepted_returns": stream.next_index,
+                "wait_reason": getattr(task, "_recovery_wait_reason", None),
+                "seconds_since_progress": now - last_progress,
+                "pending_block_ref": ref_id(task._pending_block_ref),
+                "pending_metadata_ref": ref_id(task._pending_meta_ref),
+                "last_pair_ready_ids": list(getattr(task, "_recovery_pair_ready_ids", [])),
+                "copied_return_indices": sorted(task._copied_return_indices),
+                "consumer_phase": consumer._phase if consumer is not None else None,
+                "consumer_next_index": consumer._next_index if consumer is not None else None,
+                "retained_return_indices": sorted(consumer._retained) if consumer is not None else [],
+                "pending_owner_read": ref_id(reader._pending_read) if reader is not None else None,
+                "recovery_required": reader._recovery_required if reader is not None else False,
+            })
+        record["task_wait_states"] = tasks
+    manager = getattr(control.executor, "_resource_manager", None)
+    if manager is not None:
+        result["cached_global_resource_usage"] = repr(getattr(manager, "_global_usage", None))
+        result["cached_operator_resource_usage"] = {
+            op.name: repr(usage) for op, usage in
+            list(getattr(manager, "_op_usages", {}).items())
+        }
+    return result
+
+
 class ProgressTrigger:
     def __init__(self, total_rows, phase, stage):
         if phase not in FRACTIONS or total_rows <= 0:
@@ -55,7 +126,7 @@ class ProgressTrigger:
         # Their local copies need no driver event or live task handles.
         return type(self), (self.total_rows, self.phase, self.stage)
 
-    def observe(self, operators):
+    def observe(self, operators, *, event="asynchronous_output_progress"):
         """Called on the executor thread; signal and return without waiting."""
         if self.ready.is_set():
             return
@@ -66,7 +137,7 @@ class ProgressTrigger:
         self.observation = {
             "observation_at_trigger": operators,
             "head_failure_requested": True,
-            "failure_trigger": "asynchronous_output_progress",
+            "failure_trigger": event,
             "failure_progress_phase": self.phase,
             "failure_progress_stage": self.stage,
             "failure_progress_rows": rows,

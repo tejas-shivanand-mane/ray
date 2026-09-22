@@ -92,6 +92,18 @@ def execution_control(args):
                 def submit_then_pause(stream, *positional, **kwargs):
                     submit(stream, *positional, **kwargs)
                     if control.trigger is not None:
+                        if operator_count > 2 and target_index > 0:
+                            # Bounded map pools can finish a whole wave between
+                            # its last output and the controller killing the
+                            # head. Signal at the next enrolled submission once
+                            # the progress threshold has been reached instead.
+                            # Neither the executor nor the UDF waits here.
+                            if stream.reader is not None:
+                                control.trigger.observe(
+                                    snapshot(control),
+                                    event="asynchronous_submission_after_output_progress",
+                                )
+                            return
                         task = next(task for task in op.get_active_tasks()
                                     if getattr(task, "stream", None) is stream)
                         emit = task._emit_copied_pair

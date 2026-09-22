@@ -103,7 +103,7 @@ def test_wait_state_capture_does_not_poll_or_lock_consumers(monkeypatch):
     monkeypatch.syspath_prepend(str(
         Path(__file__).resolve().parents[3] / "release/nightly_tests/dataset"
     ))
-    import streaming_recovery_backpressure_dataset as harness
+    import streaming_recovery_progress as harness
 
     def unexpected_call(*args, **kwargs):
         raise AssertionError("Diagnostics must not poll streams or make Ray calls")

@@ -7,6 +7,7 @@ the producer, Trainer.train, prefetch implementation, or split algorithm.
 
 import argparse
 from dataclasses import replace
+from threading import Event, Thread
 import time
 import traceback
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from streaming_recovery_head_failure import local_head_failure_cluster
 from streaming_recovery_progress import (
-    FRACTIONS, ProgressTrigger, register_for_task_serialization, snapshot,
+    FRACTIONS, ProgressTrigger, capture_wait_state, register_for_task_serialization, snapshot,
 )
 
 
@@ -44,6 +45,14 @@ def run_dataset(args, crash_head, diagnostics):
             self.latest = {}
             self.trigger = None
             self.splits = {}
+            self.wait_state = None
+            self.trainer_progress = {}
+
+        def observe_wait(self, observation):
+            self.wait_state = observation
+
+        def progress(self, split, rows, batches):
+            self.trainer_progress[split] = {"rows": rows, "batches": batches}
 
         def report(self, report):
             if report.get("trigger") is not None and self.trigger is None:
@@ -61,7 +70,10 @@ def run_dataset(args, crash_head, diagnostics):
             self.splits[split] = {"rows": rows, "batches": batches}
 
         def read(self):
-            return {"latest": self.latest, "trigger": self.trigger, "splits": self.splits}
+            return {
+                "latest": self.latest, "trigger": self.trigger, "splits": self.splits,
+                "wait_state": self.wait_state, "trainer_progress": self.trainer_progress,
+            }
 
     monitor = ray.remote(num_cpus=0)(Monitor).options(
         name=monitor_name, namespace=namespace,
@@ -99,6 +111,21 @@ def run_dataset(args, crash_head, diagnostics):
 
             op._submit_data_task = submit_and_observe
             self.publish("running")
+            self.stop_observer = Event()
+
+            def observe_waits():
+                # A separate thread can capture a blocked executor, where its
+                # on_execution_step callback would stop reporting. This never
+                # polls streams, acquires consumer locks, or fetches payloads.
+                while not self.stop_observer.wait(5):
+                    try:
+                        observation = capture_wait_state(self.control)
+                        observation["observed_ns"] = time.monotonic_ns()
+                    except Exception:
+                        observation = {"observation_error": traceback.format_exc()}
+                    self.monitor.observe_wait.remote(observation)
+
+            Thread(target=observe_waits, name="fixed-r-prefetch-observer", daemon=True).start()
 
         def publish(self, state, error=None):
             self.last_report = time.monotonic()
@@ -115,9 +142,12 @@ def run_dataset(args, crash_head, diagnostics):
                 self.publish("running")
 
         def after_execution_succeeds(self, executor):
+            self.stop_observer.set()
             self.publish("finished")
 
         def after_execution_fails(self, executor, error):
+            if hasattr(self, "stop_observer"):
+                self.stop_observer.set()
             self.publish("failed", "".join(traceback.format_exception(
                 type(error), error, error.__traceback__,
             )))
@@ -129,6 +159,7 @@ def run_dataset(args, crash_head, diagnostics):
 
         def iter_batches(self, **kwargs):
             rows = batches = 0
+            last_progress = 0
             for batch in self.inner.iter_batches(**kwargs):
                 values = batch["data"]
                 if (set(batch) != {"data"} or values.dtype != np.uint8
@@ -137,7 +168,11 @@ def run_dataset(args, crash_head, diagnostics):
                     raise ValueError("Training-prefetch producer payload changed")
                 rows += len(values)
                 batches += 1
+                if time.monotonic() - last_progress >= 1:
+                    monitor.progress.remote(self.split, rows, batches)
+                    last_progress = time.monotonic()
                 yield batch
+            monitor.progress.remote(self.split, rows, batches)
             ray.get(monitor.consumed.remote(self.split, rows, batches), timeout=timeout)
 
     context = DataContext.get_current().copy()

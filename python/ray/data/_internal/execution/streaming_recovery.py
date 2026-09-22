@@ -414,11 +414,17 @@ def submit_stream(
     try:
         ray.get(owner.__ray_ready__.remote(), timeout=config.timeout_s)
         owner_alive = _owner_alive(config)
-    except (ray.exceptions.RayActorError, ray.exceptions.GetTimeoutError):
+    except (
+        ray.exceptions.RayActorError,
+        ray.exceptions.ActorUnschedulableError,
+        ray.exceptions.GetTimeoutError,
+    ):
         try:
             deadline = time.monotonic() + config.timeout_s
             while _owner_alive(config):
-                # An actor error or timeout alone is not node-death authority.
+                # An actor error, infeasible placement, or timeout alone is not
+                # node-death authority. Hard affinity can become unschedulable
+                # between the initial liveness check and helper placement.
                 # Keep the original error if GCS never confirms head loss.
                 if time.monotonic() >= deadline:
                     raise

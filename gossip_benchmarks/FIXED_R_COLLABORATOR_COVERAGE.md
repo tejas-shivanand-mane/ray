@@ -60,10 +60,12 @@ does not pass: the target stage must show actual protected task replay. Such a
 miss is reported explicitly instead of being counted as successful recovery.
 
 The previous paused cases remain available with the default `paused` value.
-Worker-scaling failure diagnostics now also capture local wait states before
-shutdown. Training-prefetch preserves the latest remote coordinator report
-before cleanup; that report can be stale if the actor is blocked and is not
-presented as an atomic stack dump.
+Worker-scaling failure diagnostics capture local wait states before shutdown.
+Training-prefetch also has a separate observational thread in the surviving
+split coordinator. It publishes pending references, per-task wait reasons,
+backpressure state and thread stacks every five seconds, even if the executor
+callback is blocked. Trainer progress is reported at most once per second plus
+EOF. These reports are best-effort observations, not atomic snapshots.
 
 ## Single local command
 
@@ -110,7 +112,7 @@ are kept separate and short to avoid Unix socket path-length limits.
 | --- | --- |
 | Fast producer / slow consumer | Paused local head failure passed; asynchronous coverage added here |
 | Worker scaling, task-based | Original read/map/materialize chain supported; asynchronous single/chained coverage added here |
-| Training-prefetch / streaming_split | Newly implemented, awaiting the combined run; split coordinator and trainers must survive |
+| Training-prefetch / streaming_split | Copy and protected no-failure passed; asynchronous head-failure stalled and remains unresolved |
 | Worker scaling, actor-based (the benchmark's default) | Still rejected; actor state/lifecycle recovery requires separate implementation |
 | Multi-machine and 5000-worker scale | Not established on one local machine |
 
@@ -131,4 +133,57 @@ payload validation remain part of these correctness runs.
 Source review only. No build, tests, lint, or benchmarks were run by the
 assistant. Added regressions cover nonblocking trigger signaling, rejection of
 unexercised faults, and exact equal-split/trainer row accounting with a remainder.
-The new workload and asynchronous failure results are pending user execution.
+The first combined user run is recorded below. The follow-up changes have not
+been executed by the assistant.
+
+
+## Follow-up to the uploaded coverage.json
+
+The first combined run reported six passes and five failures, with no missing
+case results:
+
+| Cases | Observed result |
+| --- | --- |
+| Training-prefetch copy and protected no-failure | Passed: 16 producer tasks, 4096 validated rows, eight trainers consuming 512 rows each |
+| Two-map worker chain copy and protected no-failure | Passed: all 96 read/map tasks finished and output validated |
+| Two-map worker chain asynchronous read failure | Passed: 13 protected read tasks replayed |
+| Single-map asynchronous middle failure | Passed: nine protected map tasks and one read task replayed |
+| Backpressure asynchronous early/middle/late | All failed at helper readiness with ActorUnschedulableError |
+| Two-map chain asynchronous early final-map failure | Output completed and validated, but no task replayed; recovery coverage was not established |
+| Training-prefetch asynchronous middle failure | Timed out after 600 seconds; 11 tasks replayed, ten finished, 3328/4096 producer rows delivered |
+
+All three backpressure failures have the same confirmed startup error. A helper
+with hard affinity can become unschedulable when the head dies between the
+liveness check and helper startup. The runtime now handles
+`ActorUnschedulableError` in its existing **pre-begin** failover path, alongside
+actor death and timeout. GCS must still confirm owner-node death; otherwise the
+original error propagates. An error after begin may have run never authorizes
+fresh submission. A source regression covers these three boundaries.
+
+The bounded worker-map chain now signals at the first protected submission
+**after** the selected output-progress threshold, rather than at the last
+output of a wave that can finish before the controller kills the head. Read and
+single-map triggers retain output-progress signaling. No UDF or executor pause
+is added. The JSON identifies the trigger type, and actual replay in the
+selected stage remains mandatory. This reduces the missed-fault window but
+does not guarantee a particular thread schedule.
+
+The training timeout is **not fixed or diagnosed** by these results. Its six
+remaining active tasks had accepted four returns each, but the report lacked
+pending-payload and scheduler wait states. The new remote observations preserve
+that evidence if the stall recurs. The 600-second timeout is unchanged.
+
+Run only the five gaps, once each, using the existing source-built environment:
+
+```bash
+cd /home/tejas/Downloads/ray &&
+git pull --ff-only &&
+bash gossip_benchmarks/run_fixed_r_collaborator_coverage.sh --failed-only
+```
+
+The result is `/home/tejas/ray-coverage/coverage-retry.json`; the original
+`coverage.json` remains intact. This is a fixed follow-up profile for the five
+gaps above, not an automatic parser of arbitrary failure reports. It skips all
+six passing cases, requires five passing results, and does not relabel old
+results or merge them into a claim about the new revision. No native rebuild
+is required. The existing no-argument command still runs the full 11 cases.

@@ -3,6 +3,15 @@
 # Use the existing ray-dev environment and its native Fixed-R source build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+profile=full
+if [[ $# -gt 1 ]]; then
+  echo "Usage: $0 [--failed-only]" >&2; exit 2
+fi
+case "${1:-}" in
+  "") ;;
+  --failed-only) profile=failed-only ;;
+  *) echo "Usage: $0 [--failed-only]" >&2; exit 2 ;;
+esac
 result_root="${RAY_RECOVERY_OUTPUT_DIR:-$HOME/ray-coverage}"
 mkdir -p "$result_root"
 case "$(stat -f -c %T "$result_root")" in
@@ -30,25 +39,36 @@ worker=(
   --recovery-plan dataset --recovery-output-mode streaming
   --local-executor-nodes 8 --local-object-store-mb 512 --recovery-timeout-s 600
 )
+training_mode=suite
+chain_mode=(--recovery-mode suite)
+summary_name=coverage.json
+if [[ "$profile" == failed-only ]]; then
+  # The five gaps in the uploaded coverage report; retain the six passed cases.
+  training_mode=fixed_r_head_failure
+  chain_mode=(--recovery-mode fixed_r_head_failure --recovery-failure-stage map)
+  summary_name=coverage-retry.json
+fi
 
 # New workload first: copy + enrolled no-failure + asynchronous producer failure.
 TEST_OUTPUT_JSON="$result_dir/training-prefetch.json" \
 python release/nightly_tests/dataset/backpressure_benchmark.py \
   "${backpressure[@]}" --case training-prefetch --num-trainers 8 --prefetch-batches 2 \
-  --recovery-mode suite --recovery-head-timing middle || failed=1
+  --recovery-mode "$training_mode" --recovery-head-timing middle || failed=1
 
 # Cover protected reads and a two-stage task map chain in one fresh-cluster suite.
 TEST_OUTPUT_JSON="$result_dir/worker-scaling-chain.json" \
 python release/nightly_tests/dataset/worker_scaling_benchmark.py \
   "${worker[@]}" --num-operators 2 --recovery-failure-operator 1 \
-  --recovery-mode suite --recovery-head-timing early || failed=1
+  "${chain_mode[@]}" --recovery-head-timing early || failed=1
 
 # The original single-stage task variant uses an unbounded pool.
+if [[ "$profile" == full ]]; then
 TEST_OUTPUT_JSON="$result_dir/worker-scaling-single.json" \
 python release/nightly_tests/dataset/worker_scaling_benchmark.py \
   "${worker[@]}" --num-operators 1 --recovery-failure-operator 0 \
   --recovery-mode fixed_r_head_failure --recovery-failure-stage map \
   --recovery-head-timing middle || failed=1
+fi
 
 # Do not repeat the already-passing backpressure baselines or paused injections.
 TEST_OUTPUT_JSON="$result_dir/backpressure-async.json" \
@@ -56,14 +76,20 @@ python release/nightly_tests/dataset/backpressure_benchmark.py \
   "${backpressure[@]}" --case fast-producer-slow-consumer \
   --recovery-mode fixed_r_head_failure --recovery-head-timing suite || failed=1
 
-python - "$result_dir" "$result_root/coverage.json" <<'PY' || failed=1
+python - "$result_dir" "$result_root/$summary_name" "$profile" <<'PY' || failed=1
 import json
 from pathlib import Path
 import sys
 
 directory = Path(sys.argv[1])
-summary = {"result_directory": str(directory), "cases": {}, "missing_results": []}
-for name in ("training-prefetch", "worker-scaling-chain", "worker-scaling-single", "backpressure-async"):
+profile = sys.argv[3]
+names = ["training-prefetch", "worker-scaling-chain", "backpressure-async"]
+if profile == "full":
+    names.append("worker-scaling-single")
+expected_count = 11 if profile == "full" else 5
+summary = {"result_directory": str(directory), "profile": profile,
+           "expected_case_count": expected_count, "cases": {}, "missing_results": []}
+for name in names:
     path = directory / (name + ".json")
     if not path.exists():
         summary["missing_results"].append(name)
@@ -75,7 +101,7 @@ for name in ("training-prefetch", "worker-scaling-chain", "worker-scaling-single
 summary["failed_cases"] = [key for key, value in summary["cases"].items()
                            if value.get("validation_status") != "passed"]
 summary["validation_status"] = (
-    "passed" if len(summary["cases"]) == 11 and not summary["failed_cases"]
+    "passed" if len(summary["cases"]) == expected_count and not summary["failed_cases"]
     and not summary["missing_results"] else "failed"
 )
 output = Path(sys.argv[2])

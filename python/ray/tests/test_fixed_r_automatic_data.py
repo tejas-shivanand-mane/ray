@@ -43,6 +43,61 @@ def arguments(mode="fixed_r_head_failure", failure_stage="map"):
     )
 
 
+@pytest.mark.parametrize("failure_point,head_dead", [
+    ("startup", True), ("startup", False), ("begin", True),
+])
+def test_unschedulable_helper_only_fails_over_before_begin(monkeypatch, failure_point, head_dead):
+    from ray.data._internal.execution import streaming_recovery as runtime
+
+    config = SimpleNamespace(
+        automatic_outputs=False, dynamic_task_outputs=True, mode="fixed_r",
+        timeout_s=1, owner_node_id="head", executor_for_task=lambda index: "worker",
+    )
+    liveness = iter([True, False if head_dead else True])
+    monkeypatch.setattr(runtime, "_owner_alive", lambda config: next(liveness))
+    # If head loss is not authoritative, exhaust the deadline immediately.
+    clock = iter([0, 2])
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(clock))
+    core = SimpleNamespace(validate_streaming_recovery_inputs=lambda refs: None)
+    monkeypatch.setattr(ray._private.worker.global_worker, "core_worker", core, raising=False)
+    owner = Mock()
+    owner.__ray_ready__ = Mock()
+    helper_class = Mock()
+    helper_class.options.return_value.remote.return_value = owner
+    monkeypatch.setattr(ray, "remote", lambda **options: lambda cls: helper_class)
+    killed = Mock()
+    monkeypatch.setattr(ray, "kill", killed)
+    error = ray.exceptions.ActorUnschedulableError("head affinity no longer feasible")
+
+    def ready(ref, **kwargs):
+        if failure_point == "startup":
+            raise error
+
+    monkeypatch.setattr(ray, "get", ready)
+    begin = Mock(side_effect=error)
+    monkeypatch.setattr(runtime.StreamingRecoveryReader, "submit", begin)
+    if failure_point == "begin":
+        # The head is alive through readiness. Once begin may have run, an
+        # identical error must not authorize a second submission.
+        monkeypatch.setattr(runtime, "_owner_alive", lambda config: True)
+    producer = Mock()
+    metrics = new_metrics()
+    if failure_point == "startup" and head_dead:
+        stream = submit_stream(config, producer, (), {}, {}, 1, metrics)
+        assert stream.reader is None
+        producer.options.return_value.remote.assert_called_once()
+        assert metrics["fixed_r_pre_submission_failovers"] == 1
+        assert metrics["fixed_r_survivor_tasks"] == 1
+        begin.assert_not_called()
+    else:
+        with pytest.raises(ray.exceptions.ActorUnschedulableError) as caught:
+            submit_stream(config, producer, (), {}, {}, 1, metrics)
+        assert caught.value is error
+        producer.options.assert_not_called()
+        assert metrics["fixed_r_pre_submission_failovers"] == 0
+    killed.assert_called_once_with(owner, no_restart=True)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Local GCS RocksDB requires Linux")
 @pytest.mark.parametrize("mode,stage", [
     ("copy", "map"), ("fixed_r", "map"),
