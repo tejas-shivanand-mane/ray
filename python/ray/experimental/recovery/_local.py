@@ -28,7 +28,12 @@ def local_system_config():
 @contextmanager
 def local_head_failure_cluster(
     args, *, coordinator_cpus=1, recovery_enabled=True, include_dashboard=False,
+    allow_head_failure=None,
 ):
+    # Existing callers retain their injection policy. Comparisons can explicitly
+    # apply the same external replacement operation to an OFF cluster as well.
+    if allow_head_failure is None:
+        allow_head_failure = recovery_enabled
     if sys.platform != "linux":
         raise ValueError("The local head-failure harness requires Linux RocksDB support")
     if not 2 <= args.local_executor_nodes <= 250:
@@ -46,8 +51,8 @@ def local_head_failure_cluster(
         try:
             config = local_system_config()
             if not recovery_enabled:
-                # A fresh, genuinely disabled native baseline for no-fault
-                # performance comparisons; retain identical numeric settings.
+                # A fresh disabled native baseline for matched comparisons;
+                # retain identical numeric settings and external GCS storage.
                 for key in system_config():
                     if key.startswith("enable_"):
                         config[key] = False
@@ -98,8 +103,8 @@ def local_head_failure_cluster(
 
             def crash_head():
                 nonlocal crashed
-                if not recovery_enabled:
-                    raise RuntimeError("Failure injection is disabled for the native baseline")
+                if not allow_head_failure:
+                    raise RuntimeError("Head failure injection is disabled for this fixture")
                 if crashed:
                     raise RuntimeError("The head-failure harness permits one failure")
                 crashed = True

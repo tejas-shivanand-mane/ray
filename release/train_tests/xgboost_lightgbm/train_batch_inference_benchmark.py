@@ -98,10 +98,27 @@ class ResumableXGBoostReportCallback(XGBoostReportCallback):
 
 
 def xgboost_train_loop_function(config: Dict):
+    # Optional comparison instrumentation; ordinary benchmark runs do not send
+    # stage RPCs. Durations use each worker's local monotonic clock.
+    observer = config.get("_benchmark_stage_observer")
+
+    def stage(name, started, restored_rounds):
+        if observer is not None:
+            finished = time.monotonic_ns()
+            observer.stage.remote({
+                "name": name, "started_ns": started, "finished_ns": finished,
+                "duration_s": (finished - started) / 1e9,
+                "world_rank": ray.train.get_context().get_world_rank(),
+                "worker_id": ray.get_runtime_context().get_worker_id(),
+                "restored_checkpoint_rounds": restored_rounds,
+            })
+
+    started = time.monotonic_ns()
     report_callback = config["report_callback_cls"]
     checkpoint = ray.train.get_checkpoint()
     starting_model = report_callback.get_model(checkpoint) if checkpoint else None
     restored_rounds = starting_model.num_boosted_rounds() if starting_model is not None else 0
+    stage("checkpoint_load", started, restored_rounds)
     remaining_rounds = config.get("num_boost_round", 10) - restored_rounds
     if remaining_rounds < 0:
         raise ValueError("Checkpoint contains more rounds than the requested training target")
@@ -114,18 +131,22 @@ def xgboost_train_loop_function(config: Dict):
         )
         return
 
+    started = time.monotonic_ns()
     train_ds_iter = ray.train.get_dataset_shard("train")
     train_df = train_ds_iter.materialize().to_pandas()
+    stage("data_ingestion", started, restored_rounds)
 
     label_column, params = config["label_column"], config["params"]
     train_X, train_y = train_df.drop(label_column, axis=1), train_df[label_column]
 
+    started = time.monotonic_ns()
     dtrain = xgb.DMatrix(train_X, label=train_y)
+    stage("dmatrix", started, restored_rounds)
 
     frequency = config.get("checkpoint_frequency", 0)
     callback = (
         ResumableXGBoostReportCallback(frequency, restored_rounds)
-        if frequency or restored_rounds else report_callback()
+        if frequency or restored_rounds or observer is not None else report_callback()
     )
     xgb.train(
         params,
@@ -189,7 +210,7 @@ _FRAMEWORK_PARAMS = {
 def train(
     framework: str, data_path: str, num_workers: int, cpus_per_worker: int,
     *, run_config=None, read_kwargs=None, placement_strategy="PACK", num_boost_round=10,
-    checkpoint_frequency=0,
+    checkpoint_frequency=0, _benchmark_stage_observer=None,
 ) -> ray.train.Result:
     if num_boost_round < 1:
         raise ValueError("num_boost_round must be positive")
@@ -208,6 +229,7 @@ def train(
         train_loop_config={
             **framework_params["train_loop_config"], "num_boost_round": num_boost_round,
             "checkpoint_frequency": checkpoint_frequency,
+            "_benchmark_stage_observer": _benchmark_stage_observer,
         },
         scaling_config=ScalingConfig(
             num_workers=num_workers,
