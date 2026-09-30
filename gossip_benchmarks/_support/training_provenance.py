@@ -9,6 +9,9 @@ import sys
 
 
 SOURCE_PATHS = (
+    "gossip_benchmarks/run_selective_xgboost_comparison.py",
+    "gossip_benchmarks/validate_selective_xgboost.sh",
+    "gossip_benchmarks/_support/selective_train.py",
     "gossip_benchmarks/run_fixed_r_train_comparison.py",
     "gossip_benchmarks/run_fixed_r_train_comparison.sh",
     "gossip_benchmarks/validate_fixed_r_worker_node.sh",

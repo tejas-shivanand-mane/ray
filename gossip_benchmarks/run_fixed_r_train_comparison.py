@@ -91,7 +91,10 @@ def child_case(path):
             if key.startswith("RAY_RECOVERY_") or key in ("RAY_EXPERIMENTAL_RECOVERY", "RAY_DATA_EXECUTION_CALLBACKS", "RAY_ADDRESS"):
                 os.environ.pop(key)
         import ray
-        from train_comparison import run_case
+        if options.get("training_strategy") == "checkpoint-boundary":
+            from selective_train import run_case
+        else:
+            from train_comparison import run_case
 
         provenance = {**source_provenance(ROOT), **runtime_provenance(ROOT)}
         diagnostics["provenance"] = provenance
@@ -175,7 +178,8 @@ def run_observation(options, pair, directory, provenance):
         if (directory / "case.json").exists():
             partial = json.loads((directory / "case.json").read_text())
             for key in ("observation", "provenance", "fault", "faults", "head_replacement",
-                        "worker_node_failure", "worker_node_failures", "native_settings"):
+                        "worker_node_failure", "worker_node_failures", "native_settings",
+                        "groups", "segments", "recoveries", "ingestion", "restart_scope", "implementation"):
                 if key in partial:
                     sample[key] = partial[key]
     finally:
