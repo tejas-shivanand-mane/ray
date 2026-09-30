@@ -30,6 +30,15 @@ NAMESPACE = "fixed-r-training-comparison"
 SCENARIOS = ("none", "worker", "head", "head-worker")
 
 
+def register_for_worker_serialization(benchmark):
+    # The coverage module also contains progress helper callbacks. Sending the
+    # module by value includes those globals, so register their defining module
+    # too; worker processes do not inherit the driver's benchmark sys.path.
+    coverage.register_for_task_serialization()
+    for module in (sys.modules[__name__], coverage, benchmark):
+        cloudpickle.register_pickle_by_value(module)
+
+
 def seconds_between(end, start):
     return None if end is None or start is None else (end - start) / 1e9
 
@@ -327,9 +336,7 @@ def run_case(options, directory, diagnostics):
 
     if benchmark.XGBoostTrainer is not XGBoostTrainer:
         raise ValueError("Training comparison requires RAY_TRAIN_V2_ENABLED=1")
-    cloudpickle.register_pickle_by_value(sys.modules[__name__])
-    cloudpickle.register_pickle_by_value(coverage)
-    cloudpickle.register_pickle_by_value(benchmark)
+    register_for_worker_serialization(benchmark)
     input_path = directory / "input"
     total_rows = coverage.make_input(input_path)
     enabled = options["mode"] == "on"

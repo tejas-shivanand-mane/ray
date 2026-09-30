@@ -2,6 +2,8 @@
 
 import copy
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -11,10 +13,50 @@ def modules(monkeypatch):
     root = Path(__file__).resolve().parents[3]
     monkeypatch.syspath_prepend(str(root / "gossip_benchmarks"))
     monkeypatch.syspath_prepend(str(root / "gossip_benchmarks/_support"))
+    monkeypatch.syspath_prepend(str(root / "release/train_tests/xgboost_lightgbm"))
     import run_fixed_r_train_comparison
     import train_comparison
 
     return train_comparison, run_fixed_r_train_comparison
+
+
+def test_comparison_payload_deserializes_without_benchmark_import_paths(modules, tmp_path):
+    from ray import cloudpickle
+    import train_batch_inference_benchmark as benchmark
+
+    case, _ = modules
+    previous = cloudpickle.list_registry_pickle_by_value()
+    names = (case.__name__, case.coverage.__name__, benchmark.__name__, "streaming_recovery_progress")
+    try:
+        case.register_for_worker_serialization(benchmark)
+        # Capture the same module globals and callback class as the Job actor.
+        payload = cloudpickle.dumps((case.ComparisonProbe, case.coverage, benchmark))
+    finally:
+        for name in names:
+            if name not in previous:
+                cloudpickle.unregister_pickle_by_value(sys.modules[name])
+    code = """
+import importlib.abc
+import sys
+from ray import cloudpickle
+
+class NoBenchmarkImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {
+            'train_comparison', 'run_fixed_r_train_coverage',
+            'train_batch_inference_benchmark', 'streaming_recovery_progress',
+        }:
+            raise ModuleNotFoundError('Worker cannot import ' + fullname)
+
+sys.meta_path.insert(0, NoBenchmarkImports())
+probe, coverage, benchmark = cloudpickle.loads(sys.stdin.buffer.read())
+assert probe.__name__ == 'ComparisonProbe'
+assert callable(coverage.checkpoint_worker_identity)
+assert callable(benchmark.xgboost_train_loop_function)
+"""
+    result = subprocess.run([sys.executable, "-c", code], input=payload,
+                            cwd=tmp_path, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
 
 
 def options():

@@ -15,6 +15,7 @@ SOURCE_PATHS = (
     "gossip_benchmarks/_support/train_comparison.py",
     "gossip_benchmarks/_support/training_provenance.py",
     "release/train_tests/xgboost_lightgbm/train_batch_inference_benchmark.py",
+    "release/nightly_tests/dataset/streaming_recovery_progress.py",
     "python/ray/experimental/recovery",
     "python/ray/_private/streaming_recovery.py",
     "python/ray/data/context.py",
