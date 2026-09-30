@@ -166,8 +166,14 @@ class ComparisonMonitor:
         }
 
 
-def capture_node_execution(monitor, phase):
+def capture_node_execution(monitor_name, phase):
     """Record the actual fresh execution's placement configuration."""
+    # DataContext itself is a map-task input. Capturing an ActorHandle here
+    # would give that input a nested Ray reference, which Fixed-R rejects.
+    # Resolve the handle only on the executor-local callback instance.
+    if not isinstance(monitor_name, str) or not monitor_name:
+        raise ValueError("Execution callbacks require a nonempty monitor name")
+
     class Capture(ExecutionCallback):
         def before_execution_starts(self, executor):
             self.execution_id = uuid.uuid4().hex
@@ -180,7 +186,9 @@ def capture_node_execution(monitor, phase):
         def publish(self, executor, state):
             if not getattr(self, "operators", None):
                 return
-            ray.get(monitor.execution.remote({
+            if not hasattr(self, "monitor"):
+                self.monitor = ray.get_actor(monitor_name, namespace=NAMESPACE)
+            ray.get(self.monitor.execution.remote({
                 "execution_id": self.execution_id, "phase": phase, "state": state,
                 "started_ns": self.started_ns, "at_ns": time.monotonic_ns(),
                 "coordinator_node_id": ray.get_runtime_context().get_node_id(),
@@ -469,7 +477,7 @@ def run_case(options, directory, diagnostics):
                 context.target_min_block_size = 0
                 node_failure = options["scenario"] == "worker-node"
                 if node_failure:
-                    context.custom_execution_callback_classes = [capture_node_execution(monitor, "training")]
+                    context.custom_execution_callback_classes = [capture_node_execution(name, "training")]
                 if enabled:
                     get_config(context)
                 with DataContext.current(context):
@@ -500,7 +508,7 @@ def run_case(options, directory, diagnostics):
                         started = time.monotonic()
                         prediction_context = context.copy()
                         if node_failure:
-                            prediction_context.custom_execution_callback_classes = [capture_node_execution(monitor, "prediction")]
+                            prediction_context.custom_execution_callback_classes = [capture_node_execution(name, "prediction")]
                         with DataContext.current(prediction_context):
                             benchmark.predict(
                                 "xgboost", result, str(input_path),

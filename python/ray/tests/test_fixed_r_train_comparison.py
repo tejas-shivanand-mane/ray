@@ -31,7 +31,7 @@ def test_comparison_payload_deserializes_without_benchmark_import_paths(modules,
         case.register_for_worker_serialization(benchmark)
         # Capture the same module globals and callback class as the Job actor.
         payload = cloudpickle.dumps((case.ComparisonProbe, case.coverage, benchmark,
-                                     case.capture_node_execution(None, "training")))
+                                     case.capture_node_execution("test-monitor", "training")))
     finally:
         for name in names:
             if name not in previous:

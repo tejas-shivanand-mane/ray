@@ -97,6 +97,60 @@ def comparison(monkeypatch):
     return train_comparison, train_batch_inference_benchmark
 
 
+@pytest.mark.parametrize("phase", ["training", "prediction"])
+def test_execution_callback_keeps_monitor_out_of_serialized_context(comparison, monkeypatch):
+    from ray import cloudpickle
+
+    case, _ = comparison
+    observations = []
+    lookups = []
+
+    class LocalMonitor:
+        def __reduce__(self):
+            raise AssertionError("The executor-local monitor leaked into DataContext")
+
+        execution = SimpleNamespace(remote=observations.append)
+
+    monitor = LocalMonitor()
+
+    def get_monitor(name, *, namespace):
+        lookups.append((name, namespace))
+        return monitor
+
+    # Round-trip the actual DataContext payload before resolving a monitor,
+    # as happens when submitting read/map tasks to workers.
+    context = DataContext()
+    context.custom_execution_callback_classes = [case.capture_node_execution("test-monitor", phase)]
+    context = cloudpickle.loads(cloudpickle.dumps(context))
+    callback = context.custom_execution_callback_classes[0]()
+    executor = SimpleNamespace(_data_context=context)
+    callback.execution_id = "execution"
+    callback.operators = [SimpleNamespace(name="ReadParquet")]
+    callback.started_ns = 1
+    callback.configured_executors = ["executor-1", "executor-2"]
+    monkeypatch.setattr(ray, "get_actor", get_monitor)
+    monkeypatch.setattr(ray, "get", lambda ref, **kwargs: ref)
+    monkeypatch.setattr(ray, "get_runtime_context",
+                        lambda: SimpleNamespace(get_node_id=lambda: "coordinator"))
+    callback.publish(executor, "started")
+    callback.after_execution_succeeds(executor)
+    callback.after_execution_fails(executor, RuntimeError("fixture"))
+    assert lookups == [("test-monitor", case.NAMESPACE)]
+    assert [item["state"] for item in observations] == ["started", "finished", "failed"]
+    assert all(item["phase"] == phase for item in observations)
+    assert all(item["configured_executor_node_ids"] == ["executor-1", "executor-2"]
+               for item in observations)
+    # Execution may continue submitting tasks after the first event. The
+    # context must still be serializable without the resolved actor handle.
+    cloudpickle.dumps(context)
+
+
+def test_execution_callback_rejects_monitor_handles(comparison):
+    case, _ = comparison
+    with pytest.raises(ValueError, match="monitor name"):
+        case.capture_node_execution(object(), "training")
+
+
 def test_input_accounting_detects_same_length_wrong_rows(comparison):
     case, benchmark = comparison
     frame = benchmark.pd.DataFrame({"x": [1., 2., 3., 4.], "labels": [0, 1, 0, 1]})
