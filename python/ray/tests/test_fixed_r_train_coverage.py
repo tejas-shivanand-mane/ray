@@ -9,7 +9,11 @@ import pytest
 
 @pytest.fixture
 def coverage(monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "gossip_benchmarks"))
+    root = Path(__file__).resolve().parents[3]
+    # Pytest restores sys.path after each test, but keeps imported modules
+    # cached. Add the benchmark path explicitly on every fixture invocation.
+    monkeypatch.syspath_prepend(str(root / "release/train_tests/xgboost_lightgbm"))
+    monkeypatch.syspath_prepend(str(root / "gossip_benchmarks"))
     import run_fixed_r_train_coverage
 
     return run_fixed_r_train_coverage
