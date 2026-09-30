@@ -29,6 +29,7 @@ def local_system_config():
 def local_head_failure_cluster(
     args, *, coordinator_cpus=1, recovery_enabled=True, include_dashboard=False,
     allow_head_failure=None,
+    include_worker_failure=False,
 ):
     # Existing callers retain their injection policy. Comparisons can explicitly
     # apply the same external replacement operation to an OFF cluster as well.
@@ -100,6 +101,77 @@ def local_head_failure_cluster(
                 case_args.producer_concurrency = len(executors)
             survivors = {coordinator.node_id, *case_args.executor_node_ids}
             crashed = False
+            failed_worker = None
+
+            def crash_worker(node_id, worker_pid):
+                """Remove one executor, including its object store and children."""
+                import psutil
+
+                nonlocal failed_worker
+                if not include_worker_failure or failed_worker is not None:
+                    raise RuntimeError("This fixture permits at most one requested worker-node failure")
+                node = next((node for node in executors if node.node_id == node_id), None)
+                if node is None:
+                    raise ValueError("Worker failure must target a known executor, not the head/coordinator")
+                before = {n["NodeID"] for n in ray.nodes() if n["Alive"]}
+                if node_id not in before:
+                    raise ValueError("Target executor is already dead")
+                roots = [info.process for infos in node.all_processes.values() for info in infos]
+                children = {}
+                for root in roots:
+                    try:
+                        for process in psutil.Process(root.pid).children(recursive=True):
+                            children[process.pid] = process
+                    except psutil.NoSuchProcess:
+                        pass
+                if worker_pid not in children:
+                    raise ValueError("Selected training process is not a child of the target node")
+                failed_worker = node_id
+                started = time.monotonic()
+                deadline = started + args.recovery_timeout_s
+                cluster.remove_node(node, allow_graceful=False)
+                # Ray workers are descendants, not entries in Node.all_processes.
+                # Include them explicitly in the process-loss evidence.
+                for process in children.values():
+                    try:
+                        process.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                while True:
+                    live_children = []
+                    for process in children.values():
+                        try:
+                            if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                                live_children.append(process.pid)
+                        except psutil.NoSuchProcess:
+                            pass
+                    if not live_children and all(p.poll() is not None for p in roots):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Target node processes did not exit")
+                    time.sleep(.02)
+                processes_exited_s = time.monotonic() - started
+                while True:
+                    nodes = {n["NodeID"]: n for n in ray.nodes()}
+                    alive = {nid for nid, n in nodes.items() if n["Alive"]}
+                    if before - {node_id} - alive:
+                        raise RuntimeError("An unrequested node died during worker-node failure")
+                    if node_id in nodes and not nodes[node_id]["Alive"]:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("GCS did not mark the killed executor dead")
+                    time.sleep(.05)
+                if runtime.get_node_id() != driver_node_id or runtime.get_job_id() != driver_job_id:
+                    raise RuntimeError("Worker failure changed the surviving driver/job")
+                return {
+                    "failure_scope": "logical_worker_node_processes_with_surviving_shared_storage",
+                    "node_id": node_id, "training_worker_pid": worker_pid,
+                    "node_process_pids": sorted({p.pid for p in roots} | set(children)),
+                    "all_node_processes_exited": True, "gcs_marked_dead": True,
+                    "request_to_process_exit_s": processes_exited_s,
+                    "request_to_gcs_dead_s": time.monotonic() - started,
+                    "surviving_node_ids": sorted(alive),
+                }
 
             def crash_head():
                 nonlocal crashed
@@ -163,7 +235,10 @@ def local_head_failure_cluster(
                     "surviving_node_ids": sorted(survivors),
                 }
 
-            yield case_args, crash_head
+            if include_worker_failure:
+                yield case_args, crash_head, crash_worker
+            else:
+                yield case_args, crash_head
         finally:
             ray.shutdown()
             cluster.shutdown()

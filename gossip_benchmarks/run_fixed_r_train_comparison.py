@@ -2,7 +2,7 @@
 
 Default: one two-worker, ten-round, training-only OFF/ON pair, checkpointing
 every five rounds. Each observation gets a fresh subprocess and local cluster.
-No worker-node failure or physical-machine resilience is claimed here.
+Worker-node cases kill one logical node on this host; shared storage survives.
 """
 
 import argparse
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent / "_support"))
 from training_provenance import runtime_provenance, source_provenance
 
-SCENARIOS = ("none", "worker", "head", "head-worker")
+SCENARIOS = ("none", "worker", "head", "head-worker", "worker-node")
 
 
 def write_json(path, value):
@@ -174,12 +174,18 @@ def run_observation(options, pair, directory, provenance):
         # Retain partial timeline/provenance on timeout; never promote its status.
         if (directory / "case.json").exists():
             partial = json.loads((directory / "case.json").read_text())
-            for key in ("observation", "provenance", "fault", "head_replacement", "native_settings"):
+            for key in ("observation", "provenance", "fault", "head_replacement", "worker_node_failure", "native_settings"):
                 if key in partial:
                     sample[key] = partial[key]
     finally:
         if process is not None:
             stop_child(process)
+    if sample["status"] != "passed" and (directory / "case.log").exists():
+        # Include startup/worker diagnostics in the one report users share.
+        with (directory / "case.log").open("rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - 16384))
+            sample["log_tail"] = log.read().decode(errors="replace")
     sample["observation_wall_s"] = time.monotonic() - started
     write_json(directory / "sample.json", sample)
     return sample
@@ -195,6 +201,7 @@ def main():
     parser.add_argument("--repeats", type=int, default=1, help="Matched pairs; 1 is preliminary")
     parser.add_argument("--num-train-workers", type=int, choices=(1, 2), default=2)
     parser.add_argument("--num-boost-round", type=int, default=10)
+    parser.add_argument("--input-blocks", type=int, default=32, help="1024 rows per block; use 8 for bounded node-loss smoke checks")
     parser.add_argument("--checkpoint-frequency", type=int, default=5)
     parser.add_argument("--max-failures", type=int, default=1, help="Identical Train worker retry budget in both modes")
     parser.add_argument("--failure-after-round", type=int)
@@ -208,11 +215,13 @@ def main():
     modes = list(dict.fromkeys(args.mode or ["off", "on"]))
     if sys.platform != "linux":
         parser.error("Local RocksDB/process comparisons require Linux")
-    if (args.repeats < 1 or args.num_boost_round < 1 or args.checkpoint_frequency < 0
+    if (args.repeats < 1 or args.num_boost_round < 1 or args.input_blocks < 1 or args.checkpoint_frequency < 0
             or args.max_failures < 0 or not math.isfinite(args.timeout_s) or args.timeout_s <= 0):
         parser.error("Use positive repetitions/rounds/timeout and nonnegative checkpoint frequency/retry budget")
     needs_fault = any(s != "none" for s in scenarios)
-    needs_restart = any(s in ("worker", "head-worker") for s in scenarios)
+    needs_restart = any(s in ("worker", "head-worker", "worker-node") for s in scenarios)
+    if "worker-node" in scenarios and args.ungated:
+        parser.error("Worker-node smoke checks require the report gate; ungated node-loss coverage is separate")
     failure_round = args.failure_after_round
     if needs_fault and failure_round is None:
         failure_round = max(args.checkpoint_frequency, args.num_boost_round // 2)
@@ -234,6 +243,7 @@ def main():
         "checkpoint_frequency": args.checkpoint_frequency, "max_failures": args.max_failures,
         "failure_after_round": failure_round, "gated": needs_fault and not args.ungated,
         "include_prediction": args.include_prediction, "timeout_s": args.timeout_s,
+        "input_blocks": args.input_blocks,
     }
     report = {
         "profile": "fixed-r-observed-training-comparison", "status": "running",
@@ -241,7 +251,8 @@ def main():
         "source_provenance": provenance, "result_directory": str(directory), "samples": [],
         "preliminary": args.repeats == 1,
         "measurement_scope": "instrumented training wall time excluding cluster startup; matched observers in both modes",
-        "failure_scope": "head processes and/or one training actor; shared local GCS/checkpoint storage survives",
+        "failure_scope": "head processes, training actor, or one logical worker node; shared local GCS/checkpoint/input storage survives",
+        "input_accounting": "worker-node cases check per-attempt row counts and commutative pandas row hashes",
         "clock_scope": "one Linux host's monotonic clock; not synchronized multi-machine timestamps",
         "comparison": "same fork and external RocksDB head replacement in both arms; native/Data protection OFF versus ON",
         "topology": {"head_cpus": 0, "coordinator_cpus": 0, "executor_nodes": 4,

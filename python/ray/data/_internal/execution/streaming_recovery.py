@@ -15,7 +15,7 @@ import sys
 import time
 import traceback
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Tuple, Union
 
 import ray
@@ -160,6 +160,30 @@ def clear_config(context):
         context.eager_free = previous
     context.remove_config(_EAGER_FREE_KEY)
     context.remove_config(CONFIG_KEY)
+
+
+def context_for_new_execution(context):
+    """Give a new automatic execution its own snapshot of surviving executors.
+
+    Call before physical planning, never from a running operator or replay.
+    The original context/configuration and enrolled recipes stay unchanged.
+    Preserve the original protected owner, including its authoritative death.
+    Configurations without the public automatic opt-in retain their explicit
+    survivor contract.
+    """
+    if not context.enable_fixed_r_task_recovery:
+        return context
+    fresh = context.copy()
+    config = get_config(fresh)
+    nodes = {node["NodeID"]: node for node in ray.nodes()}
+    if any(node_id not in nodes for node_id in (config.owner_node_id, *config.executor_node_ids)):
+        raise ValueError("Cannot refresh Fixed-R execution: owner/executor is unknown to GCS")
+    executors = tuple(node_id for node_id in config.executor_node_ids if nodes[node_id]["Alive"])
+    if len(executors) < 2:
+        raise ValueError("A new Fixed-R execution requires at least two surviving executors")
+    if executors != config.executor_node_ids:
+        fresh.set_config(CONFIG_KEY, replace(config, executor_node_id=executors))
+    return fresh
 
 
 def get_config(context):

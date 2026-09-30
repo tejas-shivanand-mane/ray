@@ -7761,6 +7761,16 @@ class Dataset:
         """
         from ray.data._internal.execution.streaming_executor import StreamingExecutor
 
+        if self._context.enable_fixed_r_task_recovery:
+            from ray.data._internal.execution.streaming_recovery import (
+                context_for_new_execution,
+            )
+
+            # Refresh only a new execution. Existing physical operators retain
+            # their context and immutable replay placement after executor loss.
+            self._context = context_for_new_execution(self._context)
+            self._logical_plan = copy.copy(self._logical_plan)
+            self._logical_plan.context = self._context
         self._run_index += 1
         return StreamingExecutor(self._context, self.get_dataset_id())
 

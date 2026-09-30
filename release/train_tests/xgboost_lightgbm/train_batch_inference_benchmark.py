@@ -97,6 +97,16 @@ class ResumableXGBoostReportCallback(XGBoostReportCallback):
         return super().after_iteration(model, self.completed_rounds - 1, evals_log)
 
 
+def input_fingerprint(frame):
+    """Order-independent row accounting across distributed input partitions."""
+    hashes = pd.util.hash_pandas_object(frame, index=False).to_numpy(dtype=np.uint64)
+    return {
+        "rows": len(frame), "columns": list(frame.columns),
+        "hash_sum": sum(int(value) for value in hashes) % (1 << 64),
+        "hash_xor": int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0))),
+    }
+
+
 def xgboost_train_loop_function(config: Dict):
     # Optional comparison instrumentation; ordinary benchmark runs do not send
     # stage RPCs. Durations use each worker's local monotonic clock.
@@ -135,6 +145,12 @@ def xgboost_train_loop_function(config: Dict):
     train_ds_iter = ray.train.get_dataset_shard("train")
     train_df = train_ds_iter.materialize().to_pandas()
     stage("data_ingestion", started, restored_rounds)
+    if observer is not None and config.get("_benchmark_verify_input", False):
+        ray.get(observer.input_partition.remote({
+            "worker_id": ray.get_runtime_context().get_worker_id(),
+            "world_rank": ray.train.get_context().get_world_rank(),
+            "fingerprint": input_fingerprint(train_df),
+        }), timeout=5)
 
     label_column, params = config["label_column"], config["params"]
     train_X, train_y = train_df.drop(label_column, axis=1), train_df[label_column]
@@ -210,7 +226,7 @@ _FRAMEWORK_PARAMS = {
 def train(
     framework: str, data_path: str, num_workers: int, cpus_per_worker: int,
     *, run_config=None, read_kwargs=None, placement_strategy="PACK", num_boost_round=10,
-    checkpoint_frequency=0, _benchmark_stage_observer=None,
+    checkpoint_frequency=0, _benchmark_stage_observer=None, _benchmark_verify_input=False,
 ) -> ray.train.Result:
     if num_boost_round < 1:
         raise ValueError("num_boost_round must be positive")
@@ -230,6 +246,7 @@ def train(
             **framework_params["train_loop_config"], "num_boost_round": num_boost_round,
             "checkpoint_frequency": checkpoint_frequency,
             "_benchmark_stage_observer": _benchmark_stage_observer,
+            "_benchmark_verify_input": _benchmark_verify_input,
         },
         scaling_config=ScalingConfig(
             num_workers=num_workers,

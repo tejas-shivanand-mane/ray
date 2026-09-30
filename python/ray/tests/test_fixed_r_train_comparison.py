@@ -30,7 +30,8 @@ def test_comparison_payload_deserializes_without_benchmark_import_paths(modules,
     try:
         case.register_for_worker_serialization(benchmark)
         # Capture the same module globals and callback class as the Job actor.
-        payload = cloudpickle.dumps((case.ComparisonProbe, case.coverage, benchmark))
+        payload = cloudpickle.dumps((case.ComparisonProbe, case.coverage, benchmark,
+                                     case.capture_node_execution(None, "training")))
     finally:
         for name in names:
             if name not in previous:
@@ -49,10 +50,11 @@ class NoBenchmarkImports(importlib.abc.MetaPathFinder):
             raise ModuleNotFoundError('Worker cannot import ' + fullname)
 
 sys.meta_path.insert(0, NoBenchmarkImports())
-probe, coverage, benchmark = cloudpickle.loads(sys.stdin.buffer.read())
+probe, coverage, benchmark, capture = cloudpickle.loads(sys.stdin.buffer.read())
 assert probe.__name__ == 'ComparisonProbe'
 assert callable(coverage.checkpoint_worker_identity)
 assert callable(benchmark.xgboost_train_loop_function)
+assert callable(capture.before_execution_starts)
 """
     result = subprocess.run([sys.executable, "-c", code], input=payload,
                             cwd=tmp_path, capture_output=True, timeout=30)

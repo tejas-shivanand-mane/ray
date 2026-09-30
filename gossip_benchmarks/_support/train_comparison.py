@@ -14,6 +14,8 @@ import uuid
 import ray
 from ray import cloudpickle
 from ray.data import DataContext
+from ray.data._internal.execution.execution_callback import ExecutionCallback
+from ray.data._internal.execution.operators.map_operator import MapOperator
 from ray.data._internal.execution.streaming_recovery import clear_config, get_config
 from ray.experimental.recovery import system_config
 from ray.experimental.recovery._local import local_head_failure_cluster
@@ -27,7 +29,8 @@ sys.path.insert(0, str(ROOT / "gossip_benchmarks"))
 import run_fixed_r_train_coverage as coverage
 
 NAMESPACE = "fixed-r-training-comparison"
-SCENARIOS = ("none", "worker", "head", "head-worker")
+SCENARIOS = ("none", "worker", "head", "head-worker", "worker-node")
+RESTART_SCENARIOS = ("worker", "head-worker", "worker-node")
 
 
 def register_for_worker_serialization(benchmark):
@@ -57,6 +60,8 @@ class ComparisonMonitor:
         self.target = None
         self.controller = {}
         self.finished_workers = None
+        self.inputs = []
+        self.executions = []
 
     def event(self, name, at_ns=None, **details):
         self.events.append({"name": name, "at_ns": at_ns or time.monotonic_ns(), **details})
@@ -82,6 +87,12 @@ class ComparisonMonitor:
 
     def stage(self, observation):
         self.stages.append(observation)
+
+    def input_partition(self, observation):
+        self.inputs.append(observation)
+
+    def execution(self, observation):
+        self.executions.append(observation)
 
     def report(self, metrics, checkpoint_path, at_ns):
         rounds = {m["boosting_rounds"] for m in metrics}
@@ -126,7 +137,7 @@ class ComparisonMonitor:
             "worker_group_attempt": len(self.groups),
         }
         self.event("fault_requested", at_ns)
-        return {"target": self.target, "fault": self.fault}
+        return {"target": self.target, "identity": self.groups[0]["workers"][0], "fault": self.fault}
 
     def complete_fault(self, at_ns):
         self.fault_done = True
@@ -151,7 +162,39 @@ class ComparisonMonitor:
             "stages": self.stages, "trigger": self.trigger, "fault": self.fault,
             "fault_done": self.fault_done, "controller": self.controller,
             "finished_workers": self.finished_workers,
+            "inputs": self.inputs, "executions": self.executions,
         }
+
+
+def capture_node_execution(monitor, phase):
+    """Record the actual fresh execution's placement configuration."""
+    class Capture(ExecutionCallback):
+        def before_execution_starts(self, executor):
+            self.execution_id = uuid.uuid4().hex
+            self.operators = [op for op in executor._topology if isinstance(op, MapOperator)]
+            self.started_ns = time.monotonic_ns()
+            config = get_config(executor._data_context)
+            self.configured_executors = list(config.executor_node_ids) if config else None
+            self.publish(executor, "started")
+
+        def publish(self, executor, state):
+            if not getattr(self, "operators", None):
+                return
+            ray.get(monitor.execution.remote({
+                "execution_id": self.execution_id, "phase": phase, "state": state,
+                "started_ns": self.started_ns, "at_ns": time.monotonic_ns(),
+                "coordinator_node_id": ray.get_runtime_context().get_node_id(),
+                "configured_executor_node_ids": self.configured_executors,
+                "operators": [op.name for op in self.operators],
+            }), timeout=5)
+
+        def after_execution_succeeds(self, executor):
+            self.publish(executor, "finished")
+
+        def after_execution_fails(self, executor, error):
+            self.publish(executor, "failed")
+
+    return Capture
 
 
 class ComparisonProbe(WorkerGroupCallback, ControllerCallback, ReportCallback):
@@ -218,7 +261,7 @@ class ComparisonProbe(WorkerGroupCallback, ControllerCallback, ReportCallback):
 
 def validate_observation(observation, options, coordinator, executors):
     groups = observation["worker_groups"]
-    needs_restart = options["scenario"] in ("worker", "head-worker")
+    needs_restart = options["scenario"] in RESTART_SCENARIOS
     if len(groups) != (2 if needs_restart else 1):
         raise ValueError("Unexpected number of worker-group attempts")
     controller = observation["controller"]
@@ -284,6 +327,58 @@ def validate_observation(observation, options, coordinator, executors):
         raise ValueError("Worker stage identity or duration disagrees with the timeline")
 
 
+def validate_input_partitions(observation, expected):
+    all_ids = {w["worker_id"] for g in observation["worker_groups"] for w in g["workers"]}
+    inputs = observation["inputs"]
+    if len(inputs) != len(all_ids) or {p["worker_id"] for p in inputs} != all_ids:
+        raise ValueError("Missing or duplicated training input observations")
+    for group in observation["worker_groups"]:
+        workers = {w["worker_id"]: w for w in group["workers"]}
+        selected = [p for p in inputs if p["worker_id"] in workers]
+        merged = {"rows": 0, "columns": expected["columns"], "hash_sum": 0, "hash_xor": 0}
+        for partition in selected:
+            fingerprint = partition["fingerprint"]
+            if (partition["world_rank"] != workers[partition["worker_id"]]["world_rank"]
+                    or fingerprint["columns"] != expected["columns"]):
+                raise ValueError("Input observation rank/schema disagrees with the dataset")
+            merged["rows"] += fingerprint["rows"]
+            merged["hash_sum"] = (merged["hash_sum"] + fingerprint["hash_sum"]) % (1 << 64)
+            merged["hash_xor"] ^= fingerprint["hash_xor"]
+        if merged != expected:
+            raise ValueError("Training input rows/content changed across worker replacement")
+
+
+def validate_worker_node_failure(observation, options, failure, live_nodes):
+    killed = failure["node_id"]
+    target = observation["worker_groups"][0]["workers"][0]
+    if (target["node_id"] != killed or target["pid"] != failure["training_worker_pid"]
+            or target["pid"] not in failure["node_process_pids"]
+            or not failure["all_node_processes_exited"] or not failure["gcs_marked_dead"]
+            or killed in live_nodes):
+        raise ValueError("Worker-node process loss was not established")
+    if any(w["node_id"] not in live_nodes for w in observation["worker_groups"][1]["workers"]):
+        raise ValueError("Replacement workers include a dead node")
+    dead_at = next(e["at_ns"] for e in observation["events"] if e["name"] == "worker_node_confirmed_dead")
+    executions = [e for e in observation["executions"] if e["started_ns"] >= dead_at]
+    for phase in (("training", "prediction") if options["include_prediction"] else ("training",)):
+        readers = [e for e in executions if e["phase"] == phase
+                   and any(part in ("ReadParquet", "ReadFilesParquetV2")
+                           for name in e["operators"] for part in name.split("->"))]
+        starts = {e["execution_id"] for e in readers if e["state"] == "started"}
+        finishes = {e["execution_id"] for e in readers if e["state"] == "finished"}
+        if not starts or starts != finishes:
+            raise ValueError(f"No complete fresh Parquet execution after node loss: {phase}")
+    for execution in executions:
+        if execution["coordinator_node_id"] not in live_nodes or execution["state"] == "failed":
+            raise ValueError("A fresh Dataset execution failed or lost its coordinator")
+        configured = execution["configured_executor_node_ids"]
+        if options["mode"] == "on":
+            if not configured or len(configured) < 2 or not set(configured) <= live_nodes:
+                raise ValueError("Fresh Dataset execution retained dead executor placement")
+        elif configured is not None:
+            raise ValueError("OFF execution unexpectedly enabled Fixed-R")
+
+
 def recovery_metrics(observation):
     fault = observation["fault"]
     if not fault:
@@ -338,7 +433,7 @@ def run_case(options, directory, diagnostics):
         raise ValueError("Training comparison requires RAY_TRAIN_V2_ENABLED=1")
     register_for_worker_serialization(benchmark)
     input_path = directory / "input"
-    total_rows = coverage.make_input(input_path)
+    total_rows = coverage.make_input(input_path, blocks=options.get("input_blocks", 32))
     enabled = options["mode"] == "on"
     args = argparse.Namespace(
         local_executor_nodes=4, local_object_store_mb=512, owner_node_id=None,
@@ -347,7 +442,8 @@ def run_case(options, directory, diagnostics):
     with local_head_failure_cluster(
         args, coordinator_cpus=0, recovery_enabled=enabled,
         allow_head_failure=options["scenario"] in ("head", "head-worker"),
-    ) as (case_args, crash_head):
+        include_worker_failure=True,
+    ) as (case_args, crash_head, crash_worker):
         coordinator = ray.get_runtime_context().get_node_id()
         affinity = NodeAffinitySchedulingStrategy(coordinator, soft=False)
         name = f"train-comparison-{uuid.uuid4().hex}"
@@ -371,16 +467,21 @@ def run_case(options, directory, diagnostics):
                 context.fixed_r_task_recovery_timeout_s = min(30, options["timeout_s"])
                 context.enable_progress_bars = False
                 context.target_min_block_size = 0
+                node_failure = options["scenario"] == "worker-node"
+                if node_failure:
+                    context.custom_execution_callback_classes = [capture_node_execution(monitor, "training")]
                 if enabled:
                     get_config(context)
                 with DataContext.current(context):
                     started = time.monotonic()
                     result = benchmark.train(
                         "xgboost", str(input_path), options["num_train_workers"], 1,
-                        placement_strategy="STRICT_SPREAD", read_kwargs={"override_num_blocks": 32},
+                        placement_strategy="STRICT_SPREAD",
+                        read_kwargs={"override_num_blocks": options.get("input_blocks", 32)},
                         num_boost_round=options["num_boost_round"],
                         checkpoint_frequency=options["checkpoint_frequency"],
                         _benchmark_stage_observer=monitor,
+                        _benchmark_verify_input=node_failure,
                         run_config=RunConfig(
                             name="training_comparison", storage_path=str(directory / "checkpoints"),
                             failure_config=FailureConfig(
@@ -397,10 +498,15 @@ def run_case(options, directory, diagnostics):
                     prediction_s = None
                     if options["include_prediction"]:
                         started = time.monotonic()
-                        benchmark.predict(
-                            "xgboost", result, str(input_path),
-                            output_path=str(directory / "predictions"), read_kwargs={"override_num_blocks": 32},
-                        )
+                        prediction_context = context.copy()
+                        if node_failure:
+                            prediction_context.custom_execution_callback_classes = [capture_node_execution(monitor, "prediction")]
+                        with DataContext.current(prediction_context):
+                            benchmark.predict(
+                                "xgboost", result, str(input_path),
+                                output_path=str(directory / "predictions"),
+                                read_kwargs={"override_num_blocks": options.get("input_blocks", 32)},
+                            )
                         prediction_s = time.monotonic() - started
                     # Mark workload completion before untimed model/output checks.
                     ray.get(monitor.event.remote("pipeline_finished", time.monotonic_ns()), timeout=5)
@@ -408,7 +514,7 @@ def run_case(options, directory, diagnostics):
                 if model.num_boosted_rounds() != options["num_boost_round"] or model.num_features() != 16:
                     raise ValueError("Final checkpoint has incorrect model dimensions")
                 observed = ray.get(monitor.read.remote(), timeout=5)
-                if options["scenario"] in ("worker", "head-worker"):
+                if options["scenario"] in RESTART_SCENARIOS:
                     worker = observed["worker_groups"][-1]["workers"][0]
                     checkpoint_model = xgb.Booster()
                     checkpoint_model.load_model(str(Path(worker["restored_checkpoint_path"]) / "model.ubj"))
@@ -422,6 +528,11 @@ def run_case(options, directory, diagnostics):
                     validation_prefix = {}
                 validation = {"model_rounds": model.num_boosted_rounds(), "model_features": model.num_features()}
                 validation.update(validation_prefix)
+                if node_failure:
+                    expected_input = benchmark.input_fingerprint(pq.read_table(input_path).to_pandas())
+                    validate_input_partitions(observed, expected_input)
+                    validation["training_input_fingerprint"] = expected_input
+                    validation["training_input_verified_per_attempt"] = True
                 if options["include_prediction"]:
                     frame = pq.read_table(input_path).to_pandas()
                     expected = model.predict(xgb.DMatrix(frame.drop("labels", axis=1)))
@@ -464,9 +575,15 @@ def run_case(options, directory, diagnostics):
                         args.recovery_timeout_s = min(30, max(.01, deadline - time.monotonic()))
                         diagnostics["head_replacement"] = crash_head()
                         ray.get(monitor.event.remote("head_replacement_ready", time.monotonic_ns()), timeout=5)
-                    if options["scenario"] in ("worker", "head-worker"):
+                    if options["scenario"] in RESTART_SCENARIOS:
                         ray.get(monitor.worker_failure_requested.remote(time.monotonic_ns()), timeout=5)
-                        ray.kill(fault["target"], no_restart=True)
+                        if options["scenario"] == "worker-node":
+                            identity = fault["identity"]
+                            args.recovery_timeout_s = min(30, max(.01, deadline - time.monotonic()))
+                            diagnostics["worker_node_failure"] = crash_worker(identity["node_id"], identity["pid"])
+                            ray.get(monitor.event.remote("worker_node_confirmed_dead", time.monotonic_ns()), timeout=5)
+                        else:
+                            ray.kill(fault["target"], no_restart=True)
                     ray.get(monitor.complete_fault.remote(time.monotonic_ns()), timeout=5)
                 if ready:
                     result = ray.get(future)
@@ -478,11 +595,19 @@ def run_case(options, directory, diagnostics):
                         time.sleep(.01)
                         continue
                     diagnostics["observation"] = observed
+                    diagnostics["fault"] = observed["fault"]
                     validate_observation(observed, options, coordinator, case_args.executor_node_ids)
-                    if nodes_before - {n["NodeID"] for n in ray.nodes() if n["Alive"]} != (
-                        {case_args.owner_node_id} if options["scenario"] in ("head", "head-worker") else set()
-                    ):
-                        raise ValueError("An unrequested node failure occurred")
+                    nodes_after = {n["NodeID"] for n in ray.nodes() if n["Alive"]}
+                    expected_lost = {case_args.owner_node_id} if options["scenario"] in ("head", "head-worker") else set()
+                    if options["scenario"] == "worker-node":
+                        expected_lost.add(diagnostics["worker_node_failure"]["node_id"])
+                        validate_worker_node_failure(observed, options, diagnostics["worker_node_failure"], nodes_after)
+                    expected_live = nodes_before - expected_lost
+                    if "head_replacement" in diagnostics:
+                        expected_live.add(diagnostics["head_replacement"]["replacement_head_node_id"])
+                    if nodes_after != expected_live:
+                        raise ValueError("Unexpected node membership after failure injection")
+                    diagnostics["live_node_ids_after"] = sorted(nodes_after)
                     recovery = recovery_metrics(observed)
                     if options["scenario"] != "none" and recovery["first_resumed_round"] is None:
                         raise ValueError("No all-worker progress was observed after the injected fault")

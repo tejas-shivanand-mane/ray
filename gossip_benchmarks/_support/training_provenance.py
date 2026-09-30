@@ -11,6 +11,7 @@ import sys
 SOURCE_PATHS = (
     "gossip_benchmarks/run_fixed_r_train_comparison.py",
     "gossip_benchmarks/run_fixed_r_train_comparison.sh",
+    "gossip_benchmarks/validate_fixed_r_worker_node.sh",
     "gossip_benchmarks/run_fixed_r_train_coverage.py",
     "gossip_benchmarks/_support/train_comparison.py",
     "gossip_benchmarks/_support/training_provenance.py",
@@ -19,6 +20,7 @@ SOURCE_PATHS = (
     "python/ray/experimental/recovery",
     "python/ray/_private/streaming_recovery.py",
     "python/ray/data/context.py",
+    "python/ray/data/dataset.py",
     "python/ray/data/_internal/execution",
     "python/ray/train",
     "src/ray/core_worker/streaming_recovery_submission.cc",
