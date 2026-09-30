@@ -12,6 +12,7 @@ SOURCE_PATHS = (
     "gossip_benchmarks/run_fixed_r_train_comparison.py",
     "gossip_benchmarks/run_fixed_r_train_comparison.sh",
     "gossip_benchmarks/validate_fixed_r_worker_node.sh",
+    "gossip_benchmarks/validate_fixed_r_worker_nodes.sh",
     "gossip_benchmarks/run_fixed_r_train_coverage.py",
     "gossip_benchmarks/_support/train_comparison.py",
     "gossip_benchmarks/_support/training_provenance.py",

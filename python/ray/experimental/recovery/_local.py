@@ -101,15 +101,18 @@ def local_head_failure_cluster(
                 case_args.producer_concurrency = len(executors)
             survivors = {coordinator.node_id, *case_args.executor_node_ids}
             crashed = False
-            failed_worker = None
+            failed_workers = set()
 
             def crash_worker(node_id, worker_pid):
                 """Remove one executor, including its object store and children."""
                 import psutil
 
-                nonlocal failed_worker
-                if not include_worker_failure or failed_worker is not None:
-                    raise RuntimeError("This fixture permits at most one requested worker-node failure")
+                if not include_worker_failure:
+                    raise RuntimeError("Worker-node failure injection is disabled")
+                if node_id in failed_workers:
+                    raise ValueError("Target executor was already removed")
+                if len(executors) - len(failed_workers) <= 2:
+                    raise ValueError("Worker-node failure must leave two executors for recovery")
                 node = next((node for node in executors if node.node_id == node_id), None)
                 if node is None:
                     raise ValueError("Worker failure must target a known executor, not the head/coordinator")
@@ -126,7 +129,8 @@ def local_head_failure_cluster(
                         pass
                 if worker_pid not in children:
                     raise ValueError("Selected training process is not a child of the target node")
-                failed_worker = node_id
+                failed_workers.add(node_id)
+                survivors.discard(node_id)
                 started = time.monotonic()
                 deadline = started + args.recovery_timeout_s
                 cluster.remove_node(node, allow_graceful=False)

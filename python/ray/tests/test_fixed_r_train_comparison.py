@@ -183,6 +183,7 @@ def test_newer_inflight_checkpoint_must_be_used_on_restart(modules):
     for stage in result["stages"]:
         if stage["worker_id"].startswith("worker-2"):
             stage["restored_checkpoint_rounds"] = 6
+    result["reports"][-2]["rounds"] = 7
     case.validate_observation(result, options(), "coordinator", ("executor-0", "executor-1"))
 
 
@@ -223,3 +224,49 @@ def test_summary_refuses_mixed_builds(modules, key):
     changed["provenance"][key] = "different"
     with pytest.raises(ValueError, match=key):
         runner.summarize([sample("off"), changed])
+
+
+@pytest.mark.parametrize("extra,message", [
+    (["--max-failures", "1"], "at least --worker-node-failures"),
+    (["--checkpoint-frequency", "0"], "positive retry budget and a checkpoint"),
+    (["--failure-after-round", "4"], "start on a checkpoint round"),
+    (["--num-boost-round", "8"], "three rounds after the second"),
+    (["--ungated"], "require the report gate"),
+    (["--scenario", "worker"], "only --scenario worker-node"),
+])
+def test_repeated_node_cli_rejects_invalid_schedule_before_startup(modules, monkeypatch, capsys, extra, message):
+    _, runner = modules
+    monkeypatch.setattr(sys, "argv", ["comparison", "--scenario", "worker-node",
+                                     "--worker-node-failures", "2", "--checkpoint-frequency", "3",
+                                     "--failure-after-round", "3", "--max-failures", "2", *extra])
+    with pytest.raises(SystemExit) as caught:
+        runner.main()
+    assert caught.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_repeated_node_cli_forwards_same_schedule_to_both_arms(modules, monkeypatch, tmp_path):
+    import json
+
+    case, runner = modules
+    seen = []
+
+    def observe(options, pair, directory, provenance):
+        seen.append(dict(options))
+        return {**sample(options["mode"], pair), "scenario": options["scenario"]}
+
+    monkeypatch.setattr(runner, "run_observation", observe)
+    monkeypatch.setattr(runner, "source_provenance", lambda root: {})
+    monkeypatch.setattr(sys, "argv", ["comparison", "--scenario", "worker-node",
+                                     "--worker-node-failures", "2", "--checkpoint-frequency", "3",
+                                     "--failure-after-round", "3", "--max-failures", "2",
+                                     "--include-prediction", "--input-blocks", "8",
+                                     "--result-directory", str(tmp_path)])
+    assert runner.main() == 0
+    assert [options.pop("mode") for options in seen] == ["off", "on"]
+    assert seen[0] == seen[1]
+    assert case.fault_rounds(seen[0]) == [3, 6]
+    assert seen[0]["max_failures"] == 2
+    assert seen[0]["timeout_s"] == 120
+    report = json.loads((tmp_path / "comparison.json").read_text())
+    assert report["worker_node_failure_rounds"] == [3, 6]

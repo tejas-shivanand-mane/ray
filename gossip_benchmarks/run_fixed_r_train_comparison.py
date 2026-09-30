@@ -2,7 +2,7 @@
 
 Default: one two-worker, ten-round, training-only OFF/ON pair, checkpointing
 every five rounds. Each observation gets a fresh subprocess and local cluster.
-Worker-node cases kill one logical node on this host; shared storage survives.
+Worker-node cases kill one or two logical nodes sequentially; shared storage survives.
 """
 
 import argparse
@@ -174,7 +174,8 @@ def run_observation(options, pair, directory, provenance):
         # Retain partial timeline/provenance on timeout; never promote its status.
         if (directory / "case.json").exists():
             partial = json.loads((directory / "case.json").read_text())
-            for key in ("observation", "provenance", "fault", "head_replacement", "worker_node_failure", "native_settings"):
+            for key in ("observation", "provenance", "fault", "faults", "head_replacement",
+                        "worker_node_failure", "worker_node_failures", "native_settings"):
                 if key in partial:
                     sample[key] = partial[key]
     finally:
@@ -204,6 +205,8 @@ def main():
     parser.add_argument("--input-blocks", type=int, default=32, help="1024 rows per block; use 8 for bounded node-loss smoke checks")
     parser.add_argument("--checkpoint-frequency", type=int, default=5)
     parser.add_argument("--max-failures", type=int, default=1, help="Identical Train worker retry budget in both modes")
+    parser.add_argument("--worker-node-failures", type=int, choices=(1, 2), default=1,
+                        help="Sequential node losses, one checkpoint interval apart; requires worker-node")
     parser.add_argument("--failure-after-round", type=int)
     parser.add_argument("--ungated", action="store_true", help="Observe a training trigger without pausing the controller; late injection fails")
     parser.add_argument("--include-prediction", action="store_true", help="Also time and validate the separate original inference pipeline")
@@ -230,6 +233,15 @@ def main():
     if needs_restart and (args.max_failures < 1 or args.checkpoint_frequency < 1
                           or failure_round < args.checkpoint_frequency):
         parser.error("Worker faults require a positive retry budget and a checkpoint before the fault round")
+    if args.worker_node_failures > 1:
+        if scenarios != ["worker-node"]:
+            parser.error("Repeated node loss requires only --scenario worker-node")
+        if args.max_failures < args.worker_node_failures:
+            parser.error("Repeated node loss requires --max-failures at least --worker-node-failures")
+        if failure_round % args.checkpoint_frequency:
+            parser.error("Repeated node loss must start on a checkpoint round")
+        if failure_round + args.checkpoint_frequency >= args.num_boost_round - 2:
+            parser.error("Leave at least three rounds after the second node failure")
     if not needs_fault and (args.failure_after_round is not None or args.ungated):
         parser.error("Fault trigger options require a fault scenario")
     directory = (args.result_directory or Path.home() / "ray-coverage" / (
@@ -244,6 +256,7 @@ def main():
         "failure_after_round": failure_round, "gated": needs_fault and not args.ungated,
         "include_prediction": args.include_prediction, "timeout_s": args.timeout_s,
         "input_blocks": args.input_blocks,
+        "worker_node_failures": args.worker_node_failures,
     }
     report = {
         "profile": "fixed-r-observed-training-comparison", "status": "running",
@@ -251,7 +264,10 @@ def main():
         "source_provenance": provenance, "result_directory": str(directory), "samples": [],
         "preliminary": args.repeats == 1,
         "measurement_scope": "instrumented training wall time excluding cluster startup; matched observers in both modes",
-        "failure_scope": "head processes, training actor, or one logical worker node; shared local GCS/checkpoint/input storage survives",
+        "failure_scope": "head processes, training actor, or sequential logical worker-node losses; shared local GCS/checkpoint/input storage survives",
+        "worker_node_failure_rounds": ([failure_round + i * args.checkpoint_frequency
+                                        for i in range(args.worker_node_failures)]
+                                       if "worker-node" in scenarios else []),
         "input_accounting": "worker-node cases check per-attempt row counts and commutative pandas row hashes",
         "clock_scope": "one Linux host's monotonic clock; not synchronized multi-machine timestamps",
         "comparison": "same fork and external RocksDB head replacement in both arms; native/Data protection OFF versus ON",
@@ -284,6 +300,12 @@ def main():
                 report["samples"].append(sample)
                 save()
                 print(f"  {sample['status']}: {sample.get('error', str(sample.get('training_s', '')) + 's training')}", flush=True)
+                if sample["status"] == "passed" and len(sample.get("recoveries", [])) > 1:
+                    for recovery in sample["recoveries"]:
+                        print(f"    failure {recovery['fault_index']}: restored checkpoint "
+                              f"{recovery['restored_checkpoint_round']}, resumed round "
+                              f"{recovery['first_resumed_round']} after "
+                              f"{recovery['worker_failure_to_first_resumed_round_s']:.3f}s", flush=True)
     report["status"] = "failed" if report["failed_observations"] or report.get("comparison_error") else "passed"
     save()
     for row in report["summary"]:

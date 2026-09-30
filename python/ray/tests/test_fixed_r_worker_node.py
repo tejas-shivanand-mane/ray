@@ -1,5 +1,6 @@
 """Fresh-execution safety and evidence checks for logical worker-node loss."""
 
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,6 +41,20 @@ def test_new_execution_filters_dead_executor_without_retargeting_old_recipe(memb
     assert env.config.executor_for_task(0) == env.executors[0]
     with pytest.raises(ValueError, match="all configured task executors"):
         adapter._owner_alive(env.config)
+
+
+def test_second_new_execution_keeps_both_failed_nodes_out(membership):
+    env = membership
+    env.nodes[2]["Alive"] = False
+    first = adapter.context_for_new_execution(env.context)
+    env.nodes[3]["Alive"] = False
+    # Both an original Dataset context and a once-refreshed context can
+    # survive into prediction. Each must discover the same two survivors.
+    for prior in (env.context, first):
+        second = adapter.context_for_new_execution(prior)
+        assert adapter.get_config(second).executor_node_ids == tuple(env.executors[2:])
+    assert adapter.get_config(first).executor_node_ids == tuple(env.executors[1:])
+    assert env.config.executor_node_ids == tuple(env.executors)
 
 
 @pytest.mark.parametrize("failure", ["unknown", "capacity"])
@@ -156,7 +171,7 @@ def test_input_accounting_detects_same_length_wrong_rows(comparison):
     frame = benchmark.pd.DataFrame({"x": [1., 2., 3., 4.], "labels": [0, 1, 0, 1]})
     expected = benchmark.input_fingerprint(frame)
     groups = [{"workers": [{"worker_id": f"{attempt}-{rank}", "world_rank": rank}
-                            for rank in range(2)]} for attempt in range(2)]
+                            for rank in range(2)]} for attempt in range(3)]
     inputs = [{**w, "fingerprint": benchmark.input_fingerprint(frame.iloc[w["world_rank"]::2])}
               for group in groups for w in group["workers"]]
     observed = {"worker_groups": groups, "inputs": inputs}
@@ -216,3 +231,120 @@ def test_off_node_loss_accepts_native_placement(comparison):
         execution["operators"] = ["ReadParquet->MapBatches(XGBoostPredictor)"]
     case.validate_worker_node_failure(observed, {"mode": "off", "include_prediction": True},
                                       failure, {"live-1", "live-2", "coordinator"})
+
+
+def sequential_observation(case):
+    options = {"scenario": "worker-node", "mode": "on", "worker_node_failures": 2,
+               "num_train_workers": 2, "num_boost_round": 10, "checkpoint_frequency": 3,
+               "failure_after_round": 3, "gated": True, "include_prediction": True}
+    monitor = case.ComparisonMonitor(options)
+    now = 0
+
+    def tick():
+        nonlocal now
+        now += 10**9
+        return now
+
+    controller = {"actor_id": "controller", "node_id": "coordinator"}
+    monitor.controller_event("controller_started", controller, tick())
+    failures = []
+    live = {"a", "b", "c", "d", "coordinator", "head"}
+    for attempt, (nodes, origin, end) in enumerate([
+        (("a", "b"), 0, 3), (("b", "c"), 3, 6), (("c", "d"), 6, 10),
+    ], 1):
+        identities = [{"actor_id": f"actor-{attempt}-{rank}", "worker_id": f"worker-{attempt}-{rank}",
+                       "node_id": node, "pid": attempt * 10 + rank, "world_rank": rank, "world_size": 2,
+                       "restored_checkpoint_rounds": origin,
+                       "restored_checkpoint_path": f"/checkpoint-{origin}" if origin else None}
+                      for rank, node in enumerate(nodes)]
+        monitor.group_started(identities, [w["actor_id"] for w in identities], tick())
+        started = tick()
+        for state in ("started", "finished"):
+            monitor.execution({"execution_id": f"read-{attempt}", "phase": "training", "state": state,
+                               "started_ns": started, "at_ns": tick(), "operators": ["ReadParquet"],
+                               "coordinator_node_id": "coordinator",
+                               "configured_executor_node_ids": sorted(live - {"head", "coordinator"})})
+        for worker in identities:
+            for name in ("checkpoint_load", "data_ingestion", "dmatrix"):
+                start = tick()
+                monitor.stage({"worker_id": worker["worker_id"], "world_rank": worker["world_rank"],
+                               "restored_checkpoint_rounds": origin, "name": name,
+                               "started_ns": start, "finished_ns": tick(), "duration_s": 1.0})
+        for round_count in range(origin + 1, end + 1):
+            gate = monitor.report([{"boosting_rounds": round_count, "restored_checkpoint_rounds": origin}] * 2,
+                                  f"/checkpoint-{round_count}" if round_count % 3 == 0 or round_count == 10 else None,
+                                  tick())
+            assert gate == (round_count == end and attempt < 3)
+        if attempt < 3:
+            assert not monitor.injection_ready()
+            fault = monitor.begin_fault(tick())
+            assert fault["identity"] == identities[0]
+            assert fault["target"] == identities[0]["actor_id"]
+            with pytest.raises(ValueError):
+                monitor.begin_fault(tick())
+            monitor.worker_failure_requested(tick())
+            live.remove(nodes[0])
+            failures.append({"node_id": nodes[0], "training_worker_pid": identities[0]["pid"],
+                             "node_process_pids": [identities[0]["pid"]], "all_node_processes_exited": True,
+                             "gcs_marked_dead": True, "surviving_node_ids": sorted(live)})
+            monitor.event("worker_node_confirmed_dead", tick())
+            monitor.complete_fault(tick())
+            assert monitor.injection_ready()
+            monitor.event("controller_failure_detected", tick())
+    monitor.workers_finished([{k: v for k, v in worker.items() if not k.startswith("restored_checkpoint_")}
+                              for worker in identities], tick())
+    monitor.controller_event("controller_finished", controller, tick())
+    monitor.event("training_finished", tick())
+    started = tick()
+    for state in ("started", "finished"):
+        monitor.execution({"execution_id": "prediction", "phase": "prediction", "state": state,
+                           "started_ns": started, "at_ns": tick(), "operators": ["ReadParquet"],
+                           "coordinator_node_id": "coordinator", "configured_executor_node_ids": ["c", "d"]})
+    monitor.event("pipeline_finished", tick())
+    return monitor.read(), options, failures
+
+
+def test_two_node_failures_restore_distinct_checkpoints_and_report_separate_timings(comparison):
+    case, _ = comparison
+    observed, options, failures = sequential_observation(case)
+    case.validate_observation(observed, options, "coordinator", ("a", "b", "c", "d"))
+    for index, failure in enumerate(failures):
+        case.validate_worker_node_failure(observed, options, failure, set(failure["surviving_node_ids"]),
+                                          fault_index=index)
+    recovery = [case.recovery_metrics(observed, index) for index in range(2)]
+    assert [item["restored_checkpoint_round"] for item in recovery] == [3, 6]
+    assert [item["first_resumed_round"] for item in recovery] == [4, 7]
+    assert all(item["worker_failure_to_detection_s"] == 3 for item in recovery)
+    assert all(item["worker_failure_to_worker_group_ready_s"] == 4 for item in recovery)
+    assert all(item["rollback_reported_rounds"] == 0 for item in recovery)
+    assert recovery[0]["replacement_worker_ids"] == recovery[1]["restarted_worker_ids"]
+    assert case.recovery_metrics(observed) == recovery[-1]
+
+
+@pytest.mark.parametrize("gap", ["missing_fault", "wrong_attempt", "stale_checkpoint", "missing_resume",
+                                      "stale_executor", "missing_read", "missing_prediction", "target_pid"])
+def test_two_node_failures_reject_incomplete_evidence(comparison, gap):
+    case, _ = comparison
+    observed, options, failures = sequential_observation(case)
+    observed = copy.deepcopy(observed)
+    if gap == "missing_fault":
+        observed["faults"].pop()
+    elif gap == "wrong_attempt":
+        observed["faults"][1]["worker_group_attempt"] = 1
+    elif gap == "stale_checkpoint":
+        observed["worker_groups"][2]["workers"][0]["restored_checkpoint_rounds"] = 3
+    elif gap == "missing_resume":
+        observed["reports"] = [r for r in observed["reports"] if not (r["attempt"] == 2 and r["rounds"] == 4)]
+    elif gap == "stale_executor":
+        observed["executions"][-1]["configured_executor_node_ids"].append("a")
+    elif gap == "missing_read":
+        observed["executions"] = [e for e in observed["executions"] if e["execution_id"] != "read-2"]
+    elif gap == "missing_prediction":
+        observed["executions"] = [e for e in observed["executions"] if e["phase"] != "prediction"]
+    else:
+        failures[1]["training_worker_pid"] = -1
+    with pytest.raises(ValueError):
+        case.validate_observation(observed, options, "coordinator", ("a", "b", "c", "d"))
+        for index, failure in enumerate(failures):
+            case.validate_worker_node_failure(observed, options, failure, set(failure["surviving_node_ids"]),
+                                              fault_index=index)

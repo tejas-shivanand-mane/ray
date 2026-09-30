@@ -33,6 +33,14 @@ SCENARIOS = ("none", "worker", "head", "head-worker", "worker-node")
 RESTART_SCENARIOS = ("worker", "head-worker", "worker-node")
 
 
+def fault_rounds(options):
+    if options["scenario"] == "none":
+        return []
+    count = options.get("worker_node_failures", 1) if options["scenario"] == "worker-node" else 1
+    return [options["failure_after_round"] + index * options.get("checkpoint_frequency", 0)
+            for index in range(count)]
+
+
 def register_for_worker_serialization(benchmark):
     # The coverage module also contains progress helper callbacks. Sending the
     # module by value includes those globals, so register their defining module
@@ -56,6 +64,7 @@ class ComparisonMonitor:
         self.trigger = None
         self.checkpoint = None
         self.fault = None
+        self.faults = []
         self.fault_done = False
         self.target = None
         self.controller = {}
@@ -77,8 +86,7 @@ class ComparisonMonitor:
             raise ValueError("Missing training workers")
         attempt = len(self.groups) + 1
         self.groups.append({"attempt": attempt, "at_ns": at_ns, "workers": identities})
-        if attempt == 1:
-            self.target = actors[0]
+        self.target = actors[0]
         self.event("worker_group_ready", at_ns, attempt=attempt)
 
     def workers_finished(self, identities, at_ns):
@@ -119,25 +127,32 @@ class ComparisonMonitor:
         })
         if checkpoint_path:
             self.checkpoint = {"rounds": completed, "path": checkpoint_path, "at_ns": at_ns}
-        if (self.options["scenario"] != "none" and self.trigger is None
-                and attempt == 1 and completed == self.options["failure_after_round"]):
-            self.trigger = {"rounds": completed, "checkpoint": self.checkpoint, "at_ns": at_ns}
+        schedule = fault_rounds(self.options)
+        if (len(self.faults) < len(schedule) and attempt == len(self.faults) + 1
+                and completed == schedule[len(self.faults)]
+                and (self.trigger is None or self.trigger["attempt"] != attempt)):
+            self.trigger = {"rounds": completed, "checkpoint": self.checkpoint,
+                            "at_ns": at_ns, "attempt": attempt}
+            self.fault_done = False
             return self.options["gated"]
         return False
 
     def begin_fault(self, at_ns):
-        if self.fault is not None or self.trigger is None or not self.reports:
+        if (self.trigger is None or not self.reports
+                or self.trigger["attempt"] != len(self.faults) + 1
+                or len(self.faults) >= len(fault_rounds(self.options))):
             raise ValueError("Fault must follow exactly one training trigger")
         latest = self.reports[-1]
-        if latest["attempt"] != 1 or latest["rounds"] >= self.options["num_boost_round"]:
+        if latest["attempt"] != len(self.faults) + 1 or latest["rounds"] >= self.options["num_boost_round"]:
             raise ValueError("Training finished/restarted before fault injection")
         self.fault = {
             "request_ns": at_ns, "last_reported_round": latest["rounds"],
             "last_registered_checkpoint": self.checkpoint,
             "worker_group_attempt": len(self.groups),
         }
+        self.faults.append(self.fault)
         self.event("fault_requested", at_ns)
-        return {"target": self.target, "identity": self.groups[0]["workers"][0], "fault": self.fault}
+        return {"target": self.target, "identity": self.groups[-1]["workers"][0], "fault": self.fault}
 
     def complete_fault(self, at_ns):
         self.fault_done = True
@@ -160,6 +175,7 @@ class ComparisonMonitor:
         return {
             "events": self.events, "worker_groups": self.groups, "reports": self.reports,
             "stages": self.stages, "trigger": self.trigger, "fault": self.fault,
+            "faults": self.faults,
             "fault_done": self.fault_done, "controller": self.controller,
             "finished_workers": self.finished_workers,
             "inputs": self.inputs, "executions": self.executions,
@@ -270,7 +286,8 @@ class ComparisonProbe(WorkerGroupCallback, ControllerCallback, ReportCallback):
 def validate_observation(observation, options, coordinator, executors):
     groups = observation["worker_groups"]
     needs_restart = options["scenario"] in RESTART_SCENARIOS
-    if len(groups) != (2 if needs_restart else 1):
+    schedule = fault_rounds(options)
+    if len(groups) != (1 + len(schedule) if needs_restart else 1):
         raise ValueError("Unexpected number of worker-group attempts")
     controller = observation["controller"]
     if (controller.get("controller_started") != controller.get("controller_finished")
@@ -294,24 +311,38 @@ def validate_observation(observation, options, coordinator, executors):
             raise ValueError("No-failure comparison injected a fault")
     elif not fault or not observation["fault_done"]:
         raise ValueError("Requested fault scenario was not fully exercised")
-    if needs_restart:
+    faults = observation.get("faults", [fault] if fault else [])
+    if len(faults) != len(schedule):
+        raise ValueError("Missing or extra injected faults")
+    for index, fault in enumerate(faults if needs_restart else []):
         if "worker_request_ns" not in fault:
             raise ValueError("Worker failure was not requested")
+        if fault["worker_group_attempt"] != index + 1:
+            raise ValueError("Fault did not target the expected worker-group attempt")
+        if index and fault["worker_request_ns"] <= groups[index]["at_ns"]:
+            raise ValueError("Repeated fault occurred before the preceding recovery")
         if not fault["last_registered_checkpoint"]:
             raise ValueError("Worker recovery has no prior registered checkpoint")
-        old = {w["worker_id"] for w in groups[0]["workers"]}
-        if old & {w["worker_id"] for w in groups[1]["workers"]}:
+        old = {w["worker_id"] for w in groups[index]["workers"]}
+        if old & {w["worker_id"] for w in groups[index + 1]["workers"]}:
             raise ValueError("Expected full Ray Train worker-group replacement")
         # An in-flight report can register a newer checkpoint before restart,
         # especially in ungated cases. Validate the actual restored checkpoint
         # against the controller's history, rather than assuming the trigger's.
         persisted = [r for r in observation["reports"]
-                     if r["attempt"] == 1 and r["checkpoint_path"] and r["at_ns"] <= groups[1]["at_ns"]]
+                     if r["attempt"] == index + 1 and r["checkpoint_path"]
+                     and r["at_ns"] <= groups[index + 1]["at_ns"]]
         latest = max(persisted, key=lambda r: r["at_ns"]) if persisted else None
         restored = {(w["restored_checkpoint_rounds"], w["restored_checkpoint_path"])
-                    for w in groups[1]["workers"]}
+                    for w in groups[index + 1]["workers"]}
         if latest is None or restored != {(latest["rounds"], latest["checkpoint_path"])}:
             raise ValueError("Replacement workers restored the wrong checkpoint")
+        resumed = [r for r in observation["reports"] if r["attempt"] == index + 2]
+        if not resumed or resumed[0]["rounds"] != latest["rounds"] + 1:
+            raise ValueError("Missing first resumed round after worker replacement")
+        if len(schedule) > 1 and (latest["rounds"] != schedule[index]
+                                  or fault["last_reported_round_before_worker_failure"] != schedule[index]):
+            raise ValueError("Sequential failure did not follow its scheduled checkpoint")
     final_workers = [{k: v for k, v in w.items() if not k.startswith("restored_checkpoint_")}
                      for w in groups[-1]["workers"]]
     if observation["finished_workers"] != final_workers:
@@ -356,19 +387,26 @@ def validate_input_partitions(observation, expected):
             raise ValueError("Training input rows/content changed across worker replacement")
 
 
-def validate_worker_node_failure(observation, options, failure, live_nodes):
+def validate_worker_node_failure(observation, options, failure, live_nodes, *, fault_index=0):
     killed = failure["node_id"]
-    target = observation["worker_groups"][0]["workers"][0]
+    target = observation["worker_groups"][fault_index]["workers"][0]
     if (target["node_id"] != killed or target["pid"] != failure["training_worker_pid"]
             or target["pid"] not in failure["node_process_pids"]
             or not failure["all_node_processes_exited"] or not failure["gcs_marked_dead"]
             or killed in live_nodes):
         raise ValueError("Worker-node process loss was not established")
-    if any(w["node_id"] not in live_nodes for w in observation["worker_groups"][1]["workers"]):
+    if any(w["node_id"] not in live_nodes for w in observation["worker_groups"][fault_index + 1]["workers"]):
         raise ValueError("Replacement workers include a dead node")
-    dead_at = next(e["at_ns"] for e in observation["events"] if e["name"] == "worker_node_confirmed_dead")
-    executions = [e for e in observation["executions"] if e["started_ns"] >= dead_at]
-    for phase in (("training", "prediction") if options["include_prediction"] else ("training",)):
+    deaths = [e for e in observation["events"] if e["name"] == "worker_node_confirmed_dead"]
+    if len(deaths) <= fault_index:
+        raise ValueError("Missing confirmed node-death event")
+    dead_at = deaths[fault_index]["at_ns"]
+    faults = observation.get("faults", [])
+    next_request = faults[fault_index + 1]["request_ns"] if fault_index + 1 < len(faults) else math.inf
+    executions = [e for e in observation["executions"]
+                  if dead_at <= e["started_ns"] < next_request and e["at_ns"] < next_request]
+    prediction = options["include_prediction"] and next_request == math.inf
+    for phase in (("training", "prediction") if prediction else ("training",)):
         readers = [e for e in executions if e["phase"] == phase
                    and any(part in ("ReadParquet", "ReadFilesParquetV2")
                            for name in e["operators"] for part in name.split("->"))]
@@ -387,26 +425,37 @@ def validate_worker_node_failure(observation, options, failure, live_nodes):
             raise ValueError("OFF execution unexpectedly enabled Fixed-R")
 
 
-def recovery_metrics(observation):
-    fault = observation["fault"]
+def recovery_metrics(observation, fault_index=None):
+    faults = observation.get("faults", [observation["fault"]] if observation["fault"] else [])
+    fault_index = len(faults) - 1 if fault_index is None else fault_index
+    fault = faults[fault_index] if faults else None
     if not fault:
         return {}
-    events = {e["name"]: e["at_ns"] for e in observation["events"]}
+    next_request = faults[fault_index + 1]["request_ns"] if fault_index + 1 < len(faults) else math.inf
+    events = {e["name"]: e["at_ns"] for e in observation["events"]
+              if fault["request_ns"] <= e["at_ns"] < next_request}
+    # Completion is a whole-workload endpoint; detection and replacement
+    # above belong only to the selected failure interval.
+    events.update({e["name"]: e["at_ns"] for e in observation["events"]
+                   if e["name"] in ("training_finished", "pipeline_finished")})
     worker_request = events.get("worker_failure_requested")
     after = worker_request if worker_request is not None else events.get("head_replacement_ready")
     progress = next((r for r in observation["reports"] if after is not None and r["at_ns"] >= after
-                     and (r["attempt"] > fault["worker_group_attempt"] if worker_request is not None
+                     and (r["attempt"] == fault["worker_group_attempt"] + 1 if worker_request is not None
                           else r["rounds"] > fault["last_reported_round"])), None)
     first_ns = progress["at_ns"] if progress else None
     saved = fault["last_registered_checkpoint"]
     groups = observation["worker_groups"]
-    restored_round = groups[-1]["workers"][0]["restored_checkpoint_rounds"] if worker_request is not None else None
-    old_ids = {w["worker_id"] for w in groups[0]["workers"]}
-    new_ids = {w["worker_id"] for w in groups[-1]["workers"]}
+    old_group = groups[fault["worker_group_attempt"] - 1]
+    new_group = groups[fault["worker_group_attempt"]] if worker_request is not None else old_group
+    restored_round = new_group["workers"][0]["restored_checkpoint_rounds"] if worker_request is not None else None
+    old_ids = {w["worker_id"] for w in old_group["workers"]}
+    new_ids = {w["worker_id"] for w in new_group["workers"]}
     worker_round = fault.get("last_reported_round_before_worker_failure")
     detection = events.get("controller_failure_detected")
-    replacement = groups[-1]["at_ns"] if worker_request is not None else None
+    replacement = new_group["at_ns"] if worker_request is not None else None
     return {
+        "fault_index": fault_index + 1,
         "fault_request_to_first_resumed_round_s": seconds_between(first_ns, fault["request_ns"]),
         "worker_failure_to_first_resumed_round_s": seconds_between(first_ns, worker_request),
         "worker_failure_to_detection_s": seconds_between(detection, worker_request),
@@ -523,15 +572,19 @@ def run_case(options, directory, diagnostics):
                     raise ValueError("Final checkpoint has incorrect model dimensions")
                 observed = ray.get(monitor.read.remote(), timeout=5)
                 if options["scenario"] in RESTART_SCENARIOS:
-                    worker = observed["worker_groups"][-1]["workers"][0]
-                    checkpoint_model = xgb.Booster()
-                    checkpoint_model.load_model(str(Path(worker["restored_checkpoint_path"]) / "model.ubj"))
-                    if checkpoint_model.num_boosted_rounds() != worker["restored_checkpoint_rounds"]:
-                        raise ValueError("Restored checkpoint model disagrees with its reported round count")
-                    if coverage.model_tree_digest(model[:worker["restored_checkpoint_rounds"]]) != coverage.model_tree_digest(checkpoint_model):
-                        raise ValueError("Final model does not preserve the saved checkpoint prefix")
+                    restored_rounds = []
+                    for group in observed["worker_groups"][1:]:
+                        worker = group["workers"][0]
+                        checkpoint_model = xgb.Booster()
+                        checkpoint_model.load_model(str(Path(worker["restored_checkpoint_path"]) / "model.ubj"))
+                        if checkpoint_model.num_boosted_rounds() != worker["restored_checkpoint_rounds"]:
+                            raise ValueError("Restored checkpoint model disagrees with its reported round count")
+                        if coverage.model_tree_digest(model[:worker["restored_checkpoint_rounds"]]) != coverage.model_tree_digest(checkpoint_model):
+                            raise ValueError("Final model does not preserve the saved checkpoint prefix")
+                        restored_rounds.append(worker["restored_checkpoint_rounds"])
                     validation_prefix = {"checkpoint_prefix_preserved": True,
-                                         "restored_checkpoint_rounds": worker["restored_checkpoint_rounds"]}
+                                         "restored_checkpoint_rounds": restored_rounds[-1],
+                                         "all_restored_checkpoint_rounds": restored_rounds}
                 else:
                     validation_prefix = {}
                 validation = {"model_rounds": model.num_boosted_rounds(), "model_features": model.num_features()}
@@ -564,20 +617,21 @@ def run_case(options, directory, diagnostics):
         ).remote()
         deadline = time.monotonic() + options["timeout_s"]
         future = job.run.remote()
-        injected = False
+        injected = 0
+        node_failures = []
         try:
             while time.monotonic() < deadline:
                 remaining = max(.01, deadline - time.monotonic())
                 observed = ray.get(monitor.read.remote(), timeout=min(5, remaining))
                 diagnostics["observation"] = observed
                 ready, _ = ray.wait([future], timeout=0, fetch_local=False)
-                if not injected and observed["trigger"] is not None:
+                if observed["trigger"] is not None and observed["trigger"]["attempt"] > injected:
                     if ready:
                         ray.get(future)
                         raise ValueError("Workload finished before the requested fault")
                     fault = ray.get(monitor.begin_fault.remote(time.monotonic_ns()), timeout=5)
                     diagnostics["fault"] = fault["fault"]
-                    injected = True
+                    injected += 1
                     if options["scenario"] in ("head", "head-worker"):
                         ray.get(monitor.event.remote("head_failure_requested", time.monotonic_ns()), timeout=5)
                         args.recovery_timeout_s = min(30, max(.01, deadline - time.monotonic()))
@@ -589,7 +643,10 @@ def run_case(options, directory, diagnostics):
                             identity = fault["identity"]
                             args.recovery_timeout_s = min(30, max(.01, deadline - time.monotonic()))
                             diagnostics["worker_node_failure"] = crash_worker(identity["node_id"], identity["pid"])
-                            ray.get(monitor.event.remote("worker_node_confirmed_dead", time.monotonic_ns()), timeout=5)
+                            node_failures.append(diagnostics["worker_node_failure"])
+                            diagnostics["worker_node_failures"] = node_failures
+                            ray.get(monitor.event.remote("worker_node_confirmed_dead", time.monotonic_ns(),
+                                                        fault_index=injected, node_id=identity["node_id"]), timeout=5)
                         else:
                             ray.kill(fault["target"], no_restart=True)
                     ray.get(monitor.complete_fault.remote(time.monotonic_ns()), timeout=5)
@@ -604,23 +661,34 @@ def run_case(options, directory, diagnostics):
                         continue
                     diagnostics["observation"] = observed
                     diagnostics["fault"] = observed["fault"]
+                    diagnostics["faults"] = observed["faults"]
                     validate_observation(observed, options, coordinator, case_args.executor_node_ids)
                     nodes_after = {n["NodeID"] for n in ray.nodes() if n["Alive"]}
                     expected_lost = {case_args.owner_node_id} if options["scenario"] in ("head", "head-worker") else set()
                     if options["scenario"] == "worker-node":
-                        expected_lost.add(diagnostics["worker_node_failure"]["node_id"])
-                        validate_worker_node_failure(observed, options, diagnostics["worker_node_failure"], nodes_after)
+                        if len(node_failures) != len(fault_rounds(options)):
+                            raise ValueError("Missing requested worker-node failures")
+                        for index, failure in enumerate(node_failures):
+                            if failure["node_id"] in expected_lost:
+                                raise ValueError("Repeated worker-node failure targeted the same node")
+                            expected_lost.add(failure["node_id"])
+                            expected_survivors = nodes_before - expected_lost
+                            if set(failure["surviving_node_ids"]) != expected_survivors:
+                                raise ValueError("Unexpected membership after a worker-node failure")
+                            validate_worker_node_failure(observed, options, failure, expected_survivors,
+                                                         fault_index=index)
                     expected_live = nodes_before - expected_lost
                     if "head_replacement" in diagnostics:
                         expected_live.add(diagnostics["head_replacement"]["replacement_head_node_id"])
                     if nodes_after != expected_live:
                         raise ValueError("Unexpected node membership after failure injection")
                     diagnostics["live_node_ids_after"] = sorted(nodes_after)
-                    recovery = recovery_metrics(observed)
-                    if options["scenario"] != "none" and recovery["first_resumed_round"] is None:
+                    recoveries = [recovery_metrics(observed, index) for index in range(len(observed["faults"]))]
+                    if any(r["first_resumed_round"] is None for r in recoveries):
                         raise ValueError("No all-worker progress was observed after the injected fault")
-                    return {**result, "recovery": recovery, "validation_status": "passed"}
-                time.sleep(.005 if not injected and options["scenario"] != "none" else .02)
+                    return {**result, "recovery": recoveries[-1] if recoveries else {},
+                            "recoveries": recoveries, "validation_status": "passed"}
+                time.sleep(.005 if injected < len(fault_rounds(options)) else .02)
             raise TimeoutError(f"Training case exceeded {options['timeout_s']:g}s after cluster startup")
         finally:
             ray.kill(job, no_restart=True)
