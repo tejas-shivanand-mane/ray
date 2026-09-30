@@ -98,7 +98,7 @@ def comparison(monkeypatch):
 
 
 @pytest.mark.parametrize("phase", ["training", "prediction"])
-def test_execution_callback_keeps_monitor_out_of_serialized_context(comparison, monkeypatch):
+def test_execution_callback_keeps_monitor_out_of_serialized_context(comparison, monkeypatch, phase):
     from ray import cloudpickle
 
     case, _ = comparison
