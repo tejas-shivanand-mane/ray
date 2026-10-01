@@ -3,6 +3,11 @@
 Audit base: `06444402929e604670fae1af20cfe5bcf52dd189`.
 This is a source review and experiment design, not a new measured result.
 
+Current priority: finite ML workloads, with streaming recovery and optimization
+deferred. The follow-up [batch ML ownership audit](BATCH_ML_OWNERSHIP_AUDIT.md)
+records the applicability decision for existing inference/feature workloads.
+The streaming design below remains a deferred proposal, not the active work plan.
+
 ## What the measurements establish
 
 The tested Fashion-MNIST workloads show no overall performance benefit from
@@ -94,7 +99,7 @@ The release benchmark is not yet a ready local Fixed-R benchmark:
 - The inspected Parquet factory reads validation from the training directory.
   A learning-quality experiment must use a genuine held-out split.
 
-## Next implementation gate
+## Deferred streaming implementation gate
 
 The next step is to establish recoverable ownership and input progress, before
 running another early/middle/late timing matrix. Use a small real-image input
