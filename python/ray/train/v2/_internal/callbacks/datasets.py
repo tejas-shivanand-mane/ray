@@ -79,6 +79,15 @@ class RayDatasetShardProvider:
         except Exception:
             logger.debug("Failed to invoke remote cleanup of Dataset Manager.")
 
+    def abort(self, timeout_s: float) -> None:
+        """Fence this generation, including pending split/barrier requests."""
+        try:
+            ray.get(self._dataset_manager.abort.remote(), timeout=timeout_s)
+        finally:
+            # Also unblock workers waiting in get_dataset_shard. They must see
+            # an error, not continue with a partly consumed old stream.
+            ray.kill(self._dataset_manager, no_restart=True)
+
 
 class DatasetsCallback(WorkerGroupCallback):
     """A callback for managing Ray Datasets for the worker group."""
@@ -131,6 +140,12 @@ class DatasetsCallback(WorkerGroupCallback):
             _propagate_data_context,
             self._data_context,
         )
+
+    def before_worker_group_reuse(self, worker_group: WorkerGroup, timeout_s: float):
+        provider = self._dataset_shard_provider
+        if provider is not None:
+            provider.abort(timeout_s)
+            self._dataset_shard_provider = None
 
     def after_worker_group_shutdown(
         self, worker_group_context: WorkerGroupContext

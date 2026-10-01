@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import timedelta
@@ -57,11 +58,43 @@ class TorchConfig(BackendConfig):
             for environment variable initialization or "tcp" for TCP
             initialization. Defaults to "env".
         timeout_s: Seconds for process group operations to timeout.
+        selective_recovery: Experimental, Train V2 only. Reuse healthy CPU Gloo workers after
+            a failure. All ranks rerun the train function from its beginning;
+            it must restore model, optimizer and progress from get_checkpoint().
+            Ray Data iterators are recreated, not resumed in the middle of an
+            epoch. Unsafe reuse falls back to the normal full group restart.
+            PyTorch documents process-group reinitialization as unsupported/
+            untested. Train fences all surviving ranks through Ray RPCs before
+            reinitializing; validate this opt-in against your PyTorch version.
+        recovery_timeout_s: Budget for fencing old threads and replacing actors.
     """
 
     backend: Optional[str] = None
     init_method: str = "env"
     timeout_s: int = 1800
+    selective_recovery: bool = False
+    recovery_timeout_s: float = 20.0
+
+    def __post_init__(self):
+        if not math.isfinite(self.recovery_timeout_s) or self.recovery_timeout_s <= 0:
+            raise ValueError("recovery_timeout_s must be finite and positive")
+        if self.selective_recovery and self.backend not in (None, "gloo"):
+            raise ValueError("Selective Torch recovery currently requires CPU Gloo")
+        if self.selective_recovery:
+            from ray.train.v2._internal.constants import is_v2_enabled
+
+            if not is_v2_enabled():
+                raise ValueError("Selective Torch recovery requires RAY_TRAIN_V2_ENABLED=1")
+
+    def prepare_worker_for_retry(self):
+        # Called only after the old training thread has terminated. Never
+        # destroy a communicator underneath a live backward/collective call.
+        if dist.is_initialized() and dist.get_backend() != "gloo":
+            raise RuntimeError("Only CPU Gloo process groups can be reused")
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        if dist.is_initialized():
+            raise RuntimeError("Torch process group cleanup was not confirmed")
 
     @property
     def backend_cls(self):
@@ -80,6 +113,8 @@ class TorchConfig(BackendConfig):
             "backend": self.backend,
             "init_method": self.init_method,
             "timeout_s": self.timeout_s,
+            "selective_recovery": self.selective_recovery,
+            "recovery_timeout_s": self.recovery_timeout_s,
         }
         return config_dict
 

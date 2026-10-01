@@ -12,6 +12,8 @@ SOURCE_PATHS = (
     "gossip_benchmarks/run_train_retry_comparison.py",
     "gossip_benchmarks/validate_train_retry.sh",
     "gossip_benchmarks/_support/train_retry.py",
+    "gossip_benchmarks/_support/train_workload.py",
+    "python/ray/train/examples/pytorch/torch_regression_example.py",
     "gossip_benchmarks/run_selective_xgboost_comparison.py",
     "gossip_benchmarks/validate_selective_xgboost.sh",
     "gossip_benchmarks/_support/selective_train.py",

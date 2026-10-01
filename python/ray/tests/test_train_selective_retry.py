@@ -8,7 +8,7 @@ import pytest
 
 from ray.train.v2._internal.execution.worker_group.state import WorkerGroupContext, WorkerGroupState
 from ray.train.v2._internal.execution.worker_group.worker import RayTrainWorker
-from ray.train.v2.xgboost import _selective_restart as restart
+from ray.train.v2._internal.execution.worker_group import selective_restart as restart
 from ray.train.v2.xgboost import recovery
 from ray.train.v2.xgboost.config import XGBoostConfig
 
@@ -81,19 +81,20 @@ def test_prepare_requires_thread_exit_and_native_cleanup(monkeypatch):
     from ray.train.v2._internal.execution.worker_group import worker as module
 
     state = {"running": True, "shutdown": False}
-    context = NS(execution_context=NS(training_thread_runner=NS(
+    context = NS(train_run_context=NS(backend_config=XGBoostConfig()),
+                 execution_context=NS(training_thread_runner=NS(
         is_running=lambda: state["running"])), checkpoint_upload_threadpool=NS(
             shutdown=lambda wait: state.update(shutdown=wait)))
     monkeypatch.setattr(module, "get_train_context", lambda: context)
     actor = RayTrainWorker()
     monkeypatch.setattr(actor, "clear_result_queue", lambda: None)
     monkeypatch.setattr(recovery, "_communicator_cleared", False)
-    assert actor.prepare_xgboost_retry() is False
+    assert actor.prepare_worker_retry() is False
     state["running"] = False
     with pytest.raises(RuntimeError, match="cleanup"):
-        actor.prepare_xgboost_retry()
+        actor.prepare_worker_retry()
     monkeypatch.setattr(recovery, "_communicator_cleared", True)
-    assert actor.prepare_xgboost_retry() is True
+    assert actor.prepare_worker_retry() is True
     assert state["shutdown"] is True
 
 
@@ -118,7 +119,7 @@ def fake_group(monkeypatch):
     events = []
     def actor(name, safe=True):
         return NS(name=name, get_metadata=Remote(lambda: name),
-                  prepare_xgboost_retry=Remote(lambda: safe),
+                  prepare_worker_retry=Remote(lambda: safe),
                   run_train_fn=Remote(lambda ref: events.append(("run", name, ref))),
                   reset=Remote(lambda: events.append(("reset", name))))
     def worker(rank, node):
@@ -142,6 +143,7 @@ def fake_group(monkeypatch):
     group._create_workers = create
     group._init_train_context = lambda ws, sync: events.append(("contexts", [w.actor.name for w in ws]))
     group._callbacks = [NS(
+        before_worker_group_reuse=lambda g, timeout: events.append("abort-old-streams"),
         before_worker_group_shutdown=lambda g: events.append("before-shutdown"),
         after_worker_group_shutdown=lambda c: events.append("after-shutdown"),
         before_worker_group_start=lambda c: events.append(("attempt", c.run_attempt_id)),
@@ -170,6 +172,7 @@ def test_retry_preserves_actor_and_resets_generation(fake_group):
     assert group._world_rank_to_ongoing_poll == {}
     assert group._latest_poll_status is None
     assert ("attempt", "new-attempt") in events
+    assert events.index("abort-old-streams") < events.index(("create", 0))
     assert events.index("backend-and-reports-reset") < events.index(("run", "old-1", "train-fn"))
 
 
@@ -177,7 +180,7 @@ def test_unsafe_communicator_falls_back_before_replacement(fake_group):
     group, events = fake_group
     def fail():
         raise RuntimeError("communicator remains active")
-    group.get_workers()[1].actor.prepare_xgboost_retry = Remote(fail)
+    group.get_workers()[1].actor.prepare_worker_retry = Remote(fail)
     assert restart.try_restart(group, "new", 5) is False
     assert not any(isinstance(e, tuple) and e[0] == "create" for e in events)
 
@@ -198,6 +201,71 @@ def test_partial_replacements_are_tracked_for_fallback_cleanup(fake_group):
     assert restart.try_restart(group, "new", 5) is False
     assert group.get_workers()[0].actor.name == "new-0"
     assert not any(isinstance(e, tuple) and e[0] == "run" for e in events)
+
+
+def test_data_fencing_failure_prevents_actor_reuse(fake_group):
+    group, events = fake_group
+    def fail(*args):
+        raise TimeoutError("Old input stream did not stop")
+    group._callbacks[0].before_worker_group_reuse = fail
+    assert restart.try_restart(group, "new", 5) is False
+    assert not any(isinstance(e, tuple) and e[0] in ("create", "run") for e in events)
+
+
+def test_torch_cleanup_requires_gloo_and_clears_default_group(monkeypatch):
+    pytest.importorskip("torch")
+    from ray.train.torch import config as module
+
+    state = {"initialized": True, "backend": "nccl", "destroyed": False}
+    monkeypatch.setattr(module.dist, "is_initialized", lambda: state["initialized"])
+    monkeypatch.setattr(module.dist, "get_backend", lambda: state["backend"])
+    monkeypatch.setattr(module.dist, "destroy_process_group",
+                        lambda: state.update(initialized=False, destroyed=True))
+    with pytest.raises(RuntimeError, match="Gloo"):
+        module.TorchConfig().prepare_worker_for_retry()
+    assert not state["destroyed"]
+    state["backend"] = "gloo"
+    module.TorchConfig().prepare_worker_for_retry()
+    assert state["destroyed"] and not state["initialized"]
+
+
+def test_unknown_backend_cannot_be_reused():
+    from ray.train.backend import BackendConfig
+
+    with pytest.raises(NotImplementedError, match="does not support"):
+        BackendConfig().prepare_worker_for_retry()
+
+
+def test_aborting_dataset_generation_kills_coordinators_even_on_cleanup_error(monkeypatch):
+    from ray.train.v2._internal.data_integration import dataset_manager as module
+
+    manager = object.__new__(module.DatasetManager)
+    manager._coordinator_actors = ["old-split"]
+    def fail():
+        raise RuntimeError("shutdown failed")
+    manager.shutdown_data_executors = fail
+    killed = []
+    monkeypatch.setattr(module.ray, "kill", lambda actor, **kw: killed.append(actor))
+    with pytest.raises(RuntimeError, match="shutdown failed"):
+        manager.abort()
+    assert killed == ["old-split"]
+    assert manager._coordinator_actors == []
+
+
+def test_aborting_provider_also_fences_pending_shard_requests(monkeypatch):
+    from ray.train.v2._internal.callbacks import datasets as module
+
+    provider = object.__new__(module.RayDatasetShardProvider)
+    manager = NS(abort=Remote(lambda: None))
+    provider._dataset_manager = manager
+    def timeout(*args, **kwargs):
+        raise TimeoutError("manager blocked")
+    killed = []
+    monkeypatch.setattr(module.ray, "get", timeout)
+    monkeypatch.setattr(module.ray, "kill", lambda actor, **kw: killed.append(actor))
+    with pytest.raises(TimeoutError):
+        provider.abort(1)
+    assert killed == [manager]
 
 
 def test_controller_uses_standard_path_when_opt_in_is_off(monkeypatch):
@@ -245,7 +313,8 @@ def test_controller_requires_checkpoint_and_falls_back(monkeypatch, committed, r
     assert calls == (["reuse"] if reused else (["reuse"] if committed else []) + ["shutdown", "start"])
 
 
-def test_benchmark_payload_does_not_require_support_module(monkeypatch, tmp_path):
+@pytest.mark.parametrize("module_name", ["train_retry", "train_workload"])
+def test_benchmark_payload_does_not_require_support_module(monkeypatch, tmp_path, module_name):
     import importlib
     import subprocess
     import sys
@@ -254,18 +323,21 @@ def test_benchmark_payload_does_not_require_support_module(monkeypatch, tmp_path
     root = Path(__file__).resolve().parents[3]
     monkeypatch.syspath_prepend(str(root / "gossip_benchmarks"))
     monkeypatch.syspath_prepend(str(root / "gossip_benchmarks/_support"))
-    module = importlib.import_module("train_retry")
+    module = importlib.import_module(module_name)
     ray.cloudpickle.register_pickle_by_value(module)
     try:
         path = tmp_path / "payload.pkl"
-        path.write_bytes(ray.cloudpickle.dumps((module.Job, module.InputLoader,
-                                               module.CommitEvidence, module.train_loop)))
+        payload = ((module.Job, module.InputLoader, module.CommitEvidence, module.train_loop)
+                   if module_name == "train_retry" else
+                   (module.WorkloadObserver, module.ReportGate, module.observe_function,
+                    module.checkpoint_files))
+        path.write_bytes(ray.cloudpickle.dumps(payload))
         subprocess.run([sys.executable, "-c", '''
 import importlib.abc, sys
 import ray.cloudpickle
 class Block(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname in {"train_retry", "run_fixed_r_train_coverage"}:
+        if fullname in {"train_retry", "train_workload", "training_provenance", "run_fixed_r_train_coverage"}:
             raise ImportError("benchmark module unavailable")
 sys.meta_path.insert(0, Block())
 with open(sys.argv[1], "rb") as f:

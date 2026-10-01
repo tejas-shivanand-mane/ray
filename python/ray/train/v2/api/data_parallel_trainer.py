@@ -113,6 +113,20 @@ class DataParallelTrainer:
 
         self._validate_configs()
 
+        if getattr(self.backend_config, "selective_recovery", False):
+            if (self.running_in_local_mode or self.scaling_config.use_gpu
+                    or self.scaling_config.use_tpu or self.scaling_config.elasticity_enabled
+                    or self.scaling_config._resources_per_worker_not_none.get("GPU", 0)
+                    or self.scaling_config._resources_per_worker_not_none.get("TPU", 0)
+                    or validation_config is not None
+                    or self.backend_config.backend_cls.has_replica_groups):
+                raise ValueError(
+                    "Selective recovery requires fixed-size distributed CPU training "
+                    "without checkpoint validation or replica groups."
+                )
+            if type(self.backend_config).prepare_worker_for_retry is BackendConfig.prepare_worker_for_retry:
+                raise ValueError("This backend does not support selective worker recovery")
+
         usage_lib.record_library_usage("train")
         tag_train_v2_trainer(self)
         if self.scaling_config.elasticity_enabled:

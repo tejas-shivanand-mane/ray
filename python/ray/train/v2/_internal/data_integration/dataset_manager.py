@@ -172,3 +172,12 @@ class DatasetManager:
             logger.exception(
                 "Failed to gracefully terminate the Ray Data executor for each running dataset."
             )
+
+    def abort(self) -> None:
+        """Terminate coordinators so outstanding reads cannot cross a retry."""
+        try:
+            self.shutdown_data_executors()
+        finally:
+            for coordinator in self._coordinator_actors:
+                ray.kill(coordinator, no_restart=True)
+            self._coordinator_actors.clear()

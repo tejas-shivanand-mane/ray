@@ -79,6 +79,14 @@ class WorkerGroupCallback(ExecutionGroupCallback):
         should catch and handle exceptions if attempting to execute tasks."""
         return self.before_execution_group_shutdown(worker_group)
 
+    def before_worker_group_reuse(self, worker_group: "WorkerGroup", timeout_s: float):
+        """Fence input streams before attempting to reuse surviving actors.
+
+        Training threads may still be running. Do not reset their contexts or
+        communication backends here. Raising forces a full worker restart.
+        """
+        pass
+
     def after_worker_group_shutdown(self, worker_group_context: "WorkerGroupContext"):
         """Called after the worker group is shut down."""
         pass

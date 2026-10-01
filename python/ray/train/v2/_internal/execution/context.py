@@ -414,6 +414,10 @@ class TrainContext:
                     "or save tensors as part of the checkpoint files instead."
                 )
 
+        if (checkpoint_upload_mode == CheckpointUploadMode.ASYNC
+                and getattr(self.train_run_context.backend_config, "selective_recovery", False)):
+            raise ValueError("Selective worker recovery requires synchronous checkpoint reports")
+
         if validation and not self.has_validation_fn:
             raise ValueError(
                 "`validation_config` was not set on the trainer, but a validation was requested."

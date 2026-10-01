@@ -37,7 +37,7 @@ def try_restart(worker_group, run_attempt_id, timeout_s):
     def remaining():
         value = deadline - time.monotonic()
         if value <= 0:
-            raise TimeoutError("Selective XGBoost retry deadline expired")
+            raise TimeoutError("Selective worker retry deadline expired")
         return value
 
     try:
@@ -61,10 +61,14 @@ def try_restart(worker_group, run_attempt_id, timeout_s):
         # Fence an unavailable-but-not-yet-dead actor before making a replacement.
         for rank in dead:
             ray.kill(workers[rank].actor, no_restart=True)
+        # Fence old data streams before waiting for user threads. A healthy
+        # worker may be blocked on a split whose other consumer has died.
+        for callback in group._callbacks:
+            callback.before_worker_group_reuse(group, remaining())
         ray.get(group._worker_group_state.sync_actor.reset.remote(), timeout=remaining())
         pending = set(range(len(workers))) - dead
         while pending:
-            refs = {rank: workers[rank].actor.prepare_xgboost_retry.remote()
+            refs = {rank: workers[rank].actor.prepare_worker_retry.remote()
                     for rank in pending}
             for rank, ref in refs.items():
                 if ray.get(ref, timeout=remaining()):
@@ -119,9 +123,9 @@ def try_restart(worker_group, run_attempt_id, timeout_s):
                 timeout=remaining())
         for callback in group._callbacks:
             callback.after_worker_group_training_start(group)
-        logger.info("Selective XGBoost retry replaced ranks %s; preserved ranks %s",
+        logger.info("Selective worker retry replaced ranks %s; preserved ranks %s",
                     sorted(dead), sorted(set(range(len(workers))) - dead))
         return True
     except Exception:
-        logger.exception("Selective XGBoost retry unavailable; falling back to full restart")
+        logger.exception("Selective worker retry unavailable; falling back to full restart")
         return False

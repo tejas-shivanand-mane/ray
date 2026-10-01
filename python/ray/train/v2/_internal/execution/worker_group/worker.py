@@ -257,19 +257,16 @@ class RayTrainWorker:
                 break
         return had_result
 
-    def prepare_xgboost_retry(self) -> bool:
+    def prepare_worker_retry(self) -> bool:
         """Fence the old training thread before installing another TrainContext."""
         context = get_train_context()
         self.clear_result_queue()
         if context.execution_context.training_thread_runner.is_running():
             return False
-        from ray.train.v2.xgboost import recovery
-
-        if not recovery._communicator_cleared:
-            raise RuntimeError("XGBoost communicator cleanup was not confirmed")
         # Synchronous checkpointing is required by the current reuse path.
         # No old upload may outlive a context reset.
         context.checkpoint_upload_threadpool.shutdown(wait=True)
+        context.train_run_context.backend_config.prepare_worker_for_retry()
         self.clear_result_queue()
         return True
 

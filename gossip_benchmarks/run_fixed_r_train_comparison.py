@@ -91,7 +91,9 @@ def child_case(path):
             if key.startswith("RAY_RECOVERY_") or key in ("RAY_EXPERIMENTAL_RECOVERY", "RAY_DATA_EXECUTION_CALLBACKS", "RAY_ADDRESS"):
                 os.environ.pop(key)
         import ray
-        if options.get("training_strategy") == "ray-train-selective":
+        if options.get("training_strategy") == "ray-train-workload":
+            from train_workload import run_case
+        elif options.get("training_strategy") == "ray-train-selective":
             from train_retry import run_case
         elif options.get("training_strategy") == "checkpoint-boundary":
             from selective_train import run_case

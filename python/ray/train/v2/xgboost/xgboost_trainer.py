@@ -161,18 +161,6 @@ class XGBoostTrainer(DataParallelTrainer):
             validation_config=validation_config,
         )
 
-        if getattr(self.backend_config, "selective_recovery", False):
-            if (self.running_in_local_mode or self.scaling_config.use_gpu
-                    or self.scaling_config.use_tpu or self.scaling_config.elasticity_enabled
-                    or self.scaling_config._resources_per_worker_not_none.get("GPU", 0)
-                    or self.scaling_config._resources_per_worker_not_none.get("TPU", 0)
-                    or self.datasets or validation_config is not None):
-                raise ValueError(
-                    "Selective XGBoost recovery requires fixed-size distributed CPU "
-                    "training with immutable rank partitions loaded inside the train "
-                    "function; Trainer datasets and checkpoint validation are unsupported."
-                )
-
     @classmethod
     @Deprecated
     def get_model(cls, checkpoint: Checkpoint):

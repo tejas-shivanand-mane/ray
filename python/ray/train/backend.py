@@ -41,6 +41,14 @@ class BackendConfig:
         """
         return {}
 
+    def prepare_worker_for_retry(self) -> None:
+        """Release backend state after the previous training thread has exited.
+
+        Opt-in Train V2 worker reuse calls this on each surviving actor before
+        creating a new context or communicator. Unsupported backends fail closed.
+        """
+        raise NotImplementedError("This backend does not support worker reuse")
+
 
 @DeveloperAPI
 class Backend(metaclass=Singleton):

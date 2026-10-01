@@ -17,7 +17,8 @@ class XGBoostConfig(XGBoostConfigV1):
     training function on all ranks with the latest Ray Train checkpoint.
     Training code must restore that checkpoint and rebuild its DMatrix. Use
     ``get_cached_input`` with immutable, fixed rank partitions to retain input.
-    Shared streaming dataset shards, elastic world sizes and GPUs are excluded.
+    Ray Data shards are recreated on retry; streaming iterator state is not retained.
+    Elastic world sizes and GPUs are excluded.
     FailureConfig still controls retries. Unsafe reuse falls back to a full
     group restart; it is never reported as selective recovery.
     """
@@ -34,6 +35,12 @@ class XGBoostConfig(XGBoostConfigV1):
     def to_dict(self):
         return {**super().to_dict(), "selective_recovery": self.selective_recovery,
                 "recovery_timeout_s": self.recovery_timeout_s}
+
+    def prepare_worker_for_retry(self):
+        from ray.train.v2.xgboost import recovery
+
+        if not recovery._communicator_cleared:
+            raise RuntimeError("XGBoost communicator cleanup was not confirmed")
 
     @property
     def train_func_context(self):
