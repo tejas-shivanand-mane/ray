@@ -432,6 +432,7 @@ class WorkerGroup(ExecutionGroup):
         starting_world_rank: int = 0,
         world_size: Optional[int] = None,
         replica_group_size: Optional[int] = None,
+        startup_timeout_s: Optional[float] = None,
     ) -> List[Worker]:
         """Create worker actors at placement group bundle indices.
 
@@ -453,6 +454,7 @@ class WorkerGroup(ExecutionGroup):
                 local_rank and local_world_size are computed per
                 (node, replica group) pair. If None, all workers are treated
                 as a single group.
+            startup_timeout_s: Optional timeout for replacement actor readiness.
 
         Returns:
             Sorted list of Workers sorted by world_rank.
@@ -481,8 +483,9 @@ class WorkerGroup(ExecutionGroup):
         ]
 
         try:
-            actor_metadatas = ray.get([actor.get_metadata.remote() for actor in actors])
-        except RayActorError as actor_error:
+            actor_metadatas = ray.get([actor.get_metadata.remote() for actor in actors],
+                                     timeout=startup_timeout_s)
+        except (RayActorError, ray.exceptions.GetTimeoutError) as actor_error:
             for actor in actors:
                 ray.kill(actor)
 

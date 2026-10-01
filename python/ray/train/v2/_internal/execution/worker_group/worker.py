@@ -3,6 +3,8 @@ import os
 import queue
 import socket
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, TypeVar, Union
@@ -255,6 +257,22 @@ class RayTrainWorker:
                 break
         return had_result
 
+    def prepare_xgboost_retry(self) -> bool:
+        """Fence the old training thread before installing another TrainContext."""
+        context = get_train_context()
+        self.clear_result_queue()
+        if context.execution_context.training_thread_runner.is_running():
+            return False
+        from ray.train.v2.xgboost import recovery
+
+        if not recovery._communicator_cleared:
+            raise RuntimeError("XGBoost communicator cleanup was not confirmed")
+        # Synchronous checkpointing is required by the current reuse path.
+        # No old upload may outlive a context reset.
+        context.checkpoint_upload_threadpool.shutdown(wait=True)
+        self.clear_result_queue()
+        return True
+
     def shutdown(self):
         """Shutdown the worker.
 
@@ -302,6 +320,8 @@ class RayTrainWorker:
             dataset_shard_provider=dataset_shard_provider,
             has_validation_fn=has_validation_fn,
             current_report_index=current_report_index,
+            report_order_condition=threading.Condition(),
+            checkpoint_upload_threadpool=ThreadPoolExecutor(max_workers=1),
         )
         # Configure the train and root logger for the worker processes.
         if ray_constants.env_bool(

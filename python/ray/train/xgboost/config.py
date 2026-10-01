@@ -115,10 +115,21 @@ class _XGBoostRabitBackend(Backend):
         self, worker_group: BaseWorkerGroup, backend_config: XGBoostConfig
     ):
         assert backend_config.xgboost_communicator == "rabit"
+        if (getattr(backend_config, "selective_recovery", False)
+                and self._wait_thread is not None and self._wait_thread.is_alive()):
+            raise RuntimeError("Cannot restart with an old XGBoost tracker still running")
         self._setup_xgboost_distributed_backend(worker_group)
 
     def on_shutdown(self, worker_group: BaseWorkerGroup, backend_config: XGBoostConfig):
         timeout = 5
+
+        if getattr(backend_config, "selective_recovery", False) and self._tracker is not None:
+            # Failed ranks cannot send tracker shutdown. Explicitly terminate
+            # this generation before starting a fresh communicator.
+            try:
+                self._tracker.free()
+            except xgboost.core.XGBoostError:
+                logger.debug("Interrupted XGBoost tracker shutdown", exc_info=True)
 
         if self._wait_thread is not None:
             self._wait_thread.join(timeout=timeout)

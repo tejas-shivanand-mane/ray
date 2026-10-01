@@ -297,7 +297,21 @@ class TrainController:
             poll_status.failing_replica_group_indices if poll_status else set()
         )
         all_rgs = poll_status.all_replica_group_indices if poll_status else set()
-        if (
+        reused_xgboost_workers = False
+        backend_config = self._train_run_context.backend_config
+        if (getattr(backend_config, "selective_recovery", False)
+                and self._worker_group and poll_status and poll_status.errors
+                and self._checkpoint_manager.latest_checkpoint_result is not None
+                and decision.num_workers == current_num_workers):
+            from ray.train.v2.xgboost._selective_restart import try_restart
+
+            reused_xgboost_workers = try_restart(
+                self._worker_group, self._get_run_attempt_id(),
+                backend_config.recovery_timeout_s,
+            )
+        if reused_xgboost_workers:
+            pass
+        elif (
             self._manages_replica_groups
             and bool(failing_rgs)
             and failing_rgs != all_rgs
