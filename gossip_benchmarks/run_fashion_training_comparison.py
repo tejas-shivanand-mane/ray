@@ -3,6 +3,8 @@
 Uses all 60,000 Fashion-MNIST training and 10,000 test images, identical fixed
 epochs and application checkpoints. By default compare head-node process loss
 and worker-node process loss after early/middle/late committed training epochs.
+Use --failure-timing active to interrupt the next unfinished epoch after real
+optimizer updates, keeping the previous epoch as the latest checkpoint.
 One shared no-failure pair plus six fault pairs: 14 observations per repetition.
 Head replacement preserves GCS storage; the off-head driver survives. These
 are logical nodes on one physical machine, not physical-machine failures.
@@ -42,11 +44,14 @@ def run_comparison(args, directory, provenance):
     kinds = list(dict.fromkeys(args.failure_kind))
     cases = comparison_cases(args.epochs, args.failure_point, kinds)
     identity = input_identity(args.data_directory)
+    timing = getattr(args, "failure_timing", "boundary")
+    step = getattr(args, "fault_after_step", 59)
     report = {
         "profile": "fashion-mnist-failure-matrix", "status": "running",
         "source_provenance": provenance, "input_identity": identity,
         "training_epochs": args.epochs, "failure_epochs": points,
         "failure_kinds": kinds, "cases": cases,
+        "failure_timing": timing, "fault_after_step": step if timing == "active" else None,
         "observations_per_repetition": 2 * len(cases), "placement_strategy": "STRICT_SPREAD",
         "samples": [], "pairs": [], "failed_observations": [], "preliminary": args.repeats == 1,
         "comparison_axis": "ordinary Ray OFF/full retry versus Fixed-R ON/selective retry",
@@ -56,7 +61,8 @@ def run_comparison(args, directory, provenance):
             "head-node cases replace head processes during training; local GCS RocksDB storage, driver and executors survive",
             "worker-node cases kill one executor's raylet, object store and children; replacement workers use surviving executors",
             "both arms use STRICT_SPREAD across logical worker nodes, with one Train retry and application checkpoints",
-            "failure is gated immediately after a committed epoch; unfinished minibatch work is not measured",
+            (f"failure follows {step} optimizer updates per rank inside the next uncommitted epoch; both ranks gated, not an in-flight-kernel fault"
+             if timing == "active" else "failure is gated immediately after a committed epoch; unfinished minibatch work is not measured"),
             "failure-to-next-report includes the next training epoch, validation and checkpoint/report costs",
             "preprocessing is materialized before training; default ownership, no forced head-owner topology or guaranteed OFF failure",
             "head recovery may continue without restarting training workers; the actual retry and replay evidence is recorded",
@@ -84,6 +90,7 @@ def run_comparison(args, directory, provenance):
                     "mode": mode, "restart_scope": scope, "owner_placement": "default",
                     "timeout_s": args.timeout_s, "training_epochs": args.epochs,
                     "fault_after_epoch": epoch, "data_directory": str(args.data_directory),
+                    "failure_timing": timing, "fault_after_step": step,
                     "input_identity": identity,
                     "workload": str(ROOT / "gossip_benchmarks/workloads/fashion_mnist.py"),
                     "workload_args": ["--data-directory", str(args.data_directory), "--epochs", str(args.epochs)],
@@ -157,6 +164,10 @@ def main():
                         help="Default: head-node and worker-node; worker retains the process-only experiment")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-s", type=float, default=180)
+    parser.add_argument("--failure-timing", choices=("boundary", "active"), default="boundary",
+                        help="Active: fault inside an unfinished epoch, after real optimizer updates")
+    parser.add_argument("--fault-after-step", type=int, default=59,
+                        help="For active mode: completed updates per rank in the uncheckpointed epoch (1..117)")
     args = parser.parse_args()
     if sys.platform != "linux" or args.repeats < 1 or args.epochs < 4:
         parser.error("Use Linux, positive repeats and at least four epochs")
@@ -164,6 +175,9 @@ def main():
         parser.error("Use a finite positive observation timeout")
     args.failure_point = args.failure_point or ["early", "middle", "late"]
     args.failure_kind = args.failure_kind or ["head-node", "worker-node"]
+    if args.failure_timing == "active" and (
+            "worker" in args.failure_kind or not 0 < args.fault_after_step < 118):
+        parser.error("Active timing supports head-node/worker-node and steps 1..117")
     args.data_directory = args.data_directory.resolve()
     directory = args.result_directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
