@@ -530,7 +530,10 @@ def test_ordinary_shuffle_observes_actual_owner_and_loss(monkeypatch, tmp_path, 
     root = Path(__file__).resolve().parents[3]
     monkeypatch.syspath_prepend(str(root / "gossip_benchmarks/_support"))
     module = importlib.import_module("train_workload")
-    address = Address(node_id=b"head", worker_id=b"owner").SerializeToString()
+    head_id = module.ray.NodeID.from_random()
+    executor_id = module.ray.NodeID.from_random()
+    owner_id = module.ray.WorkerID.from_random()
+    address = Address(node_id=head_id.binary(), worker_id=owner_id.binary()).SerializeToString()
     ref = NS(hex=lambda: "metadata", task_id=lambda: NS(hex=lambda: "task"))
     refs, calls, diagnostics = [object(), ref], [], {}
     loss = module.ray.exceptions.OwnerDiedError("metadata", address, "test")
@@ -554,7 +557,7 @@ def test_ordinary_shuffle_observes_actual_owner_and_loss(monkeypatch, tmp_path, 
         def wrap(cls):
             assert cls is module.OrdinaryShuffleOwner
             def placed(**options):
-                assert options["scheduling_strategy"].node_id == b"head".hex()
+                assert options["scheduling_strategy"].node_id == head_id.hex()
                 return NS(remote=lambda: owner)
             return NS(options=placed)
         return wrap
@@ -581,24 +584,24 @@ def test_ordinary_shuffle_observes_actual_owner_and_loss(monkeypatch, tmp_path, 
     if owner_lost:
         (tmp_path / "release-data-owner").touch()
     with module.matched_shuffle_ownership(
-        tmp_path, False, b"head".hex(), ("executor",), diagnostics, owner_lost,
+        tmp_path, False, head_id.hex(), (executor_id.hex(),), diagnostics, owner_lost,
     ):
         mapper = pull.cached_remote_fn(ShuffleTaskSpec.map).options(num_returns=2)
         args = (0, object(), 1, None, None, True, 0)
         assert mapper.remote(*args) is refs
         assert real_owner.refs is refs
-        assert calls[0]["scheduling_strategy"].node_id == "executor"
+        assert calls[0]["scheduling_strategy"].node_id == executor_id.hex()
         assert calls[0]["num_returns"] == 2 and calls[0]["max_retries"] == 1
         assert calls[1] == args
         if owner_lost:
             with pytest.raises(module.ray.exceptions.OwnerDiedError):
                 BaseProgressBar.fetch_until_complete(None, [ref])
             assert diagnostics["ordinary_owner_loss"]["object_ref_hex"] == "metadata"
-            assert diagnostics["ordinary_owner_loss"]["owner_node_id"] == b"head".hex()
+            assert diagnostics["ordinary_owner_loss"]["owner_node_id"] == head_id.hex()
         else:
             assert BaseProgressBar.fetch_until_complete(None, [ref]) == ["metadata-value"]
             assert "ordinary_owner_loss" not in diagnostics
-    assert diagnostics["shuffle_owner"]["owner_node_id"] == b"head".hex()
+    assert diagnostics["shuffle_owner"]["owner_node_id"] == head_id.hex()
     assert diagnostics["shuffle_owner"]["task_id"] == "task"
     assert calls[-1] == "retired"
     assert BaseProgressBar.fetch_until_complete is fetch
