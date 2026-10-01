@@ -924,10 +924,11 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
         diagnostics["feature_identity"] = observed
         script_args += ["--validation-output", str(directory / "validation-features.npz")]
     training_epochs = options.get("training_epochs")
+    minimum_epochs = 2 if streaming_learning and options["scenario"] == "none" else 3
     if training_epochs is not None and (
-        not supported or type(training_epochs) is not int or training_epochs < 3
+        not supported or type(training_epochs) is not int or training_epochs < minimum_epochs
     ):
-        raise ValueError("Epoch override requires a supported workload and at least three epochs")
+        raise ValueError(f"Epoch override requires a supported workload and at least {minimum_epochs} epochs")
     if regression and not script_args:
         script_args = ["--num-workers", "2", "--data-path", prepare_regression_input(directory)]
     selective = options["restart_scope"] == "selective"
@@ -992,28 +993,48 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
     context, original_callbacks = None, None
 
     class ExchangeObserver(ExecutionCallback):
-        def record(self, executor):
+        def before_execution_starts(self, executor):
+            self._record_id = uuid.uuid4().hex
+            self._last_snapshot = time.monotonic()
+
+        def record(self, executor, state):
             exchanges = [
                 {"operator": op.name, **op.metrics.extra_metrics}
                 for op in executor._topology if isinstance(op, AllToAllOperator)
             ]
-            if exchanges:
+            if exchanges and state != "running":
                 write_record(directory / "exchanges" / f"{uuid.uuid4().hex}.json", exchanges)
             if streaming_learning:
-                write_record(directory / "data-executions" / f"{uuid.uuid4().hex}.json", {
+                # Replace each execution's snapshot, never accumulate repeated
+                # cumulative counters as though they were separate executions.
+                write_record(directory / "data-executions" / f"{self._record_id}.json", {
                     "time_ns": time.monotonic_ns(),
+                    "state": state,
                     "node_id": ray.get_runtime_context().get_node_id(),
                     "worker_id": ray.get_runtime_context().get_worker_id(),
-                    "operators": [{"operator": op.name, **{
+                    "operators": [{"operator": op.name,
+                        "runtime_metrics": {key: getattr(op.metrics, key) for key in (
+                            "num_tasks_submitted", "num_tasks_finished", "num_tasks_failed",
+                            "task_submission_backpressure_time", "task_output_backpressure_time",
+                            "task_completion_time_s", "task_output_backpressure_time_s",
+                            "obj_store_mem_spilled", "obj_store_mem_freed",
+                        )}, **{
                         key: value for key, value in op.metrics.extra_metrics.items() if key.startswith("fixed_r_")}}
                                   for op in executor._topology],
                 })
 
         def after_execution_succeeds(self, executor):
-            self.record(executor)
+            self.record(executor, "completed")
 
         def after_execution_fails(self, executor, error):
-            self.record(executor)
+            self.record(executor, "failed")
+
+        def on_execution_step(self, executor):
+            if streaming_learning and options.get("profile_fixed_r"):
+                now = time.monotonic()
+                if now - self._last_snapshot >= 5:
+                    self.record(executor, "running")
+                    self._last_snapshot = now
 
     def configure(trainer, train_loop_per_worker, **kwargs):
         if supported:
@@ -1071,6 +1092,7 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
             context.enable_fixed_r_task_recovery = enabled
             context.fixed_r_task_recovery_output_mode = "streaming"
             context.fixed_r_task_recovery_timeout_s = 30
+            context.set_config("fixed_r_profile_timing", bool(options.get("profile_fixed_r")))
             context.execution_options.preserve_order = True
             context.enable_progress_bars = False
             if options.get("comparison") in ("fixed-r", "integrated"):

@@ -117,6 +117,14 @@ def validate_learning(directory, options, diagnostics):
     diagnostics["fixed_r_recovered_tasks"] = sum(op.get("fixed_r_recovered_tasks", 0) for op in operators)
     if options["mode"] == "on" and diagnostics["fixed_r_enrolled_tasks"] == 0:
         raise ValueError("ON run lacks Fixed-R enrollment evidence")
+    if options["mode"] == "on" and options.get("profile_fixed_r"):
+        protected = [op for op in operators if op.get("fixed_r_enrolled_tasks", 0)]
+        if not protected or any(
+                not op.get("fixed_r_timing_enabled")
+                or op.get("fixed_r_timing_submission_count", 0) < op["fixed_r_enrolled_tasks"]
+                or op.get("fixed_r_timing_submission_s", 0) <= 0
+                for op in protected):
+            raise ValueError("Requested Fixed-R runtime timing evidence is missing")
     application = runpy.run_path(options["workload"], run_name="cifar_probe")
     state = torch.load(directory / "final-checkpoint/training.pt", map_location="cpu", weights_only=True)
     if state["epoch"] != epochs or not state["optimizer"]["state"]:
@@ -158,6 +166,8 @@ def compare_samples(left, right, *, control=False):
     if any(s["status"] != "passed" or not s.get("workload_completed") or s.get("timeout")
            for s in (left, right)):
         raise ValueError("Both observations must pass completion and evidence checks")
+    if left.get("profile_fixed_r", False) != right.get("profile_fixed_r", False):
+        raise ValueError("Mismatched runtime profiling configuration")
     for key in ("training_epochs", "input_identity", "workload_sha256", "torch_version", "torchvision_version",
                 "owner_placement", "placement_strategy", "model_parameters", "batch_size", "checkpoint_policy"):
         if left[key] != right[key]:

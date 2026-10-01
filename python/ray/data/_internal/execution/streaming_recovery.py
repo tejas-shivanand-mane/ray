@@ -26,6 +26,7 @@ from ray._private.streaming_recovery import (
     StreamingRecoveryOwnerActor,
     StreamingRecoveryReader,
     StreamingRecoveryRequired,
+    _record_duration,
 )
 from ray._raylet import (
     _inspect_recovery_stream_descriptor,
@@ -71,6 +72,9 @@ class FixedRDataConfig:
     ``dynamic_task_outputs`` runs normal streaming map/read tasks with unknown
     counts. Blocks are copied and delivered incrementally; EOF supplies the final
     count. Deterministic finite tasks and a surviving coordinator are required.
+
+    ``profile_timing`` records inclusive local phase times in operator metrics.
+    It is diagnostic instrumentation, not an additive overhead breakdown.
     """
 
     owner_node_id: str
@@ -82,6 +86,7 @@ class FixedRDataConfig:
     buffered_task_outputs: bool = False
     dynamic_task_outputs: bool = False
     max_task_output_bytes: int = 256 * 1024**2
+    profile_timing: bool = False
 
     @property
     def automatic_outputs(self):
@@ -101,6 +106,8 @@ class FixedRDataConfig:
         return nodes[task_index % len(nodes)]
 
     def validate(self):
+        if type(self.profile_timing) is not bool:
+            raise ValueError("profile_timing must be a bool")
         if type(self.preserve_batch_output_blocks) is not bool:
             raise ValueError("preserve_batch_output_blocks must be a bool")
         if self.mode not in ("fixed_r", "copy"):
@@ -219,6 +226,7 @@ def get_config(context):
                 buffered_task_outputs=context.fixed_r_task_recovery_output_mode == "buffered",
                 dynamic_task_outputs=context.fixed_r_task_recovery_output_mode == "streaming",
                 max_task_output_bytes=context.fixed_r_task_recovery_max_output_bytes,
+                profile_timing=context.get_config("fixed_r_profile_timing", False),
             )
             context.set_config(CONFIG_KEY, config)
         if not isinstance(config, FixedRDataConfig) or not config.automatic_outputs:
@@ -397,7 +405,8 @@ class _DataStream:
         if self.reader is None:
             raise RuntimeError("A survivor-owned Data task cannot use owner-loss replay")
         try:
-            self.reader.recover()
+            with _record_duration(self.stats, "recovery"):
+                self.reader.recover()
         except Exception as exc:
             # Record strings/counts before Dataset strips the traceback or
             # shutdown clears the reader. Never mint new ObjectRefs here.
@@ -435,10 +444,15 @@ class _DataStream:
     def close(self):
         if self.closed:
             return
+        with _record_duration(self.stats, "stream_close"):
+            self._close()
+
+    def _close(self):
         if self.reader is not None:
             # Do not kill the helper until the durable tombstone barrier succeeds.
             self.reader.close()
-            ray.kill(self.owner, no_restart=True)
+            with _record_duration(self.stats, "helper_kill_request"):
+                ray.kill(self.owner, no_restart=True)
         elif self.generator is not None:
             ray.cancel(self.generator, force=False, recursive=True)
             self.generator = None
@@ -450,14 +464,31 @@ def submit_stream(
     config, producer, args, kwargs, options, expected_blocks, stats, *, task_index=0,
     survivor_only=False,
 ):
-    owner_alive = _owner_alive(config)
+    stats["fixed_r_timing_enabled"] = config.profile_timing
+    with _record_duration(stats, "submission"):
+        return _submit_stream(
+            config, producer, args, kwargs, options, expected_blocks, stats,
+            task_index=task_index, survivor_only=survivor_only,
+        )
+
+
+def _submit_stream(
+    config, producer, args, kwargs, options, expected_blocks, stats, *, task_index,
+    survivor_only,
+):
+    with _record_duration(stats, "owner_liveness"):
+        owner_alive = _owner_alive(config)
     if config.automatic_outputs:
         # Retain independent local inputs, including read recipes and inputs
         # originating outside this executor. Native validation below still
         # rejects contained ObjectRefs and other unsupported dependencies.
         def retain(value):
-            return (ray.put(ray.get(value, timeout=config.timeout_s))
-                    if isinstance(value, ray.ObjectRef) else value)
+            if not isinstance(value, ray.ObjectRef):
+                return value
+            with _record_duration(stats, "input_get"):
+                value = ray.get(value, timeout=config.timeout_s)
+            with _record_duration(stats, "input_put"):
+                return ray.put(value)
 
         args = tuple(retain(value) for value in args)
         kwargs = {key: retain(value) for key, value in kwargs.items()}
@@ -465,7 +496,8 @@ def submit_stream(
         value for value in (*args, *kwargs.values())
         if isinstance(value, ray.ObjectRef)
     )
-    ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs(inputs)
+    with _record_duration(stats, "input_validate"):
+        ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs(inputs)
     options = dict(options)
     options.update(
         scheduling_strategy=NodeAffinitySchedulingStrategy(
@@ -477,7 +509,8 @@ def submit_stream(
     count = -1 if config.dynamic_task_outputs else 2 * expected_blocks
 
     def submit_from_coordinator():
-        generator = producer.options(**options).remote(*args, **kwargs)
+        with _record_duration(stats, "survivor_submit"):
+            generator = producer.options(**options).remote(*args, **kwargs)
         key = (
             "fixed_r_copy_baseline_tasks" if config.mode == "copy"
             else "fixed_r_survivor_tasks"
@@ -488,19 +521,22 @@ def submit_stream(
     if survivor_only or config.mode == "copy" or not owner_alive:
         return submit_from_coordinator()
 
-    owner = ray.remote(num_cpus=0, max_restarts=0, max_task_retries=0)(
-        StreamingRecoveryOwnerActor
-    ).options(
-        scheduling_strategy=NodeAffinitySchedulingStrategy(
-            config.owner_node_id, soft=False
-        )
-    ).remote()
+    with _record_duration(stats, "helper_create_request"):
+        owner = ray.remote(num_cpus=0, max_restarts=0, max_task_retries=0)(
+            StreamingRecoveryOwnerActor
+        ).options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                config.owner_node_id, soft=False
+            )
+        ).remote()
     # Do not ask this helper to create a protected producer until startup has
     # succeeded. A failure here is unambiguously before begin/descriptor/receipt,
     # so there is no protected task or witness offer to abandon or duplicate.
     try:
-        ray.get(owner.__ray_ready__.remote(), timeout=config.timeout_s)
-        owner_alive = _owner_alive(config)
+        with _record_duration(stats, "helper_ready"):
+            ray.get(owner.__ray_ready__.remote(), timeout=config.timeout_s)
+        with _record_duration(stats, "owner_liveness"):
+            owner_alive = _owner_alive(config)
     except (
         ray.exceptions.RayActorError,
         ray.exceptions.ActorUnschedulableError,
@@ -533,10 +569,11 @@ def submit_stream(
         stats["fixed_r_pre_submission_failovers"] += 1
         return stream
     try:
-        reader = StreamingRecoveryReader.submit(
-            owner, producer, expected_returns=count, args=args, kwargs=kwargs,
-            timeout_s=config.timeout_s, **options,
-        )
+        with _record_duration(stats, "enrollment"):
+            reader = StreamingRecoveryReader.submit(
+                owner, producer, expected_returns=count, args=args, kwargs=kwargs,
+                timeout_s=config.timeout_s, timing_stats=stats, **options,
+            )
     except BaseException:
         # Reader.submit already queues close for an abandoned offer. Give it a
         # bounded opportunity to execute before retiring the private helper.
@@ -617,12 +654,15 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             self._recovery_wait_reason = "waiting_for_pair_payload"
             return None
         self._recovery_wait_reason = "copying_pair"
-        block, metadata = ray.get(refs, timeout=0)
-        copied = ray.put(block)
+        with _record_duration(self.stream.stats, "output_get"):
+            block, metadata = ray.get(refs, timeout=0)
+        with _record_duration(self.stream.stats, "output_put"):
+            copied = ray.put(block)
         # Reject contained refs/tensor transport before any export to Data.
-        ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs(
-            [copied]
-        )
+        with _record_duration(self.stream.stats, "output_validate"):
+            ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs(
+                [copied]
+            )
         return copied, metadata
 
     def _finish(self, error=None):
@@ -652,6 +692,10 @@ class StreamingRecoveryDataOpTask(DataOpTask):
             self.stream.release_pair(self._pair_start)
 
     def _release_unused_copies(self):
+        with _record_duration(self.stream.stats, "release_scan"):
+            self._release_unused_copies_impl()
+
+    def _release_unused_copies_impl(self):
         if not self._copied_return_indices:
             return
         consumer = self.stream.reader.consumer
@@ -671,6 +715,10 @@ class StreamingRecoveryDataOpTask(DataOpTask):
                 self._copied_return_indices.remove(index)
 
     def on_data_ready(self, max_bytes_to_read, metadata_fetcher):
+        with _record_duration(self.stream.stats, "data_ready_callback"):
+            return self._on_data_ready(max_bytes_to_read, metadata_fetcher)
+
+    def _on_data_ready(self, max_bytes_to_read, metadata_fetcher):
         self._track_task_output_backpressure(max_bytes_to_read)
         if self.has_finished or max_bytes_to_read == 0:
             return 0

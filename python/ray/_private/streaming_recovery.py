@@ -9,6 +9,7 @@ and there must be no earlier executor retry.
 
 import math
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import RLock
 from typing import Tuple
@@ -41,6 +42,28 @@ class StreamingRecoveryRequired(StreamingRecoveryStateError):
 # even when its producer is stalled or backpressured. At most one such RPC is
 # outstanding per reader; an empty response never advances the delivery cursor.
 _OWNER_READ_TIMEOUT_S = 0.1
+
+
+def _record_elapsed(stats, phase, started):
+    """Accumulate local wall time; nested/concurrent phases are not additive."""
+    if started is None:
+        return
+    elapsed = time.perf_counter() - started
+    key = f"fixed_r_timing_{phase}"
+    stats[key + "_s"] = stats.get(key + "_s", 0.0) + elapsed
+    stats[key + "_count"] = stats.get(key + "_count", 0) + 1
+    stats[key + "_max_s"] = max(stats.get(key + "_max_s", 0.0), elapsed)
+
+
+@contextmanager
+def _record_duration(stats, phase):
+    """Opt-in diagnostics only: no RPCs, waits, ref retention or error handling."""
+    started = (time.perf_counter()
+               if stats is not None and stats.get("fixed_r_timing_enabled") else None)
+    try:
+        yield
+    finally:
+        _record_elapsed(stats, phase, started)
 
 
 def _validate_read_timeout(timeout_s):
@@ -518,6 +541,7 @@ class StreamingRecoveryReader:
         args=(),
         kwargs=None,
         timeout_s=60,
+        timing_stats=None,
         **options,
     ):
         timeout_ms = _timeout_ms(timeout_s)
@@ -534,33 +558,40 @@ class StreamingRecoveryReader:
             input_refs
         )
         try:
-            descriptor, _ = ray.get(
-                owner.begin.remote(
-                    producer, expected_returns, address, args, kwargs or {}, options
-                ),
-                timeout=timeout_ms / 1000,
-            )
+            with _record_duration(timing_stats, "owner_begin"):
+                descriptor, _ = ray.get(
+                    owner.begin.remote(
+                        producer, expected_returns, address, args, kwargs or {}, options
+                    ),
+                    timeout=timeout_ms / 1000,
+                )
         except BaseException:
             # A queued begin can still finish after a caller timeout. Queue
             # close behind it so an abandoned offer cannot remain held forever.
             owner.close.remote()
             raise
-        reader = cls(owner, descriptor, address, timeout_s)
+        with _record_duration(timing_stats, "consumer_register"):
+            reader = cls(owner, descriptor, address, timeout_s)
+        reader._timing_stats = timing_stats
         reader._input_refs = input_refs
         try:
-            ray.get(owner.confirm.remote(descriptor, address), timeout=timeout_s)
+            with _record_duration(timing_stats, "owner_confirm"):
+                ray.get(owner.confirm.remote(descriptor, address), timeout=timeout_s)
             deadline = time.monotonic() + timeout_s
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("Streaming enrollment did not become ready")
-                offered, ready = ray.get(owner.offer.remote(), timeout=remaining)
+                with _record_duration(timing_stats, "enrollment_offer"):
+                    offered, ready = ray.get(owner.offer.remote(), timeout=remaining)
                 if offered != descriptor:
                     raise StreamingRecoveryStateError("Owner changed its descriptor")
                 if ready:
                     break
-                time.sleep(0.01)
-            reader.consumer.mark_ready(descriptor)
+                with _record_duration(timing_stats, "enrollment_poll_sleep"):
+                    time.sleep(0.01)
+            with _record_duration(timing_stats, "consumer_mark_ready"):
+                reader.consumer.mark_ready(descriptor)
             return reader
         except BaseException:
             reader.close()
@@ -576,6 +607,8 @@ class StreamingRecoveryReader:
         self._pending_read = None
         self._pending_ticket = None
         self._recovery_required = False
+        self._timing_stats = None
+        self._pending_read_started = None
 
     def __iter__(self):
         return self
@@ -627,12 +660,21 @@ class StreamingRecoveryReader:
         if self._pending_read is None:
             ticket = self.consumer.begin_owner_read()
             try:
+                if self._timing_stats is not None and self._timing_stats.get("fixed_r_timing_enabled"):
+                    self._pending_read_started = time.perf_counter()
                 self._pending_read = self.owner.pull.remote(_OWNER_READ_TIMEOUT_S)
             except BaseException:
+                self._settle_read_timing("owner_pull_failed")
                 self.consumer.fail()
                 raise
             self._pending_ticket = ticket
         return self._pending_read
+
+    def _settle_read_timing(self, phase):
+        # Includes producer readiness, transport and time before the executor
+        # polls the result. This is NOT pure RPC latency or blocked-thread time.
+        _record_elapsed(self._timing_stats, phase, self._pending_read_started)
+        self._pending_read_started = None
 
     def poll_next(self, timeout_s=0):
         """Return one ref, None when pending, or raise StopIteration at EOF.
@@ -657,6 +699,7 @@ class StreamingRecoveryReader:
             except ray.exceptions.GetTimeoutError:
                 return None
             except ray.exceptions.RayActorError as exc:
+                self._settle_read_timing("owner_pull_failed")
                 self.consumer.settle_failed_owner_read(ticket)
                 self._pending_read = None
                 self._pending_ticket = None
@@ -665,6 +708,7 @@ class StreamingRecoveryReader:
                     "Owner read failed; quiesce output users and call recover()"
                 ) from exc
             except BaseException:
+                self._settle_read_timing("owner_pull_failed")
                 self._pending_read = None
                 self._pending_ticket = None
                 self.consumer.fail()
@@ -673,13 +717,16 @@ class StreamingRecoveryReader:
             self._pending_read = None
             self._pending_ticket = None
             try:
+                self._settle_read_timing("owner_pull_pending" if response.get("pending") else "owner_pull_result")
                 if response.get("pending"):
                     self.consumer.settle_failed_owner_read(ticket)
                     return None
                 if response.get("eof"):
-                    self.consumer.accept_owner_eof(ticket)
+                    with _record_duration(self._timing_stats, "consumer_accept_eof"):
+                        self.consumer.accept_owner_eof(ticket)
                     raise StopIteration
-                return self.consumer.accept_owner_item(ticket, response["ref"])
+                with _record_duration(self._timing_stats, "consumer_accept_item"):
+                    return self.consumer.accept_owner_item(ticket, response["ref"])
             except StopIteration:
                 raise
             except BaseException:
@@ -714,14 +761,18 @@ class StreamingRecoveryReader:
         worker.check_connected()
         try:
             try:
-                ray.get(self.owner.close.remote(), timeout=self.timeout_s)
+                with _record_duration(self._timing_stats, "owner_close"):
+                    ray.get(self.owner.close.remote(), timeout=self.timeout_s)
             except ray.exceptions.RayActorError:
                 pass
-            worker.core_worker.close_streaming_recovery(
-                self.descriptor, _timeout_ms(self.timeout_s)
-            )
+            with _record_duration(self._timing_stats, "tombstone_barrier"):
+                worker.core_worker.close_streaming_recovery(
+                    self.descriptor, _timeout_ms(self.timeout_s)
+                )
         finally:
-            self.consumer.close()
+            with _record_duration(self._timing_stats, "consumer_close"):
+                self.consumer.close()
+            self._settle_read_timing("owner_pull_abandoned")
             self._pending_read = None
             self._pending_ticket = None
         # A timed-out close can be retried; it must not report durable success.

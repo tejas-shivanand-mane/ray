@@ -25,9 +25,10 @@ def run_comparison(args):
     step = args.fault_after_step if args.fault_after_step is not None else steps // 2
     if not 0 < step < steps:
         raise ValueError("Fault step must leave real work before and after the fault in its epoch")
-    cases = comparison_cases(args.epochs, args.failure_point, args.failure_kind)
     if args.controls_only:
-        cases = cases[:1]
+        cases = [{"scenario": "none", "failure_point": "none", "fault_after_epoch": 0}]
+    else:
+        cases = comparison_cases(args.epochs, args.failure_point, args.failure_kind)
     provenance = source_provenance(ROOT)
     report = {
         "profile": "cifar-streaming-learning", "status": "running", "cases": cases,
@@ -35,6 +36,7 @@ def run_comparison(args):
         "training_epochs": args.epochs, "batch_size": args.batch_size,
         "steps_per_epoch": steps, "fault_after_step": step, "repeats": args.repeats,
         "observations_per_repetition": 2 * len(cases), "preliminary": args.repeats == 1,
+        "profile_fixed_r": args.profile_fixed_r,
         "samples": [], "pairs": [], "failed_observations": [],
         "comparison_axis": "Fixed-R OFF/full Train retry versus Fixed-R ON/full Train retry",
         "limitations": [
@@ -50,6 +52,7 @@ def run_comparison(args):
             "streaming_split does not guarantee identical batch assignment; report accuracy differences, do not assert equal SGD trajectories",
             "per-task and per-update local telemetry is included in workload time in both arms; clocks comparable only on this physical machine",
             "workload time excludes cluster startup and final checkpoint verification; observation_wall_s includes those costs and cleanup",
+            "optional Fixed-R phase times are inclusive local wall times, overlap across tasks/operators and include failed calls; do not sum them as total overhead",
         ],
     }
 
@@ -66,6 +69,7 @@ def run_comparison(args):
             for mode in (("off", "on") if pair % 2 else ("on", "off")):
                 options = {
                     "training_strategy": "ray-train-workload", "streaming_learning": True,
+                    "profile_fixed_r": args.profile_fixed_r,
                     "comparison": "fixed-r", "scenario": scenario, "mode": mode,
                     "restart_scope": "full", "owner_placement": "default", "placement_strategy": "STRICT_SPREAD",
                     "timeout_s": args.timeout_s, "training_epochs": args.epochs,
@@ -81,7 +85,8 @@ def run_comparison(args):
                 sample = run_observation(options, pair,
                                          args.result_directory / f"{scenario}-{point}-{pair}-{mode}", provenance)
                 sample.update(failure_point=point, fault_after_epoch=epoch, fault_after_step=step,
-                              restart_scope="full", training_epochs=args.epochs)
+                              restart_scope="full", training_epochs=args.epochs,
+                              profile_fixed_r=args.profile_fixed_r)
                 if scenario == "none":
                     controls[(pair, mode)] = sample
                 elif sample["status"] == "passed":
@@ -138,12 +143,15 @@ def main():
     parser.add_argument("--failure-point", action="append", choices=("early", "middle", "late"))
     parser.add_argument("--failure-kind", action="append", choices=("head-node", "worker-node"))
     parser.add_argument("--controls-only", action="store_true")
+    parser.add_argument("--profile-fixed-r", action="store_true",
+                        help="Record runtime phase timings; adds local clock/counter overhead")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-s", type=float, default=300)
     args = parser.parse_args()
-    if (sys.platform != "linux" or args.epochs < 4 or args.repeats < 1 or args.batch_size < 2
+    if (sys.platform != "linux" or args.epochs < (2 if args.controls_only else 4)
+            or args.repeats < 1 or args.batch_size < 2
             or not math.isfinite(args.timeout_s) or args.timeout_s <= 0):
-        parser.error("Use Linux, >=4 epochs, positive repeats, batch size >=2 and finite positive timeout")
+        parser.error("Use Linux, >=4 epochs (>=2 for controls only), positive repeats, batch size >=2 and finite positive timeout")
     args.failure_point = args.failure_point or ["middle"]
     args.failure_kind = args.failure_kind or ["head-node"]
     args.data_directory = args.data_directory.resolve()

@@ -72,7 +72,7 @@ The validation command first runs focused tests, then four observations:
 OFF/ON no-failure controls and OFF/ON middle-training head loss. Each observation
 has a 300-second cap, including cluster startup, workload, final model check and
 cleanup. Four caps sum to 20 minutes, plus tests and timeout-cleanup overhead;
-this is a budget, not a measured duration. No duration has been measured yet.
+this is a budget, not a predicted duration.
 If controls fail or do not demonstrate streaming overlap, fault cases are
 skipped and the partial report is retained.
 
@@ -140,3 +140,76 @@ scheduling budget, block sizing and prefetch settings. The memory budget is a
 scheduler target, not a hard physical memory limit. Local telemetry costs are
 included in both workloads; this instrumented run is not a minimal-overhead
 measurement. Streaming overhead optimization remains outside this change.
+
+## Diagnose the no-failure slowdown
+
+The first uploaded four-epoch control run completed OFF in 169.39 seconds of
+workload time. ON reached epoch 3, update 22/32 on both ranks before the
+300-second observation timeout. It was still making progress. Epoch 2's
+checkpoint was committed at 87.95 seconds OFF and 218.65 seconds ON from workload
+start (2.49x for the same completed prefix). This is not a completed-run overhead
+measurement. The first two model/optimizer checkpoint hashes matched; failure
+cases were skipped. The report did not identify which runtime costs dominated.
+
+Use the same prepared data, model, batch size and resource budgets for a shorter
+diagnostic pair. The two-epoch exception applies only to controls; fault matrices
+still require at least four epochs. This command preserves the original JSON:
+
+```bash
+bash gossip_benchmarks/validate_streaming_learning.sh \
+  --data-directory ~/ray-coverage/cifar-streaming \
+  --controls-only --epochs 2 --profile-fixed-r --timeout-s 300 \
+  --output ~/ray-coverage/streaming-learning-profile.json
+```
+
+Based on the observed two-epoch prefixes, allow roughly 5–6 minutes for the pair
+plus tests; this is an estimate, with two 300-second caps plus cleanup. No failure
+injection or plotting runs. This remains an instrumented correctness/diagnostic
+run, not a performance optimization or a recovery result.
+
+`--profile-fixed-r` enables local runtime counters through the private
+`fixed_r_profile_timing` DataContext configuration before planning. It changes
+neither protection coverage nor retry/placement/block/memory settings. It adds
+clock/counter overhead to ON and periodic evidence snapshots to both arms.
+No additional helper RPCs, barriers, copies or background threads are introduced.
+
+Each operator in `samples[].data_executions[].operators[]` includes
+`fixed_r_timing_<phase>_s`, `_count` and `_max_s`. Counts include calls that raise;
+absent keys mean no completed timing scope was recorded, not a measured zero.
+
+| Phase | Measured boundary |
+| --- | --- |
+| `submission` | Whole synchronous Data task submission; includes the setup phases below |
+| `owner_liveness` | Existing GCS owner/executor checks on the normal submission path |
+| `input_get`, `input_put`, `input_validate` | Fetch/deserialize retained input, make coordinator-owned copy, validate dependencies |
+| `helper_create_request`, `helper_ready` | Issue owner-helper creation, then wait for its ready reply |
+| `enrollment` | Whole reader enrollment, including the following handshake phases |
+| `owner_begin`, `consumer_register`, `owner_confirm`, `enrollment_offer`, `enrollment_poll_sleep`, `consumer_mark_ready` | Existing submission/registration/acknowledgement calls and readiness polling |
+| `owner_pull_result`, `owner_pull_pending`, `owner_pull_failed`, `owner_pull_abandoned` | Issue-to-settlement time of each owner read, separated by outcome |
+| `consumer_accept_item`, `consumer_accept_eof` | Local/native acceptance of the read result or EOF |
+| `output_get`, `output_put`, `output_validate` | Fetch/deserialize a ready streaming output pair, copy its block, validate the copy |
+| `release_scan` | Scan previously copied returns and release eligible native references |
+| `stream_close` | Whole stream close, including owner close, tombstone barrier and helper kill request |
+| `owner_close`, `tombstone_barrier`, `consumer_close`, `helper_kill_request` | Individual closure calls; kill measures the request, not process exit |
+| `data_ready_callback` | Whole Data callback, including polling, copying, release, close or recovery |
+| `recovery`, `survivor_submit` | Existing replay/fallback paths, only if entered |
+
+These are inclusive **wall times**, not CPU profiles. Nested phases must not be
+added together. Tasks/operators/executions can overlap. Owner-read latency also
+includes producer readiness and delays before the scheduler polls its response;
+it is not pure network time or blocked-thread time. The native handshake timers
+do not separate individual holder/witness RPCs. Output copy phases cover the
+dynamic streaming path used here, not buffered-envelope unpacking.
+
+`runtime_metrics` alongside these timings records ordinary Ray task counts,
+task completion/backpressure durations and object-store spill/free bytes in both
+arms. Backpressure and task durations also overlap; they are not additive to the
+phase timings. Spill/free counters are not peak memory measurements.
+
+With profiling enabled, the harness atomically replaces each execution's snapshot
+approximately every five seconds when its scheduling loop can make progress.
+Terminal snapshots have `state=completed` or `failed`; a timeout may leave
+`state=running`. The parent embeds the latest snapshots in JSON, without summing
+earlier snapshots again. An in-flight timing scope is absent until it exits, so
+timeout evidence can be partial. Success still requires the usual input,
+checkpoint and streaming checks, plus the requested ON timing evidence.

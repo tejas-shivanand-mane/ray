@@ -108,7 +108,7 @@ def test_timeout_plot_keeps_observed_stop_without_claiming_completion(checks):
     assert trace["outcome"] == "timeout (censored)"
 
 
-@pytest.mark.parametrize("corruption", [None, "selective", "native", "input", "failed"])
+@pytest.mark.parametrize("corruption", [None, "selective", "native", "input", "failed", "profiling"])
 def test_comparison_keeps_retry_policy_and_inputs_matched(checks, corruption):
     from fashion_comparison import PROVENANCE_KEYS
 
@@ -130,6 +130,8 @@ def test_comparison_keeps_retry_policy_and_inputs_matched(checks, corruption):
         right["input_identity"] = "different"
     elif corruption == "failed":
         right["status"] = "failed"
+    elif corruption == "profiling":
+        right["profile_fixed_r"] = True
     if corruption:
         with pytest.raises(ValueError):
             checks.compare_samples(left, right)
@@ -138,3 +140,25 @@ def test_comparison_keeps_retry_policy_and_inputs_matched(checks, corruption):
         assert result["accuracy_difference_pp"] == pytest.approx(10)
         assert result["workload_s_change_pct"] == pytest.approx(20)
         assert result["prediction_equivalence_claimed"] is False
+
+
+@pytest.mark.parametrize("controls_only", [False, True])
+def test_two_epochs_are_only_allowed_for_controls(checks, monkeypatch, tmp_path, controls_only):
+    runner = importlib.import_module("run_streaming_learning_comparison")
+    arguments = ["run_streaming_learning_comparison.py", "--epochs", "2",
+                 "--data-directory", str(tmp_path), "--result-directory", str(tmp_path),
+                 "--output", str(tmp_path / "report.json"), "--profile-fixed-r"]
+    if controls_only:
+        arguments.append("--controls-only")
+    monkeypatch.setattr(runner.sys, "argv", arguments)
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    observed = []
+    monkeypatch.setattr(runner, "run_comparison", lambda args: observed.append(args) or 0)
+    if controls_only:
+        assert runner.main() == 0
+        assert observed[0].epochs == 2 and observed[0].profile_fixed_r
+    else:
+        with pytest.raises(SystemExit) as raised:
+            runner.main()
+        assert raised.value.code == 2
+        assert not observed
