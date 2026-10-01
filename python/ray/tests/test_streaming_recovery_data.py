@@ -353,6 +353,87 @@ def test_config_rejects_eager_free_and_unsafe_retry_policy():
         get_config(context)
 
 
+@pytest.mark.parametrize("output_mode", ["streaming", "buffered"])
+def test_fixed_r_file_read_recipe_has_no_nested_metadata_refs(
+    data_cluster, tmp_path, output_mode
+):
+    from ray.data._internal.datasource.csv_datasource import CSVDatasource
+
+    owner_id, executor_id, _ = data_cluster
+    context = configured_context(owner_id, executor_id, {})
+    context.set_config(CONFIG_KEY, replace(
+        context.get_config(CONFIG_KEY),
+        dynamic_task_outputs=output_mode == "streaming",
+        buffered_task_outputs=output_mode == "buffered",
+    ))
+    ordinary = context.copy()
+    ordinary.remove_config(CONFIG_KEY)
+    path = tmp_path / "input.csv"
+    path.write_text("value\n1\n2\n")
+    with DataContext.current(ordinary):
+        source = CSVDatasource(str(path))
+    refs = [source._source_paths_ref, source._paths_ref, source._file_sizes_ref]
+    assert all(isinstance(ref, ray.ObjectRef) for ref in refs)
+    core = ray._private.worker.global_worker.core_worker
+    # Ordinary readers still share metadata by reference. Merely re-putting a
+    # recipe does not eliminate those nested dependencies.
+    original = source.get_read_tasks(1, data_context=ordinary)[0]
+    original_ref = ray.put(original)
+    with pytest.raises(ray.exceptions.RaySystemError, match="Streaming inputs"):
+        core.validate_streaming_recovery_inputs([original_ref])
+
+    recipe = source.get_read_tasks(1, data_context=context)[0]
+    recipe_ref = ray.put(recipe)
+    core.validate_streaming_recovery_inputs([recipe_ref])
+    restored = ray.get(recipe_ref)
+    assert [value for block in restored() for value in block["value"].to_pylist()] == [1, 2]
+    assert [source._source_paths_ref, source._paths_ref, source._file_sizes_ref] == refs
+    assert source._paths() == [str(path)]
+    # Only built-in metadata is snapshotted. A custom datasource's other nested
+    # dependencies must still fail the same native validation.
+    source._custom_dependency = ray.put("unsupported nested dependency")
+    unsafe_ref = ray.put(source.get_read_tasks(1, data_context=context)[0])
+    with pytest.raises(ray.exceptions.RaySystemError, match="Streaming inputs"):
+        core.validate_streaming_recovery_inputs([unsafe_ref])
+
+
+def test_fixed_r_exchange_csv_training_pipeline(data_cluster, tmp_path):
+    import pandas as pd
+
+    owner_id, executor_id, _ = data_cluster
+    context = configured_context(owner_id, executor_id, {})
+    context.set_config(CONFIG_KEY, replace(
+        context.get_config(CONFIG_KEY), dynamic_task_outputs=True
+    ))
+    ordinary = context.copy()
+    ordinary.remove_config(CONFIG_KEY)
+    path = tmp_path / "training.csv"
+    pd.DataFrame({"x0": range(17), "x1": range(1, 18), "y": range(17)}).to_csv(
+        path, index=False
+    )
+
+    def combine(batch):
+        return pd.DataFrame({"x": batch[["x0", "x1"]].values.tolist(), "y": batch["y"]})
+
+    def execute(ctx):
+        with DataContext.current(ctx):
+            train, validation = (
+                ray.data.read_csv(str(path), override_num_blocks=1)
+                .map_batches(combine, batch_format="pandas")
+                .repartition(4)
+                .train_test_split(0.7, shuffle=True, seed=0)
+            )
+            return [
+                [(list(row["x"]), row["y"]) for row in split.take_all()]
+                for split in (train, validation)
+            ]
+
+    expected = execute(ordinary)
+    actual = execute(context)
+    assert actual == expected
+    assert sorted(y for split in actual for _, y in split) == list(range(17))
+
+
 @pytest.mark.parametrize("operation", ["split", "shuffle_repartition", "random_shuffle"])
 @pytest.mark.parametrize("rows,outputs", [(17, 3), (2, 5), (0, 3)])
 def test_fixed_r_exchange_matches_ordinary(data_cluster, operation, rows, outputs):

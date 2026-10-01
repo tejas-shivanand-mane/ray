@@ -34,6 +34,7 @@ SOURCE_PATHS = (
     "python/ray/data/_internal/execution",
     "python/ray/data/_internal/planner",
     "python/ray/data/_internal/split.py",
+    "python/ray/data/datasource/file_based_datasource.py",
     "python/ray/train",
     "src/ray/core_worker/streaming_recovery_submission.cc",
     "src/ray/core_worker/streaming_recovery_replay.cc",

@@ -1,3 +1,4 @@
+import copy
 import io
 import logging
 from dataclasses import dataclass
@@ -231,13 +232,16 @@ class FileBasedDatasource(Datasource):
 
     @property
     def _source_paths(self) -> List[str]:
-        return ray.get(self._source_paths_ref)
+        value = self._source_paths_ref
+        return ray.get(value) if isinstance(value, ray.ObjectRef) else value
 
     def _paths(self) -> List[str]:
-        return ray.get(self._paths_ref)
+        value = self._paths_ref
+        return ray.get(value) if isinstance(value, ray.ObjectRef) else value
 
     def _file_sizes(self) -> List[float]:
-        return ray.get(self._file_sizes_ref)
+        value = self._file_sizes_ref
+        return ray.get(value) if isinstance(value, ray.ObjectRef) else value
 
     def estimate_inmemory_data_size(self) -> Optional[int]:
         total_size = 0
@@ -253,6 +257,25 @@ class FileBasedDatasource(Datasource):
         data_context: Optional["DataContext"] = None,
     ) -> List[ReadTask]:
         import numpy as np
+
+        from ray.data._internal.execution.streaming_recovery import get_config
+
+        recovery = get_config(
+            data_context if data_context is not None else self._data_context
+        )
+        if recovery is not None and recovery.automatic_outputs:
+            # read_files captures self, including these driver-owned ObjectRefs.
+            # A fresh ray.put(read_task) still contains the nested refs and cannot
+            # be an independently replayable input. Snapshot just the built-in
+            # metadata on a private datasource copy before creating the closure.
+            # Keep subclass hooks and the original datasource intact. Any other
+            # nested refs remain visible to the native input validator.
+            self = copy.copy(self)
+            for name in ("_source_paths_ref", "_paths_ref", "_file_sizes_ref"):
+                value = getattr(self, name)
+                if isinstance(value, ray.ObjectRef):
+                    value = ray.get(value, timeout=recovery.timeout_s)
+                setattr(self, name, value)
 
         open_stream_args = self._open_stream_args
         partitioning = self._partitioning
