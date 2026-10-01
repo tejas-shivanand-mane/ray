@@ -74,12 +74,17 @@ Run both controls and all early/middle/late pairs:
 bash gossip_benchmarks/validate_fashion_restart.sh \
   --data-directory ~/ray-coverage/fashion-mnist \
   --feature-directory ~/ray-coverage/fashion-features \
-  --epochs 8 --repeats 1 --timeout-s 600
+  --epochs 8 --repeats 1 --timeout-s 1800
 ```
 
 This runs focused checks and eight trials, with up to eleven application
-invocations. A 600-second cap bounds each entire trial; cleanup can add 15
-seconds. This is a cap, not a measured runtime estimate. For a smaller first
+invocations. An 1800-second cap bounds each entire trial, including both OFF
+attempts; cleanup can add 15 seconds. This is a cap, not a measured runtime
+estimate. A first local run took about 514–518 seconds just to extract the
+60,000 training-image features; both controls timed out with a 600-second
+budget, before any training epoch was reported. Those runs provide no recovery
+comparison. The feature-profile default is now 1800 seconds; explicit user
+budgets are still honored. For a smaller first
 screen, add `--failure-point late` for four trials. To measure the original
 pixel workload instead, omit `--feature-directory` and use `--timeout-s 180`.
 Three repetitions mean 24 trials, alternating arm order between repetitions.
@@ -96,8 +101,12 @@ python gossip_benchmarks/plot_fashion_restart.py \
 
 The PNG/PDF show total time to verified completion and training progress on the
 original trial clock, including restart gaps. Bars use only valid matched pairs;
-individual timings and failed/censored trials remain visible. Earlier attempts
-are never relabeled as successful. Startup, all attempted work, correctness
+individual timings and failed/censored trials remain visible. Curves retain
+recorded preprocessing progress even when there are no epoch reports.
+Failed/censored curves end at observed progress; a separate dash-dot line marks
+the parent's measured trial stop, including cleanup. No progress is invented
+between those times. Cases skipped after failed controls are marked "Not run".
+Earlier attempts are never relabeled as successful. Startup, all attempted work, correctness
 probes and cleanup are included in the primary wall-clock metric; workload and
 training durations remain separately recorded per attempt. Unmatched or failed
 pairs never generate a speedup.

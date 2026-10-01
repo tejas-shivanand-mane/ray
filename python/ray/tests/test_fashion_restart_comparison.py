@@ -161,6 +161,25 @@ def test_feature_identity_rejects_changed_weights(modules, tmp_path):
         modules.runner.feature_identity(tmp_path)
 
 
+def test_timeout_plot_keeps_preprocessing_and_separate_measured_stop(modules):
+    sample = {"status": "failed", "timeout": True,
+              "observation_started_ns": 10**9, "observation_wall_s": 610,
+              "attempts": [{"status": "failed", "timeout": True,
+                            "workload_started_ns": 10 * 10**9,
+                            "workload_finished_ns": 601 * 10**9,
+                            "feature_progress": {"feature_ready_ns": 524 * 10**9},
+                            "map_progress": [{"time_ns": 527 * 10**9}]}]}
+    trace = modules.plot.trial_trace(sample)
+    assert trace["seconds"] == [0, 9, 523, 526]
+    assert trace["epochs"] == [0, 0, 0, 0]
+    assert trace["stopped_s"] == 610
+    assert not trace["faults"] and not trace["restarts"]
+    assert sample["status"] == "failed"
+    sample["observation_wall_s"] = 500
+    with pytest.raises(ValueError, match="before its last observed progress"):
+        modules.plot.trial_trace(sample)
+
+
 @pytest.mark.parametrize("invalid", [{"status": "failed"}, {"timeout": True}, {"workload_completed": False}])
 def test_incomplete_trials_never_produce_completion_time(modules, invalid):
     sample = {"status": "passed", "workload_completed": True, "observation_wall_s": 100, **invalid}

@@ -88,7 +88,7 @@ def run_comparison(args, directory, provenance):
     report = {"profile": "fashion-mnist-owner-restart", "status": "running", "samples": [], "pairs": [],
               "failed_comparisons": [], "source_provenance": provenance, "input_identity": identity,
               "feature_identity": features, "failure_points": points, "training_epochs": args.epochs,
-              "repeats": args.repeats, "preliminary": args.repeats == 1,
+              "repeats": args.repeats, "preliminary": args.repeats == 1, "timeout_s": args.timeout_s,
               "measurement_scope": "parent wall time through verified completion: initial startup, all application attempts, validation and cleanup",
               "restart_scope": "same repaired cluster and driver; one fresh application invocation after verified OFF owner loss",
               "limitations": [
@@ -168,8 +168,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--failure-point", action="append", choices=tuple(POINTS))
-    parser.add_argument("--timeout-s", type=float, default=180, help="Total budget for both OFF attempts, not per attempt")
+    parser.add_argument("--timeout-s", type=float,
+                        help="Total budget for both OFF attempts; default 1800s with features, 180s with raw pixels")
     args = parser.parse_args()
+    if args.timeout_s is None:
+        args.timeout_s = 1800 if args.feature_directory else 180
     if sys.platform != "linux" or args.epochs < 4 or args.repeats < 1 or not math.isfinite(args.timeout_s) or args.timeout_s <= 0:
         parser.error("Use Linux, at least four epochs, positive repeats and a finite positive timeout")
     args.failure_point = args.failure_point or list(POINTS)

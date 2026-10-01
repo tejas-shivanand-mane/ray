@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import statistics
 
@@ -17,11 +18,25 @@ def trial_trace(sample):
         if not attempt.get("workload_started_ns"):
             continue
         trace = progress_trace(attempt)
+        # Feature extraction and shuffle maps precede training in this profile.
+        # Keep their observed progress even when no epoch has been reported.
+        preprocessing = [e["time_ns"] for e in attempt.get("map_progress", [])]
+        ready = attempt.get("feature_progress", {}).get("feature_ready_ns")
+        if ready is not None:
+            preprocessing.append(ready)
+        first_report = next(iter(attempt.get("reports", [])), {}).get("time_ns")
+        events = list(zip(trace["seconds"], trace["epochs"]))
+        for timestamp in preprocessing:
+            if (timestamp < attempt["workload_started_ns"]
+                    or (first_report is not None and timestamp >= first_report)):
+                raise ValueError("Preprocessing evidence lies outside its stage")
+            events.append(((timestamp - attempt["workload_started_ns"]) / 1e9, 0))
+        events.sort()
         offset = (attempt["workload_started_ns"] - origin) / 1e9
         if offset < seconds[-1]:
             raise ValueError("Overlapping application attempts")
-        seconds.extend(offset + t for t in trace["seconds"])
-        epochs.extend(trace["epochs"])
+        seconds.extend(offset + t for t, _ in events)
+        epochs.extend(epoch for _, epoch in events)
         if trace["fault_s"] is not None:
             faults.append(offset + trace["fault_s"])
     if sample["status"] == "passed":
@@ -30,7 +45,13 @@ def trial_trace(sample):
             raise ValueError("Missing verified completion evidence")
         seconds.append(sample["observation_wall_s"])
         epochs.append(epochs[-1])
-    return {"seconds": seconds, "epochs": epochs, "faults": faults, "restarts": restarts}
+    stopped = None
+    if sample["status"] != "passed":
+        stopped = sample["observation_wall_s"]
+        if not math.isfinite(stopped) or stopped < seconds[-1]:
+            raise ValueError("Trial stopped before its last observed progress")
+    return {"seconds": seconds, "epochs": epochs, "faults": faults,
+            "restarts": restarts, "stopped_s": stopped}
 
 
 def plot_report(report, output):
@@ -61,7 +82,8 @@ def plot_report(report, output):
                     timing.scatter([position] * len(values), values, color=color, s=22)
                     timing.annotate(f"{mean:.1f}s", (position, mean), xytext=(0, 5), textcoords="offset points", ha="center", fontsize=9)
                 else:
-                    timing.text(position, 0, "no valid pair", rotation=90, va="bottom", ha="center", fontsize=8)
+                    timing.text(position, .06, "no valid pair", rotation=90,
+                                transform=timing.get_xaxis_transform(), va="bottom", ha="center", fontsize=8)
                 samples = [s for s in report["samples"] if s["failure_point"] == point and s["mode"] == mode]
                 if not samples and report["status"] == "passed":
                     raise ValueError("Verified report is missing a requested arm")
@@ -77,6 +99,15 @@ def plot_report(report, output):
                         ax.plot(t, 0, marker="^", color=color)
                     ax.plot(trace["seconds"][-1], trace["epochs"][-1], color=color,
                             marker="o" if sample["status"] == "passed" else "x")
+                    if trace["stopped_s"] is not None:
+                        # Show the measured stop separately; do not invent
+                        # epoch progress in the unobserved/censored interval.
+                        stopped = trace["stopped_s"]
+                        ax.axvline(stopped, color=color, linestyle="-.", alpha=.5)
+                        outcome = "timeout" if sample.get("timeout") else "stopped"
+                        ax.annotate(f"{outcome}: {stopped:.1f}s", (stopped, .7 - arm_index * .15),
+                                    xycoords=("data", "axes fraction"), xytext=(-5, 0),
+                                    textcoords="offset points", ha="right", color=color, fontsize=8)
             ax.set_title(point.capitalize())
             ax.set_ylim(-.4, report["training_epochs"] + .5)
             ax.set_xlabel("Seconds since original trial start")
@@ -84,10 +115,21 @@ def plot_report(report, output):
             ax.yaxis.set_major_locator(MaxNLocator(integer=True))
             ax.grid(alpha=.2)
             ax.legend(fontsize=8)
+            if not any(s["failure_point"] == point for s in report["samples"]):
+                ax.text(.5, .5, "Not run", transform=ax.transAxes, ha="center")
+                ax.set_xticks([])
+                ax.set_xlabel("")
         timing.set_xticks(range(len(points)), [p.capitalize() for p in points])
         timing.set_ylabel("Seconds to verified completion")
         timing.set_title("Initial startup + all application attempts + correctness validation + cleanup")
-        timing.legend(fontsize=9)
+        timing.set_xlim(-.5, len(points) - .5)
+        timing.set_ylim(bottom=0)
+        if report["pairs"]:
+            timing.legend(fontsize=9)
+        else:
+            timing.set_ylim(0, 1)
+            timing.set_yticks([])
+            timing.set_ylabel("No verified completion times")
         timing.grid(axis="y", alpha=.2)
         timing.margins(y=.2)
         status = "verified" if report["status"] == "passed" else "INCOMPLETE / INVALID — inspect JSON"
@@ -95,7 +137,7 @@ def plot_report(report, output):
         fig.suptitle(f"{workload}: ordinary restart versus Fixed-R · {status}")
         fig.text(.5, .02,
                  "Bars: means of valid matched pairs; points: individual timings. Failed or unmatched trials are excluded from means, never treated as completions.\n"
-                 "Dotted lines: owner failure; triangles: application restart on the same repaired cluster; dots: verified completion; crosses: failed/censored.\n"
+                 "Dotted: owner failure; triangles: application restart; dots: completion; crosses: last observed failed/censored progress; dash-dot: measured trial stop.\n"
                  "Both arms retain standard Train retries. Controlled head ownership and shuffle-map order; faults precede training.\n"
                  "GCS disk, driver, executors and original inputs survive. No durable feature cache, physical-machine loss or driver recovery.\n"
                  + ("One pair per case: preliminary evidence." if report.get("preliminary") else "Every trial is retained in the report."),
