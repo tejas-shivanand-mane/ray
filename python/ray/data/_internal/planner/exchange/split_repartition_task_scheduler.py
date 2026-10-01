@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
@@ -28,6 +29,10 @@ class SplitRepartitionTaskScheduler(ExchangeTaskScheduler):
     After the split blocks are generated accordingly, reduce tasks are scheduled
     to combine split blocks together.
     """
+
+    def __init__(self, spec, recovery_config=None):
+        super().__init__(spec)
+        self._recovery_config = recovery_config
 
     def execute(
         self,
@@ -76,11 +81,21 @@ class SplitRepartitionTaskScheduler(ExchangeTaskScheduler):
             blocks_with_metadata.extend(
                 (entry.ref, entry.metadata) for entry in ref_bundle.blocks
             )
+        block_splitter = None
+        if self._recovery_config is not None:
+            from ray.data._internal.planner.exchange.streaming_recovery import (
+                split_blocks,
+            )
+
+            block_splitter = partial(
+                split_blocks, self._recovery_config, ctx.kwargs["fixed_r_metrics"]
+            )
         split_return = _split_at_indices(
             blocks_with_metadata,
             indices,
             input_owned_by_consumer,
             label_selector=map_ray_remote_args.get("label_selector"),
+            block_splitter=block_splitter,
         )
         split_block_refs, split_metadata = [], []
         for b, m in zip(*split_return):
@@ -92,24 +107,39 @@ class SplitRepartitionTaskScheduler(ExchangeTaskScheduler):
         assert bar_name in sub_progress_bar_dict, sub_progress_bar_dict
         reduce_bar = sub_progress_bar_dict[bar_name]
 
-        reduce_task = cached_remote_fn(self._exchange_spec.reduce)
-        reduce_return = [
-            reduce_task.options(**reduce_ray_remote_args, num_returns=2).remote(
-                *self._exchange_spec._reduce_args,
-                *split_block_refs[j],
+        if self._recovery_config is not None:
+            from ray.data._internal.planner.exchange.streaming_recovery import (
+                _reduce_outputs,
+                run_exchange_tasks,
             )
-            for j in range(output_num_blocks)
-            # Only process splits which contain blocks.
-            if len(split_block_refs[j]) > 0
-        ]
 
-        reduce_block_refs, reduce_metadata_schema = [], []
-        if reduce_return:
-            reduce_block_refs, reduce_metadata_schema = unzip(reduce_return)
-        reduce_metadata_schema: List[
-            "BlockMetadataWithSchema"
-        ] = reduce_bar.fetch_until_complete(list(reduce_metadata_schema))
-        reduce_block_refs = list(reduce_block_refs)
+            outputs = run_exchange_tasks(
+                self._recovery_config, _reduce_outputs,
+                (((self._exchange_spec, *split_block_refs[j]), 1)
+                 for j in range(output_num_blocks) if split_block_refs[j]),
+                reduce_ray_remote_args, ctx.kwargs["fixed_r_metrics"],
+            )
+            reduce_block_refs = [block for output in outputs for block, _ in output]
+            reduce_metadata_schema = [meta for output in outputs for _, meta in output]
+        else:
+            reduce_task = cached_remote_fn(self._exchange_spec.reduce)
+            reduce_return = [
+                reduce_task.options(**reduce_ray_remote_args, num_returns=2).remote(
+                    *self._exchange_spec._reduce_args,
+                    *split_block_refs[j],
+                )
+                for j in range(output_num_blocks)
+                # Only process splits which contain blocks.
+                if len(split_block_refs[j]) > 0
+            ]
+
+            reduce_block_refs, reduce_metadata_schema = [], []
+            if reduce_return:
+                reduce_block_refs, reduce_metadata_schema = unzip(reduce_return)
+            reduce_metadata_schema = reduce_bar.fetch_until_complete(
+                list(reduce_metadata_schema)
+            )
+            reduce_block_refs = list(reduce_block_refs)
 
         # Handle empty blocks.
         if len(reduce_block_refs) < output_num_blocks:
@@ -159,7 +189,8 @@ class SplitRepartitionTaskScheduler(ExchangeTaskScheduler):
             output.append(
                 RefBundle(
                     [BlockEntry(block, meta_with_schema.metadata)],
-                    owns_blocks=input_owned_by_consumer,
+                    owns_blocks=(input_owned_by_consumer
+                                 if self._recovery_config is None else False),
                     schema=meta_with_schema.schema,
                 )
             )

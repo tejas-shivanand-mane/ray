@@ -3,6 +3,8 @@
 Use --workload python/ray/train/examples/pytorch/torch_regression_example.py
 to run the existing PyTorch example, with a small local CSV and Fixed-R OFF
 by default. This exercises real Ray Data shards without a custom train loop.
+Use --mode on to also enroll non-keyed repartition and random-shuffle exchange
+tasks in Fixed-R; the report requires evidence of those protected stages.
 Other CPU TorchTrainer scripts can use --workload-arg=... for their arguments;
 they must already save and restore synchronous checkpoints. The harness
 checks retry mechanics, not arbitrary workload semantics. The regression

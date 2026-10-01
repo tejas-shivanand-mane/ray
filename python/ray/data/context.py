@@ -917,6 +917,9 @@ class DataContext:
     enable_fixed_r_task_recovery: bool = False
     # Streaming mode also permits coordinator-owned actor maps on surviving
     # executors. Actor state is not recovered; actor/method retries are disabled.
+    # Non-keyed repartition and random shuffle use protected split/pull-based
+    # exchange tasks in streaming mode, regardless of the ordinary shuffle strategy.
+    # Sort, keyed shuffle and aggregation are not supported in this mode.
     # "streaming" uses version-2 native recovery without declared output counts.
     # "buffered" preserves the earlier finite-envelope validation path.
     fixed_r_task_recovery_output_mode: str = "streaming"

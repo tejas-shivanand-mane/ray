@@ -183,6 +183,8 @@ def run_case(options, directory, diagnostics):
     import torch
     from ray.data import DataContext
     from ray.data._internal.execution.streaming_recovery import clear_config, get_config
+    from ray.data._internal.execution.execution_callback import ExecutionCallback
+    from ray.data._internal.execution.operators.base_physical_operator import AllToAllOperator
     from ray.experimental.recovery import system_config
     from ray.experimental.recovery._local import local_head_failure_cluster
     from ray.train import FailureConfig, RunConfig
@@ -196,8 +198,6 @@ def run_case(options, directory, diagnostics):
     selective = options["restart_scope"] == "selective"
     inject = options["scenario"] == "worker"
     enabled = options["mode"] == "on"
-    if regression and enabled:
-        raise ValueError("The regression example uses shuffle/repartition, outside Fixed-R's supported map chains. Use --mode off for the worker-reuse comparison.")
     diagnostics.update(implementation="existing_TorchTrainer_script", restart_scope=options["restart_scope"],
                        workload=str(script), workload_sha256=file_sha256(script),
                        numerical_probe=regression, torch_version=torch.__version__)
@@ -206,6 +206,15 @@ def run_case(options, directory, diagnostics):
                               producer_concurrency=None, recovery_timeout_s=30)
     originals = TorchTrainer.__init__, TorchTrainer.fit, ray.init, sys.argv[:], sys.path[:]
     timings = []
+
+    class ExchangeObserver(ExecutionCallback):
+        def after_execution_succeeds(self, executor):
+            exchanges = [
+                {"operator": op.name, **op.metrics.extra_metrics}
+                for op in executor._topology if isinstance(op, AllToAllOperator)
+            ]
+            if exchanges:
+                write_record(directory / "exchanges" / f"{uuid.uuid4().hex}.json", exchanges)
 
     def configure(trainer, train_loop_per_worker, **kwargs):
         config = kwargs.get("torch_config") or TorchConfig()
@@ -250,6 +259,9 @@ def run_case(options, directory, diagnostics):
             context.enable_progress_bars = False
             if enabled:
                 get_config(context)
+                context.custom_execution_callback_classes = [
+                    *context.custom_execution_callback_classes, ExchangeObserver
+                ]
             # The external harness owns this isolated cluster; script ray.init()
             # must attach to it rather than create a different benchmark cluster.
             ray.init = lambda *a, **kw: originals[2](ignore_reinit_error=True)
@@ -260,6 +272,19 @@ def run_case(options, directory, diagnostics):
             if len(timings) != 1:
                 raise ValueError("The script did not execute exactly one TorchTrainer.fit")
             diagnostics.update(validate(directory, selective, inject))
+            exchanges = [
+                record for path in sorted((directory / "exchanges").glob("*.json"))
+                for record in json.loads(path.read_text())
+            ]
+            diagnostics["data_exchanges"] = exchanges
+            if regression and enabled:
+                for name in ("Repartition", "RandomShuffle"):
+                    if not any(record["operator"].startswith(name)
+                               and record.get("fixed_r_enrolled_tasks", 0) > 0
+                               and record.get("fixed_r_closed_streams", 0)
+                               == record.get("fixed_r_enrolled_tasks", 0)
+                               for record in exchanges):
+                        raise ValueError(f"Missing completed Fixed-R exchange evidence: {name}")
             if regression:
                 reports = diagnostics["reports"]
                 if [r["metrics"][0]["epoch"] for r in reports] != [1, 2, 3]:

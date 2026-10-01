@@ -8,6 +8,8 @@ An optional final output splitter is supported when its coordinator and
 consumers survive; actor failures themselves are not recovered here.
 Dynamic streaming chains may also contain coordinator-owned actor maps placed
 on surviving executors. Their calls use ordinary Ray ownership, not task replay.
+Non-keyed repartition and random shuffle use protected exchange streams in dynamic
+mode, retaining the existing split and pull-based shuffle algorithms.
 """
 
 import math
@@ -251,6 +253,7 @@ def validate_execution(dag, context):
     from ray.data._internal.execution.operators.actor_pool_map_operator import (
         ActorPoolMapOperator,
     )
+    from ray.data._internal.execution.operators.base_physical_operator import AllToAllOperator
 
     names = []
     op = dag
@@ -263,20 +266,23 @@ def validate_execution(dag, context):
         op = op.input_dependencies[0]
     map_types = ((TaskPoolMapOperator, ActorPoolMapOperator)
                  if config.dynamic_task_outputs else (TaskPoolMapOperator,))
-    while isinstance(op, map_types):
+    supported_types = map_types + ((AllToAllOperator,) if config.dynamic_task_outputs else ())
+    while isinstance(op, supported_types):
+        if isinstance(op, AllToAllOperator) and not op._supports_fixed_r:
+            raise ValueError("Fixed-R exchanges support only random shuffle and non-keyed repartition")
         if (
             len(op.input_dependencies) != 1
             or get_config(op.data_context) != config
             or op._streaming_recovery_config != config
             or op.supports_fusion()
         ):
-            raise ValueError("Fixed-R Data requires one consistently configured map chain")
+            raise ValueError("Fixed-R Data requires one consistently configured operator chain")
         names.append(op.name)
         op = op.input_dependencies[0]
     if not isinstance(op, InputDataBuffer):
         raise ValueError(
-            "Fixed-R Data supports only InputDataBuffer -> task-map chains; "
-            "surviving actor maps additionally require streaming output mode"
+            "Fixed-R Data supports map chains, random shuffle and non-keyed repartition; "
+            "exchanges and surviving actor maps require streaming output mode"
         )
     if config.automatic_outputs and not names:
         # materialize() creates a new InputData-only Dataset from independent

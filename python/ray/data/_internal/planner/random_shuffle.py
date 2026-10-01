@@ -1,3 +1,4 @@
+import secrets
 from typing import Any, Dict, List, Optional
 
 from ray.data._internal.execution.interfaces import (
@@ -9,6 +10,7 @@ from ray.data._internal.execution.interfaces.transform_fn import (
     AllToAllTransformFnResult,
 )
 from ray.data._internal.execution.operators.map_transformer import MapTransformer
+from ray.data._internal.execution.streaming_recovery import get_config
 from ray.data._internal.execution.util import merge_label_selector
 from ray.data._internal.planner.exchange.pull_based_shuffle_task_scheduler import (
     PullBasedShuffleTaskScheduler,
@@ -36,6 +38,10 @@ def generate_random_shuffle_fn(
     # If no seed has been specified, pin timestamp based one
     # so that task could be safely retried (w/o changing their output)
     seed = get_single_integer_random_seed(seed_config, data_context)
+    recovery_config = get_config(data_context)
+    if recovery_config is not None and seed is None:
+        # Freeze randomness in the recipe even for an unseeded public shuffle.
+        seed = secrets.randbits(31)
 
     def fn(
         refs: List[RefBundle],
@@ -71,7 +77,13 @@ def generate_random_shuffle_fn(
             upstream_map_fn=upstream_map_fn,
         )
 
-        if data_context.shuffle_strategy == ShuffleStrategy.SORT_SHUFFLE_PUSH_BASED:
+        if recovery_config is not None:
+            from ray.data._internal.planner.exchange.streaming_recovery import (
+                FixedRShuffleTaskScheduler,
+            )
+
+            scheduler = FixedRShuffleTaskScheduler(shuffle_spec, recovery_config)
+        elif data_context.shuffle_strategy == ShuffleStrategy.SORT_SHUFFLE_PUSH_BASED:
             if num_outputs is not None:
                 raise NotImplementedError(
                     "Push-based shuffle doesn't support setting num_blocks yet."

@@ -353,6 +353,153 @@ def test_config_rejects_eager_free_and_unsafe_retry_policy():
         get_config(context)
 
 
+@pytest.mark.parametrize("operation", ["split", "shuffle_repartition", "random_shuffle"])
+@pytest.mark.parametrize("rows,outputs", [(17, 3), (2, 5), (0, 3)])
+def test_fixed_r_exchange_matches_ordinary(data_cluster, operation, rows, outputs):
+    owner_id, executor_id, _ = data_cluster
+    context = configured_context(owner_id, executor_id, {})
+    context.set_config(CONFIG_KEY, replace(
+        context.get_config(CONFIG_KEY), dynamic_task_outputs=True
+    ))
+    ordinary = context.copy()
+    ordinary.remove_config(CONFIG_KEY)
+
+    def execute(ctx):
+        with DataContext.current(ctx):
+            ds = ray.data.from_blocks([
+                pa.table({"value": list(range(rows // 2))}),
+                pa.table({"value": list(range(rows // 2, rows))}),
+            ])
+            if operation == "random_shuffle":
+                ds = ds.random_shuffle(seed=7)
+            else:
+                ds = ds.repartition(outputs, shuffle=operation == "shuffle_repartition")
+            iterator, _, executor = ds._execute_to_iterator()
+            bundles = list(iterator)
+            values = [row for bundle in bundles
+                      for block in ray.get(bundle.block_refs)
+                      if block.num_rows
+                      for row in block["value"].to_pylist()]
+            return values, bundles, executor
+
+    expected, _, _ = execute(ordinary)
+    actual, bundles, executor = execute(context)
+    assert actual == expected
+    assert sorted(actual) == list(range(rows))
+    assert len(bundles) == (2 if operation == "random_shuffle" else outputs)
+    from ray.data._internal.execution.operators.base_physical_operator import AllToAllOperator
+
+    metrics = next(op.metrics.extra_metrics for op in executor._topology
+                   if isinstance(op, AllToAllOperator))
+    if rows:
+        assert metrics["fixed_r_enrolled_tasks"] > 0
+    assert metrics["fixed_r_closed_streams"] == metrics["fixed_r_enrolled_tasks"]
+    assert metrics["fixed_r_recovered_tasks"] == 0
+
+
+@pytest.mark.parametrize("phase,operation", [
+    ("_map_outputs", "shuffle"),
+    ("_reduce_outputs", "shuffle"),
+    ("_split_outputs", "split"),
+    ("_reduce_outputs", "split"),
+])
+def test_fixed_r_exchange_owner_loss(data_cluster, tmp_path, monkeypatch, phase, operation):
+    from ray.data._internal.planner.exchange import streaming_recovery as exchange
+    from ray.data._internal.execution.operators.base_physical_operator import AllToAllOperator
+
+    owner_id, executor_id, crash = data_cluster
+    context = configured_context(owner_id, executor_id, {})
+    context.set_config(CONFIG_KEY, replace(
+        context.get_config(CONFIG_KEY), dynamic_task_outputs=True
+    ))
+    gate = str(tmp_path / "exchange-release")
+    blocked = str(tmp_path / "exchange-blocked")
+    original = getattr(exchange, phase)
+    submitted = []
+    original_submit = exchange.submit_stream
+
+    def capture_stream(*args, **kwargs):
+        stream = original_submit(*args, **kwargs)
+        submitted.append(stream)
+        return stream
+
+    monkeypatch.setattr(exchange, "submit_stream", capture_stream)
+
+    def gated(*args):
+        # Map/split fail after a copied prefix; reduce fails before its one pair.
+        stop_index = 0 if phase == "_reduce_outputs" else 2
+        for index, value in enumerate(original(*args)):
+            if index == stop_index and not Path(gate).exists():
+                Path(blocked).touch()
+                deadline = time.monotonic() + 90
+                while not Path(gate).exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Exchange fault gate was not released")
+                    time.sleep(0.01)
+            yield value
+
+    monkeypatch.setattr(exchange, phase, gated)
+
+    def execute():
+        with DataContext.current(context):
+            if operation == "shuffle":
+                ds = ray.data.from_blocks([
+                    pa.table({"value": list(range(start, end))})
+                    for start, end in ((0, 8), (8, 16), (16, 23))
+                ]).random_shuffle(seed=7)
+            else:
+                ds = ray.data.from_blocks([
+                    pa.table({"value": list(range(23))})
+                ]).repartition(3)
+            iterator, _, executor = ds._execute_to_iterator()
+            bundles = list(iterator)
+            return bundles, executor
+
+    with ThreadPoolExecutor(1) as pool:
+        future = pool.submit(execute)
+        try:
+            wait_for_condition(lambda: Path(blocked).exists() or future.done(), timeout=60)
+            assert not future.done(), "Execution ended before the fault gate"
+            if phase != "_reduce_outputs":
+                wait_for_condition(
+                    lambda: any(s.stats["fixed_r_copied_blocks"] > 0 for s in submitted),
+                    timeout=30,
+                )
+            crash([s.owner for s in submitted if s.owner is not None and not s.closed])
+        finally:
+            Path(gate).touch()
+        bundles, executor = future.result(timeout=90)
+    values = [value for bundle in bundles for block in ray.get(bundle.block_refs)
+              for value in block["value"].to_pylist()]
+    assert sorted(values) == list(range(23))
+    if operation == "split":
+        assert values == list(range(23))
+    metrics = next(op.metrics.extra_metrics for op in executor._topology
+                   if isinstance(op, AllToAllOperator))
+    assert metrics["fixed_r_recovered_tasks"] == 1
+    assert metrics["fixed_r_closed_streams"] == (
+        metrics["fixed_r_enrolled_tasks"] + metrics["fixed_r_survivor_tasks"]
+    )
+    ray._private.worker.global_worker.core_worker.validate_streaming_recovery_inputs(
+        [ref for bundle in bundles for ref in bundle.block_refs]
+    )
+
+
+@pytest.mark.parametrize("operation", ["sort", "buffered_shuffle"])
+def test_fixed_r_exchange_rejects_unsupported(data_cluster, operation):
+    owner_id, executor_id, _ = data_cluster
+    context = configured_context(owner_id, executor_id, {})
+    context.set_config(CONFIG_KEY, replace(
+        context.get_config(CONFIG_KEY), dynamic_task_outputs=operation != "buffered_shuffle",
+        buffered_task_outputs=operation == "buffered_shuffle",
+    ))
+    with DataContext.current(context):
+        ds = ray.data.from_blocks([pa.table({"value": [2, 1]})])
+        ds = ds.sort("value") if operation == "sort" else ds.random_shuffle(seed=0)
+        with pytest.raises(ValueError, match="Fixed-R"):
+            list(ds.iter_internal_ref_bundles())
+
+
 def test_zero_budget_does_not_read_or_copy(monkeypatch):
     stream = Mock()
     task = StreamingRecoveryDataOpTask(0, stream, Mock(), "test")

@@ -119,6 +119,7 @@ class AllToAllOperator(
         num_outputs: Optional[int] = None,
         sub_progress_bar_names: Optional[List[str]] = None,
         name: str = "AllToAll",
+        supports_fixed_r: bool = False,
     ):
         """Create an AllToAllOperator.
         Args:
@@ -132,6 +133,7 @@ class AllToAllOperator(
             num_outputs: The number of expected output bundles for progress bar.
             sub_progress_bar_names: The names of internal sub progress bars.
             name: The name of this operator.
+            supports_fixed_r: Whether the planner installed protected exchange tasks.
         """
         self._bulk_fn = bulk_fn
         self._next_task_index = 0
@@ -142,6 +144,11 @@ class AllToAllOperator(
         self._input_buffer: FIFOBundleQueue = FIFOBundleQueue()
         self._output_buffer: FIFOBundleQueue = FIFOBundleQueue()
         self._stats: StatsDict = {}
+        from ray.data._internal.execution.streaming_recovery import get_config, new_metrics
+
+        self._streaming_recovery_config = get_config(data_context)
+        self._supports_fixed_r = supports_fixed_r
+        self._streaming_recovery_metrics = new_metrics()
         super().__init__(name, [input_op], data_context, target_max_block_size_override)
 
     @property
@@ -180,6 +187,7 @@ class AllToAllOperator(
             op_name=self.name,
             sub_progress_bar_dict=self._sub_progress_bar_dict,
             target_max_block_size_override=self.target_max_block_size_override,
+            kwargs={"fixed_r_metrics": self._streaming_recovery_metrics},
         )
         # NOTE: We don't account object store memory use from intermediate `bulk_fn`
         # outputs (e.g., map outputs for map-reduce).
@@ -232,7 +240,13 @@ class AllToAllOperator(
         self._sub_progress_bar_dict[name] = pg
 
     def supports_fusion(self):
-        return True
+        return self._streaming_recovery_config is None
+
+    def _extra_metrics(self):
+        metrics = super()._extra_metrics()
+        if self._streaming_recovery_config is not None:
+            metrics.update(self._streaming_recovery_metrics)
+        return metrics
 
     def throttling_disabled(self) -> bool:
         # Disable resource allocation and throttling for the operator

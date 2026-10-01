@@ -255,6 +255,7 @@ def _split_at_indices(
     owned_by_consumer: bool,
     block_rows: List[int] = None,
     label_selector: Optional[Dict[str, str]] = None,
+    block_splitter=None,
 ) -> Tuple[List[List[ObjectRef[Block]]], List[List[BlockMetadata]]]:
     """Split blocks at the provided indices.
 
@@ -265,6 +266,7 @@ def _split_at_indices(
         block_rows: The number of rows for each block, in case it has already been
             computed.
         label_selector: Optional label selector applied to the split remote tasks.
+        block_splitter: Optional internal executor for the per-block split phase.
 
     Returns:
         The block split futures and their metadata. If an index split is empty, the
@@ -286,7 +288,7 @@ def _split_at_indices(
     # phase 2: split each block based on the indices from previous step.
     all_blocks_split_results: Iterable[
         Tuple[ObjectRef[Block], BlockMetadata]
-    ] = _split_all_blocks(
+    ] = (block_splitter or _split_all_blocks)(
         blocks_with_metadata,
         per_block_split_indices,
         owned_by_consumer,

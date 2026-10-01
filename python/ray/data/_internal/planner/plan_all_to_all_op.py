@@ -367,4 +367,8 @@ def plan_all_to_all_op(
         num_outputs=op.num_outputs,
         sub_progress_bar_names=op.sub_progress_bar_names,
         name=op.name,
+        supports_fixed_r=(
+            isinstance(op, RandomShuffle)
+            or (isinstance(op, Repartition) and not op.keys)
+        ),
     )
