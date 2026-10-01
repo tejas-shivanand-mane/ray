@@ -1,6 +1,9 @@
 # Experimental coordinator-process recovery without model rollback
 
-Status: first Python prototype, source-reviewed only; local validation pending.
+Status: the user reports that the complete focused correctness suite passed
+locally at `25dab161` on 2026-10-01. The agent did not run the suite. This covers
+the small CPU/Gloo mechanism test described below; CIFAR/ResNet recovery and
+steady-state overhead remain unmeasured.
 This extends Ray Data input delivery. It is **not Fixed-R**, selective Train
 retry, physical-machine recovery, or a measured performance improvement.
 
