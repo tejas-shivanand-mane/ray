@@ -24,6 +24,7 @@ from ray.data._internal.execution.operators.map_operator import (
 from ray.data._internal.execution.operators.map_transformer import MapTransformer
 from ray.data._internal.execution.streaming_recovery import (
     BufferedRecoveryDataOpTask,
+    OwnerHelperPool,
     StreamingRecoveryDataOpTask,
     buffered_map_task,
     get_config as get_recovery_config,
@@ -94,6 +95,7 @@ class TaskPoolMapOperator(MapOperator):
         self._streaming_recovery_config = get_recovery_config(data_context)
         self._streaming_recovery_survivor_only = False
         self._streaming_recovery_metrics = new_recovery_metrics()
+        self._streaming_recovery_owner_pool = None
         if self._streaming_recovery_config is not None:
             supports_fusion = False
 
@@ -221,12 +223,19 @@ class TaskPoolMapOperator(MapOperator):
         else:
             if not config.automatic_outputs and self.name not in config.expected_blocks:
                 raise ValueError(f"No Fixed-R output count declared for {self.name!r}")
+            if (config.dynamic_task_outputs and config.mode == "fixed_r"
+                    and config.reuse_owner_helpers and not self._streaming_recovery_survivor_only
+                    and self._streaming_recovery_owner_pool is None):
+                self._streaming_recovery_owner_pool = OwnerHelperPool(
+                    config, self._streaming_recovery_metrics
+                )
             gen = submit_stream(
                 config, self._map_task, args, kwargs, dynamic_ray_remote_args,
                 1 if config.automatic_outputs else config.expected_blocks[self.name],
                 self._streaming_recovery_metrics,
                 task_index=self._next_data_task_idx,
                 survivor_only=self._streaming_recovery_survivor_only,
+                owner_pool=self._streaming_recovery_owner_pool,
             )
 
         self._current_logical_usage = self._current_logical_usage.add(logical_usage)
@@ -258,7 +267,15 @@ class TaskPoolMapOperator(MapOperator):
             metrics.update(self._streaming_recovery_metrics)
             metrics["fixed_r_output_mode"] = self._streaming_recovery_config.mode
             metrics["fixed_r_survivor_only"] = self._streaming_recovery_survivor_only
+            metrics["fixed_r_helper_reuse_enabled"] = self._streaming_recovery_owner_pool is not None
         return metrics
+
+    def _do_shutdown(self, force: bool = False):
+        try:
+            super()._do_shutdown(force)
+        finally:
+            if self._streaming_recovery_owner_pool is not None:
+                self._streaming_recovery_owner_pool.close()
 
     def progress_str(self) -> str:
         return ""

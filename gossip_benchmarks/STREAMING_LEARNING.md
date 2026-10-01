@@ -139,7 +139,8 @@ of replayed data. Both arms use the same two-data-CPU budget, 4 MiB object-store
 scheduling budget, block sizing and prefetch settings. The memory budget is a
 scheduler target, not a hard physical memory limit. Local telemetry costs are
 included in both workloads; this instrumented run is not a minimal-overhead
-measurement. Streaming overhead optimization remains outside this change.
+measurement. The initial workload change did not optimize streaming recovery;
+the subsequent helper-reuse change below targets a measured runtime cost.
 
 ## Diagnose the no-failure slowdown
 
@@ -213,3 +214,62 @@ Terminal snapshots have `state=completed` or `failed`; a timeout may leave
 earlier snapshots again. An in-flight timing scope is absent until it exits, so
 timeout evidence can be partial. Success still requires the usual input,
 checkpoint and streaming checks, plus the requested ON timing evidence.
+
+## Reuse retired owner helpers
+
+The validated two-epoch profile at `7a5a437` completed OFF in 85.93 seconds and ON
+in 213.21 seconds (+148.11%). Both committed checkpoints matched. Across ON's
+244 tasks, accumulated helper-ready time was 120.17 seconds, owner-begin time
+56.33 seconds, input/output get-and-put time 2.21 seconds, and stream-close time
+0.58 seconds. These inclusive phase sums are not additive components of the
+127.28-second workload difference. No failures were injected in that profile.
+
+Dynamic read/map operators now cache up to **two idle owner helpers per physical
+operator execution**. If none is idle, a fresh helper is created; active task
+concurrency is unchanged. A helper still owns only one live protected stream.
+The cache is local to the existing surviving Data coordinator, is not detached,
+does not cross executions/epochs, and does not migrate ownership. Declared-count,
+buffered-envelope and exchange submissions retain the fresh-helper path.
+
+Reuse happens only after the prior reader's close, including native durable
+tombstone acknowledgement, succeeds. Every checkout has a strictly increasing
+generation. Old pull/offer/confirm calls fail; an old close cannot cancel the
+current generation. A failed or ambiguous submission discards its helper rather
+than caching it or submitting a replacement task. Pool shutdown kills idle
+helpers only; failed retirement must still be resolved by the task's close path.
+Owner-node loss retains the existing replay and authoritative-death rules.
+This does not add helper-actor-process recovery on a surviving owner node.
+
+There is no new C++ code or native build requirement. The workload, producer
+placement, holder count, copies, retry policy and checkpoint responsibility stay
+the same. The change can only amortize setup when a helper becomes idle before
+later task submissions. A burst of concurrent tasks still needs one helper per
+active task; the idle limit is not a cap on peak helper processes.
+
+Run the focused validation and the same two-epoch control pair after pulling
+`fixed-r-owner-helper-reuse`:
+
+```bash
+bash gossip_benchmarks/validate_streaming_learning.sh \
+  --data-directory ~/ray-coverage/cifar-streaming \
+  --controls-only --epochs 2 --profile-fixed-r --timeout-s 300 \
+  --output ~/ray-coverage/streaming-learning-helper-reuse.json
+```
+
+The validation now also includes local-raylet tests for dynamic-map reuse and
+owner-node loss after a helper has served a previous task, as well as unit cases
+for generation fencing, failed barriers and ambiguous submissions. Those tests
+run before the learning observations. Neither tests nor benchmarks were run by
+the agent; this change remains unvalidated until local results are checked.
+
+The report includes `fixed_r_helper_creations`, `fixed_r_helper_reuses` and
+`fixed_r_helper_kill_requests`, both per operator and per sample. Creations and
+reuses count checkout attempts, including failures before enrollment. Kill counts
+mean requests, not confirmation of process exit. The no-failure ON run requires
+actual reuse and matching creation/cleanup-request counts. Existing correctness
+checks remain required. Do not infer a speedup until completed timings are read.
+
+For a same-source implementation ablation, add `--fresh-owner-helpers` and use a
+different output filename. That disables the cache in ON; OFF remains ordinary
+Ray. It preserves all other benchmark settings. Profiling remains opt-in.
+Plotting is still separate and reads either report with `plot_streaming_learning.py`.

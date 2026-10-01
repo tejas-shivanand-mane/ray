@@ -108,7 +108,7 @@ def test_timeout_plot_keeps_observed_stop_without_claiming_completion(checks):
     assert trace["outcome"] == "timeout (censored)"
 
 
-@pytest.mark.parametrize("corruption", [None, "selective", "native", "input", "failed", "profiling"])
+@pytest.mark.parametrize("corruption", [None, "selective", "native", "input", "failed", "profiling", "helper_policy"])
 def test_comparison_keeps_retry_policy_and_inputs_matched(checks, corruption):
     from fashion_comparison import PROVENANCE_KEYS
 
@@ -132,6 +132,8 @@ def test_comparison_keeps_retry_policy_and_inputs_matched(checks, corruption):
         right["status"] = "failed"
     elif corruption == "profiling":
         right["profile_fixed_r"] = True
+    elif corruption == "helper_policy":
+        right["reuse_owner_helpers"] = True
     if corruption:
         with pytest.raises(ValueError):
             checks.compare_samples(left, right)

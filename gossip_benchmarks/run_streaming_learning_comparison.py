@@ -37,6 +37,7 @@ def run_comparison(args):
         "steps_per_epoch": steps, "fault_after_step": step, "repeats": args.repeats,
         "observations_per_repetition": 2 * len(cases), "preliminary": args.repeats == 1,
         "profile_fixed_r": args.profile_fixed_r,
+        "reuse_owner_helpers": not args.fresh_owner_helpers,
         "samples": [], "pairs": [], "failed_observations": [],
         "comparison_axis": "Fixed-R OFF/full Train retry versus Fixed-R ON/full Train retry",
         "limitations": [
@@ -70,6 +71,7 @@ def run_comparison(args):
                 options = {
                     "training_strategy": "ray-train-workload", "streaming_learning": True,
                     "profile_fixed_r": args.profile_fixed_r,
+                    "reuse_owner_helpers": not args.fresh_owner_helpers,
                     "comparison": "fixed-r", "scenario": scenario, "mode": mode,
                     "restart_scope": "full", "owner_placement": "default", "placement_strategy": "STRICT_SPREAD",
                     "timeout_s": args.timeout_s, "training_epochs": args.epochs,
@@ -87,6 +89,7 @@ def run_comparison(args):
                 sample.update(failure_point=point, fault_after_epoch=epoch, fault_after_step=step,
                               restart_scope="full", training_epochs=args.epochs,
                               profile_fixed_r=args.profile_fixed_r)
+                sample["reuse_owner_helpers"] = not args.fresh_owner_helpers
                 if scenario == "none":
                     controls[(pair, mode)] = sample
                 elif sample["status"] == "passed":
@@ -145,6 +148,8 @@ def main():
     parser.add_argument("--controls-only", action="store_true")
     parser.add_argument("--profile-fixed-r", action="store_true",
                         help="Record runtime phase timings; adds local clock/counter overhead")
+    parser.add_argument("--fresh-owner-helpers", action="store_true",
+                        help="Disable idle helper reuse in ON for an implementation ablation")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-s", type=float, default=300)
     args = parser.parse_args()

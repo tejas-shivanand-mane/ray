@@ -18,12 +18,15 @@ import time
 import traceback
 from collections import deque
 from dataclasses import dataclass, replace
+from threading import RLock
 from typing import Dict, Tuple, Union
 
 import ray
 from ray._private.streaming_recovery import (
+    ReusableStreamingRecoveryOwnerActor,
     StreamingRecoveryCountError,
     StreamingRecoveryOwnerActor,
+    StreamingRecoveryOwnerLease,
     StreamingRecoveryReader,
     StreamingRecoveryRequired,
     _record_duration,
@@ -75,6 +78,10 @@ class FixedRDataConfig:
 
     ``profile_timing`` records inclusive local phase times in operator metrics.
     It is diagnostic instrumentation, not an additive overhead breakdown.
+
+    ``reuse_owner_helpers`` lets dynamic task-map operators retain up to two
+    idle helpers per execution. A helper serves only one live stream at a time
+    and is returned to the cache only after durable stream retirement.
     """
 
     owner_node_id: str
@@ -87,6 +94,7 @@ class FixedRDataConfig:
     dynamic_task_outputs: bool = False
     max_task_output_bytes: int = 256 * 1024**2
     profile_timing: bool = False
+    reuse_owner_helpers: bool = True
 
     @property
     def automatic_outputs(self):
@@ -106,6 +114,8 @@ class FixedRDataConfig:
         return nodes[task_index % len(nodes)]
 
     def validate(self):
+        if type(self.reuse_owner_helpers) is not bool:
+            raise ValueError("reuse_owner_helpers must be a bool")
         if type(self.profile_timing) is not bool:
             raise ValueError("profile_timing must be a bool")
         if type(self.preserve_batch_output_blocks) is not bool:
@@ -227,6 +237,7 @@ def get_config(context):
                 dynamic_task_outputs=context.fixed_r_task_recovery_output_mode == "streaming",
                 max_task_output_bytes=context.fixed_r_task_recovery_max_output_bytes,
                 profile_timing=context.get_config("fixed_r_profile_timing", False),
+                reuse_owner_helpers=context.get_config("fixed_r_reuse_owner_helpers", True),
             )
             context.set_config(CONFIG_KEY, config)
         if not isinstance(config, FixedRDataConfig) or not config.automatic_outputs:
@@ -351,17 +362,107 @@ def surviving_actor_options(config, options, actor_index):
     return options
 
 
+def _create_owner_helper(config, stats, actor_type=StreamingRecoveryOwnerActor):
+    with _record_duration(stats, "helper_create_request"):
+        owner = ray.remote(num_cpus=0, max_restarts=0, max_task_retries=0)(
+            actor_type
+        ).options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                config.owner_node_id, soft=False
+            )
+        ).remote()
+    stats["fixed_r_helper_creations"] += 1
+    return owner
+
+
+def _kill_owner_helper(owner, stats):
+    with _record_duration(stats, "helper_kill_request"):
+        ray.kill(owner, no_restart=True)
+    stats["fixed_r_helper_kill_requests"] += 1
+
+
+class OwnerHelperPool:
+    """Operator-local idle cache; one live task per checked-out helper.
+
+    Only a stream whose reader.close() succeeded may be recycled. Failed or
+    ambiguous submissions discard their private helper instead. This cache
+    bounds idle processes, not active task concurrency, and does not survive
+    executions or migrate ownership. Calls follow the operator's serialized
+    submission/retirement lifecycle.
+    """
+
+    def __init__(self, config, stats, max_idle=2):
+        if type(max_idle) is not int or max_idle < 0:
+            raise ValueError("max_idle must be a nonnegative integer")
+        self.config = config
+        self.stats = stats
+        self._max_idle = max_idle
+        self._idle = []
+        self._active = set()
+        self._closed = False
+        self._lock = RLock()
+
+    def acquire(self):
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Owner helper pool is closed")
+            if self._idle:
+                owner, generation = self._idle.pop()
+                self.stats["fixed_r_helper_reuses"] += 1
+            else:
+                owner = _create_owner_helper(
+                    self.config, self.stats, ReusableStreamingRecoveryOwnerActor
+                )
+                generation = 0
+            lease = StreamingRecoveryOwnerLease(owner, generation + 1)
+            self._active.add(lease)
+            return lease
+
+    def recycle(self, lease, reader):
+        """Caller has passed this stream's native durable retirement barrier."""
+        with self._lock:
+            if lease not in self._active:
+                raise RuntimeError("Owner lease is not active")
+            if reader.owner is not lease or not reader._closed:
+                raise RuntimeError("Owner reuse requires successful reader retirement")
+            if self._closed or len(self._idle) >= self._max_idle:
+                self.discard(lease)
+            else:
+                self._active.remove(lease)
+                self._idle.append((lease.actor, lease.generation))
+
+    def discard(self, lease):
+        with self._lock:
+            if lease not in self._active:
+                raise RuntimeError("Owner lease is not active")
+            _kill_owner_helper(lease.actor, self.stats)
+            self._active.remove(lease)
+
+    def close(self):
+        # Never kill checked-out helpers here: an earlier stream.close() may
+        # have failed its tombstone barrier. Its caller must retry retirement.
+        with self._lock:
+            self._closed = True
+            while self._idle:
+                owner, _ = self._idle[-1]
+                _kill_owner_helper(owner, self.stats)
+                self._idle.pop()
+
+
 class _DataStream:
     """One enrolled reader or ordinary surviving-coordinator generator."""
 
-    def __init__(self, expected_returns, stats, reader=None, generator=None, owner=None):
+    def __init__(self, expected_returns, stats, reader=None, generator=None, owner=None,
+                 owner_pool=None):
         self.reader = reader
         self.generator = generator
         self.owner = owner
+        self.owner_pool = owner_pool
         self.expected_returns = expected_returns
         self.next_index = 0
         self.stats = stats
         self.closed = False
+        self._close_lock = RLock()
         if reader is not None:
             info = _inspect_recovery_stream_descriptor(reader.descriptor)
             self.task_id = ray.TaskID(info["task_id"])
@@ -442,17 +543,20 @@ class _DataStream:
             self.reader.release(first_index + 1)
 
     def close(self):
-        if self.closed:
-            return
-        with _record_duration(self.stats, "stream_close"):
-            self._close()
+        with self._close_lock:
+            if self.closed:
+                return
+            with _record_duration(self.stats, "stream_close"):
+                self._close()
 
     def _close(self):
         if self.reader is not None:
             # Do not kill the helper until the durable tombstone barrier succeeds.
             self.reader.close()
-            with _record_duration(self.stats, "helper_kill_request"):
-                ray.kill(self.owner, no_restart=True)
+            if self.owner_pool is not None:
+                self.owner_pool.recycle(self.owner, self.reader)
+            else:
+                _kill_owner_helper(self.owner, self.stats)
         elif self.generator is not None:
             ray.cancel(self.generator, force=False, recursive=True)
             self.generator = None
@@ -462,20 +566,23 @@ class _DataStream:
 
 def submit_stream(
     config, producer, args, kwargs, options, expected_blocks, stats, *, task_index=0,
-    survivor_only=False,
+    survivor_only=False, owner_pool=None,
 ):
     stats["fixed_r_timing_enabled"] = config.profile_timing
     with _record_duration(stats, "submission"):
         return _submit_stream(
             config, producer, args, kwargs, options, expected_blocks, stats,
             task_index=task_index, survivor_only=survivor_only,
+            owner_pool=owner_pool,
         )
 
 
 def _submit_stream(
     config, producer, args, kwargs, options, expected_blocks, stats, *, task_index,
-    survivor_only,
+    survivor_only, owner_pool,
 ):
+    if owner_pool is not None and (owner_pool.config != config or owner_pool.stats is not stats):
+        raise ValueError("Owner pool belongs to a different execution operator")
     with _record_duration(stats, "owner_liveness"):
         owner_alive = _owner_alive(config)
     if config.automatic_outputs:
@@ -521,14 +628,14 @@ def _submit_stream(
     if survivor_only or config.mode == "copy" or not owner_alive:
         return submit_from_coordinator()
 
-    with _record_duration(stats, "helper_create_request"):
-        owner = ray.remote(num_cpus=0, max_restarts=0, max_task_retries=0)(
-            StreamingRecoveryOwnerActor
-        ).options(
-            scheduling_strategy=NodeAffinitySchedulingStrategy(
-                config.owner_node_id, soft=False
-            )
-        ).remote()
+    owner = (owner_pool.acquire() if owner_pool is not None
+             else _create_owner_helper(config, stats))
+
+    def discard_owner():
+        if owner_pool is not None:
+            owner_pool.discard(owner)
+        else:
+            _kill_owner_helper(owner, stats)
     # Do not ask this helper to create a protected producer until startup has
     # succeeded. A failure here is unambiguously before begin/descriptor/receipt,
     # so there is no protected task or witness offer to abandon or duplicate.
@@ -553,18 +660,18 @@ def _submit_stream(
                     raise
                 time.sleep(0.01)
         finally:
-            ray.kill(owner, no_restart=True)
+            discard_owner()
         stream = submit_from_coordinator()
         stats["fixed_r_pre_submission_failovers"] += 1
         return stream
     except BaseException:
-        ray.kill(owner, no_restart=True)
+        discard_owner()
         raise
 
     # Head status can change while the helper starts. This is still before any
     # begin call, so switching submission ownership remains safe here.
     if not owner_alive:
-        ray.kill(owner, no_restart=True)
+        discard_owner()
         stream = submit_from_coordinator()
         stats["fixed_r_pre_submission_failovers"] += 1
         return stream
@@ -586,10 +693,10 @@ def _submit_stream(
                 # allowed after begin may have run.
                 pass
         finally:
-            ray.kill(owner, no_restart=True)
+            discard_owner()
         raise
     stats["fixed_r_enrolled_tasks"] += 1
-    return _DataStream(count, stats, reader=reader, owner=owner)
+    return _DataStream(count, stats, reader=reader, owner=owner, owner_pool=owner_pool)
 
 
 def new_metrics():
@@ -597,6 +704,7 @@ def new_metrics():
         "fixed_r_enrolled_tasks", "fixed_r_survivor_tasks", "fixed_r_copy_baseline_tasks",
         "fixed_r_recovered_tasks", "fixed_r_copied_blocks", "fixed_r_closed_streams",
         "fixed_r_pre_submission_failovers",
+        "fixed_r_helper_creations", "fixed_r_helper_reuses", "fixed_r_helper_kill_requests",
     ), 0)
     # One owner failure: only the tasks still live at that loss can replay.
     # Record identities, not every successful task in the Dataset.

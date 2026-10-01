@@ -1093,6 +1093,7 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
             context.fixed_r_task_recovery_output_mode = "streaming"
             context.fixed_r_task_recovery_timeout_s = 30
             context.set_config("fixed_r_profile_timing", bool(options.get("profile_fixed_r")))
+            context.set_config("fixed_r_reuse_owner_helpers", options.get("reuse_owner_helpers", True))
             context.execution_options.preserve_order = True
             context.enable_progress_bars = False
             if options.get("comparison") in ("fixed-r", "integrated"):

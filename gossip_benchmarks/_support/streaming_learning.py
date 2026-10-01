@@ -115,8 +115,15 @@ def validate_learning(directory, options, diagnostics):
     operators = [op for execution in diagnostics["data_executions"] for op in execution["operators"]]
     diagnostics["fixed_r_enrolled_tasks"] = sum(op.get("fixed_r_enrolled_tasks", 0) for op in operators)
     diagnostics["fixed_r_recovered_tasks"] = sum(op.get("fixed_r_recovered_tasks", 0) for op in operators)
+    for key in ("fixed_r_helper_creations", "fixed_r_helper_reuses", "fixed_r_helper_kill_requests"):
+        diagnostics[key] = sum(op.get(key, 0) for op in operators)
     if options["mode"] == "on" and diagnostics["fixed_r_enrolled_tasks"] == 0:
         raise ValueError("ON run lacks Fixed-R enrollment evidence")
+    if options["mode"] == "on" and options.get("reuse_owner_helpers", True):
+        if diagnostics["fixed_r_helper_reuses"] == 0:
+            raise ValueError("ON run lacks requested owner-helper reuse evidence")
+        if diagnostics["fixed_r_helper_creations"] != diagnostics["fixed_r_helper_kill_requests"]:
+            raise ValueError("Owner helper cleanup requests do not match creations")
     if options["mode"] == "on" and options.get("profile_fixed_r"):
         protected = [op for op in operators if op.get("fixed_r_enrolled_tasks", 0)]
         if not protected or any(
@@ -168,6 +175,8 @@ def compare_samples(left, right, *, control=False):
         raise ValueError("Both observations must pass completion and evidence checks")
     if left.get("profile_fixed_r", False) != right.get("profile_fixed_r", False):
         raise ValueError("Mismatched runtime profiling configuration")
+    if left.get("reuse_owner_helpers") != right.get("reuse_owner_helpers"):
+        raise ValueError("Mismatched owner-helper reuse configuration")
     for key in ("training_epochs", "input_identity", "workload_sha256", "torch_version", "torchvision_version",
                 "owner_placement", "placement_strategy", "model_parameters", "batch_size", "checkpoint_policy"):
         if left[key] != right[key]:

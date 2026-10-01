@@ -515,6 +515,86 @@ class StreamingRecoveryOwnerActor:
             self.stream.close()
 
 
+class ReusableStreamingRecoveryOwnerActor(StreamingRecoveryOwnerActor):
+    """Single live stream, with generation fencing for sequential helper reuse.
+
+    The consumer must finish the native tombstone barrier before lending this
+    actor to another task. Generations never repeat, so a delayed close from an
+    old reader cannot cancel the new stream. No active streams are multiplexed.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._generation = 0
+        self._active_generation = None
+
+    def begin(self, generation, *args):
+        if type(generation) is not int or generation <= self._generation:
+            raise StreamingRecoveryStateError("Stale or invalid owner generation")
+        if self.stream is not None or self._active_generation is not None:
+            raise StreamingRecoveryStateError("This owner already holds a stream")
+        # Reserve before submission, including when submission subsequently
+        # raises. An ambiguous begin is never retried as a fresh task.
+        self._generation = generation
+        self._active_generation = generation
+        return super().begin(*args)
+
+    def _check_generation(self, generation):
+        if type(generation) is not int or generation != self._active_generation or self.stream is None:
+            raise StreamingRecoveryStateError("Owner generation is not active")
+
+    def offer(self, generation):
+        self._check_generation(generation)
+        return super().offer()
+
+    def confirm(self, generation, descriptor, consumer_address):
+        self._check_generation(generation)
+        return super().confirm(descriptor, consumer_address)
+
+    def pull(self, generation, timeout_s=None):
+        self._check_generation(generation)
+        return super().pull(timeout_s)
+
+    def close(self, generation):
+        if type(generation) is not int or generation < 1:
+            raise StreamingRecoveryStateError("Invalid owner generation")
+        # Cancellation may follow a timed-out queued begin. Fence that token
+        # even if no stream exists yet. Closing another token is never allowed
+        # to release the current stream's generator.
+        self._generation = max(self._generation, generation)
+        if generation == self._active_generation:
+            super().close()
+            self.stream = None
+            self._active_generation = None
+
+
+class _OwnerMethod:
+    def __init__(self, method, generation):
+        self._method = method
+        self._generation = generation
+
+    def remote(self, *args, **kwargs):
+        return self._method.remote(self._generation, *args, **kwargs)
+
+
+@dataclass(frozen=True, eq=False)
+class StreamingRecoveryOwnerLease:
+    """Consumer-local actor-method facade bound to one immutable generation."""
+
+    actor: object
+    generation: int
+
+    def __getattr__(self, name):
+        if name == "__ray_ready__":
+            return self.actor.__ray_ready__
+        if name in ("begin", "offer", "confirm", "pull", "close"):
+            return _OwnerMethod(getattr(self.actor, name), self.generation)
+        raise AttributeError(name)
+
+    def __reduce__(self):
+        raise TypeError("Owner lease must remain on its designated consumer")
+
+
 class StreamingRecoveryReader:
     """One consumer's original delivery and owner-node-loss replay transport.
 
