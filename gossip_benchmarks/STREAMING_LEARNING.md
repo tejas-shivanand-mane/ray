@@ -15,6 +15,12 @@ and [CIFAR-10](https://docs.pytorch.org/vision/0.18/generated/torchvision.datase
 
 ## Comparison and scope
 
+The [ownership audit](STREAMING_LEARNING_OWNERSHIP_AUDIT.md) at `73910a15`
+found no natural owner-loss advantage for current Fixed-R in this workload.
+The latest control pair passed but still measured 72.1% overhead. Further
+optimization and the failure timing matrix are paused pending evidence of a
+useful recovery case; the commands below remain available for regression work.
+
 Both arms enable one standard full-group Ray Train retry and save application
 model, optimizer, epoch and per-rank CPU RNG checkpoints every epoch. Fixed-R is
 OFF versus ON; selective retry is not part of this comparison. The external
