@@ -9,6 +9,12 @@ import sys
 
 
 SOURCE_PATHS = (
+    "gossip_benchmarks/run_coordinator_training_comparison.py",
+    "gossip_benchmarks/plot_coordinator_training.py",
+    "gossip_benchmarks/validate_coordinator_training.sh",
+    "gossip_benchmarks/_support/coordinator_comparison.py",
+    "gossip_benchmarks/_support/coordinator_training.py",
+    "python/ray/data/_internal/iterator",
     "gossip_benchmarks/run_streaming_learning_comparison.py",
     "gossip_benchmarks/plot_streaming_learning.py",
     "gossip_benchmarks/validate_streaming_learning.sh",

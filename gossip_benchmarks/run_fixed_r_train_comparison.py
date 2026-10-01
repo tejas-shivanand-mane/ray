@@ -91,7 +91,9 @@ def child_case(path):
             if key.startswith("RAY_RECOVERY_") or key in ("RAY_EXPERIMENTAL_RECOVERY", "RAY_DATA_EXECUTION_CALLBACKS", "RAY_ADDRESS"):
                 os.environ.pop(key)
         import ray
-        if options.get("training_strategy") == "ray-train-workload-restart":
+        if options.get("training_strategy") == "coordinator-input-resume":
+            from coordinator_training import run_case
+        elif options.get("training_strategy") == "ray-train-workload-restart":
             from train_restart import run_case
         elif options.get("training_strategy") == "ray-train-workload":
             from train_workload import run_case
@@ -213,12 +215,14 @@ def run_observation(options, pair, directory, provenance):
         # Keep the completed fault operation visible even when the child times
         # out during cleanup. Partial evidence never promotes a failed run.
         sample["data_owner_fault"] = json.loads((directory / "data-owner-fault.json").read_text())
-    if options.get("training_strategy") == "ray-train-workload":
+    if options.get("training_strategy") in ("ray-train-workload", "coordinator-input-resume"):
         # Preserve real progress even on exceptions/timeouts. Never change status.
-        for filename in ("progress.json", "timeline.json", "node-fault.json"):
+        for filename in ("progress.json", "timeline.json", "node-fault.json", "coordinator-fault.json"):
             path = directory / filename
             if path.exists():
                 sample.update(json.loads(path.read_text()))
+        if options.get("training_strategy") == "coordinator-input-resume":
+            sample["starts"] = [json.loads(p.read_text()) for p in sorted((directory / "starts").glob("*.json"))]
         if options.get("streaming_learning"):
             from streaming_learning import collect_evidence
             sample.update(collect_evidence(directory))

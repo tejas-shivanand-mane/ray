@@ -107,7 +107,7 @@ arbitrary existing dataset pipelines satisfy the contract.
 ```bash
 conda activate ray-dev
 git fetch origin
-git switch streaming-coordinator-resume
+git switch main
 git pull --ff-only
 bash gossip_benchmarks/validate_coordinator_resume.sh
 ```
@@ -133,3 +133,81 @@ without coordinator restart, and the resumable splitter; measure each arm's
 control overhead as well as fault completion and repeated optimizer work.
 Keep Fixed-R OFF to isolate this mechanism. Record results in JSON and plot them
 with a separate command. Do not claim a benefit before those results exist.
+
+
+## Short CIFAR/ResNet comparison
+
+The benchmark harness is implemented but **not yet validated locally**. The
+agent reviewed source only and did not run tests, training or rendering.
+
+```bash
+conda activate ray-dev
+git fetch origin
+git switch coordinator-learning-comparison
+git pull --ff-only
+bash gossip_benchmarks/validate_coordinator_training.sh \
+  --data-directory ~/ray-coverage/cifar-streaming
+```
+
+Reuse the already prepared CIFAR input. If its `manifest.json` is missing,
+prepare it before the benchmark:
+
+```bash
+python gossip_benchmarks/workloads/cifar_streaming.py \
+  --prepare-data --data-directory ~/ray-coverage/cifar-streaming
+```
+
+The default is four observations: two no-failure controls followed by two
+coordinator-process failures, using ordinary Ray and input resume. Each trains
+for two epochs. With the default 2,048 training images, batch size 32 and two
+workers, the fault follows update 16 of epoch 2, after epoch 1 is checkpointed.
+The existing CIFAR application, ResNet model and data preparation are unchanged.
+All arms use Fixed-R OFF, selective retry OFF and one ordinary full-group Train
+retry. No owner placement is forced, and the head is not killed.
+
+Each observation has a 300-second cap including startup and final verification;
+four observations therefore have a 20-minute observation budget, plus the small
+evidence test suite and up to 15 seconds of forced cleanup per observation.
+Actual timing for this new splitter is unmeasured. `--controls-only` runs two
+observations first. `--include-deterministic-baseline` adds a third arm with the
+same deterministic splitter but zero coordinator restarts (six observations),
+to distinguish sharding overhead from the effect of restarting its coordinator.
+`--repeats 3` provides repetitions; start with the default short run.
+
+The JSON retains actual worker identities, coordinator replacement evidence,
+checkpoint delivery, per-update/sample telemetry and completed decode work.
+It measures observed repeated optimizer updates, failure-to-next-update and
+failure-to-progress-beyond-the-pre-fault-model delays on both ranks. The optional
+same-sharding arm is compared both with ordinary Ray and with input resume.
+A killed training process can lose its final telemetry write, so baseline
+repeated-update counts are observed work and can undercount that last update.
+Only successful completed observations enter timing comparisons. If an ordinary
+baseline naturally continues without restoring a checkpoint, that is recorded;
+no exception or forced Train retry is injected to manufacture a difference.
+
+A resume success requires the same two training invocations, no checkpoint
+restoration, no repeated optimizer work, and a completed data execution in the
+replacement coordinator process. Its committed model/Adam/RNG checkpoint hashes
+and per-rank sample order must match its own no-failure control. Ordinary Ray's
+batch assignment can differ, so cross-arm identical weights are not assumed.
+A failed resume attempt remains failed even if fallback checkpoint retry finishes
+training; the JSON still preserves that workload completion and its evidence.
+
+Plot separately from the self-contained JSON (no result folders needed):
+
+```bash
+python gossip_benchmarks/plot_coordinator_training.py \
+  ~/ray-coverage/coordinator-training-comparison.json \
+  --output ~/ray-coverage/coordinator-training-comparison.png
+```
+
+This creates PNG and PDF panels for the no-failure and coordinator-failure cases.
+The curves show the minimum current optimizer position across ranks; a rollback
+is drawn only at an observed checkpoint-restoring invocation. Gate timestamps
+place the completed pre-fault update before the failure, even though application
+telemetry is emitted after the gate releases. Failed/timeout endpoints remain
+marked as such. Workload time includes instrumentation, injection waiting,
+application validation and checkpoint writes, but excludes cluster startup and
+the harness's final checkpoint verification. Total observation time is also
+saved. This is coordinator-process coverage, not head-node or physical-machine
+recovery and not evidence that Fixed-R improves ML performance.
