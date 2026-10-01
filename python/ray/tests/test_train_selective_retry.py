@@ -412,10 +412,15 @@ def fixed_r_workload_pair(monkeypatch, tmp_path):
     return comparison, samples
 
 
-def test_owner_fault_waits_for_settled_submission_batch(monkeypatch, tmp_path):
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("replacement_fails", [False, True])
+def test_owner_fault_runs_replacement_on_main_thread(
+    monkeypatch, tmp_path, enabled, replacement_fails,
+):
     import importlib
-    from threading import Event
+    from threading import Event, current_thread, main_thread
     from ray.data._internal.planner.exchange import streaming_recovery as exchange
+    from ray.data._internal.planner.exchange.shuffle_task_spec import ShuffleTaskSpec
 
     root = Path(__file__).resolve().parents[3]
     monkeypatch.syspath_prepend(str(root / "gossip_benchmarks/_support"))
@@ -433,24 +438,73 @@ def test_owner_fault_waits_for_settled_submission_batch(monkeypatch, tmp_path):
 
     monkeypatch.setattr(exchange, "_ExchangeTask", Task)
     monkeypatch.setattr(exchange, "submit_stream", lambda *a, **kw: stream)
+    monkeypatch.setattr(module.ray, "get_runtime_context", lambda: NS(
+        get_task_id=lambda: "target", get_node_id=lambda: "executor",
+    ))
+    originals = ShuffleTaskSpec.map, exchange._map_outputs, exchange.submit_stream
 
     def crash():
+        assert current_thread() is main_thread()
         calls.append("crash")
         crashed.set()
+        if replacement_fails:
+            raise RuntimeError("replacement failed")
         return {"original_head_processes_exited": True}
 
-    with module.data_owner_fault(tmp_path, True, crash, ("executor",), diagnostics):
+    def workload():
+        assert current_thread() is not main_thread()
         module.write_record(tmp_path / "data-owner-blocked.json", {
             "task_id": "target", "node_id": "executor", "blocked_ns": 1,
         })
-        exchange.submit_stream(None, None, (NS(_map_args=[None, None, True]), 0, None, 4))
-        assert not crashed.wait(.05), "Owner died while further submissions could be in flight"
-        task = Task()
-        task.stream = stream
-        task.on_data_ready()
+        if enabled:
+            exchange.submit_stream(None, None, (NS(_map_args=[None, None, True]), 0, None, 4))
+            assert not crashed.wait(.05), "Owner died while further submissions could be in flight"
+            task = Task()
+            task.stream = stream
+            task.on_data_ready()
+        else:
+            module.wait_for_owner_fault(tmp_path, 0)
+            calls.append("consume")
+        return "finished"
+
+    if replacement_fails:
+        with pytest.raises(RuntimeError, match="replacement failed"):
+            module.data_owner_fault(tmp_path, enabled, crash, ("executor",), diagnostics, workload)
+        assert diagnostics["data_owner_fault"]["error"] == "replacement failed"
+    else:
+        assert module.data_owner_fault(
+            tmp_path, enabled, crash, ("executor",), diagnostics, workload,
+        ) == "finished"
     assert calls == ["crash", "consume"]
-    assert diagnostics["data_owner_fault"]["completed"]
-    assert diagnostics["data_owner_fault"]["fixed_r_submission_batch_settled"]
+    assert diagnostics["data_owner_fault"]["completed"] is not replacement_fails
+    assert diagnostics["data_owner_fault"]["fixed_r_submission_batch_settled"] is enabled
+    assert (ShuffleTaskSpec.map, exchange._map_outputs, exchange.submit_stream) == originals
+    assert "on_data_ready" not in Task.__dict__
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_owner_fault_preserves_early_workload_error(monkeypatch, tmp_path, fails):
+    import importlib
+
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(root / "gossip_benchmarks/_support"))
+    module = importlib.import_module("train_workload")
+    diagnostics = {}
+
+    def crash():
+        pytest.fail("Head must not be killed before the workload reaches its gate")
+
+    def workload():
+        if fails:
+            raise LookupError("workload failed")
+
+    error = LookupError if fails else ValueError
+    message = "workload failed" if fails else "Workload ended before the shuffle failure point"
+    with pytest.raises(error, match=message):
+        module.data_owner_fault(tmp_path, True, crash, ("executor",), diagnostics, workload)
+    assert not diagnostics["data_owner_fault"]["completed"]
+    assert diagnostics["data_owner_fault"]["error"] == message
+    assert (tmp_path / "release-data-owner").exists()
 
 
 def test_fixed_r_comparison_records_surviving_baseline(fixed_r_workload_pair):

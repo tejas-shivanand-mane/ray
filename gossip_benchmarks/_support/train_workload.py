@@ -11,7 +11,7 @@ harness replaces head processes, then checks end-to-end completion and replay.
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import inspect
@@ -20,7 +20,7 @@ from pathlib import Path
 import runpy
 import shutil
 import sys
-from threading import Event
+from threading import current_thread, main_thread
 import time
 import uuid
 
@@ -198,23 +198,26 @@ def owner_gated_map(original, directory, streaming):
     return produce
 
 
-@contextmanager
-def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics):
+def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, workload):
     """Kill/replace head processes after a real shuffle task reaches its gate.
 
     OFF retains ordinary coordinator-owned shuffle tasks. ON retains the normal
     head-owned Fixed-R tasks. No artificial owner-loss exception is injected into
     OFF; its surviving coordinator may allow it to finish too.
+
+    Run the workload in a background thread so head replacement can register
+    Ray's process shutdown hooks on the main thread.
     """
     from ray.data._internal.planner.exchange import streaming_recovery as exchange
     from ray.data._internal.planner.exchange.shuffle_task_spec import ShuffleTaskSpec
 
+    if current_thread() is not main_thread():
+        raise RuntimeError("Head replacement must run on the main thread")
     directory = Path(directory)
     blocked = directory / "data-owner-blocked.json"
     enrolled = directory / "data-owner-enrolled.json"
     batch_ready = directory / "data-owner-batch-ready"
     release = directory / "release-data-owner"
-    done = Event()
     fault = {"completed": False, "stage": "RandomShuffle.map"}
     diagnostics["data_owner_fault"] = fault
     original_map, original_stream = ShuffleTaskSpec.map, exchange._map_outputs
@@ -248,14 +251,18 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics):
             write_record(enrolled, {"task_id": stream.task_id.hex()})
         return stream
 
-    def inject():
+    def inject(future):
         deadline = time.monotonic() + 60
         try:
             while not (blocked.exists() and (not enabled or (enrolled.exists() and batch_ready.exists()))):
-                if done.wait(.02):
+                if future.done():
+                    # Preserve the workload's original error if it failed
+                    # before reaching the selected fault point.
+                    future.result()
                     raise ValueError("Workload ended before the shuffle failure point")
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Workload did not reach the shuffle failure point")
+                time.sleep(.02)
             target = json.loads(blocked.read_text())
             if target["node_id"] not in executor_ids:
                 raise ValueError("Shuffle task must execute on a surviving executor")
@@ -282,18 +289,12 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics):
         ShuffleTaskSpec.map = staticmethod(owner_gated_map(original_map, str(directory), False))
     try:
         with ThreadPoolExecutor(1) as pool:
-            future = pool.submit(inject)
-            try:
-                yield
-            finally:
-                unwinding = sys.exc_info()[0] is not None
-                done.set()
-                release.touch()
-                try:
-                    future.result(timeout=35)
-                except Exception:
-                    if not unwinding:
-                        raise
+            future = pool.submit(workload)
+            # inject always releases both gates, including on failure, before
+            # the pool waits for the workload to exit. The parent process keeps
+            # the existing hard deadline for a workload stuck inside Ray.
+            inject(future)
+            return future.result()
     finally:
         ShuffleTaskSpec.map = staticmethod(original_map)
         exchange._map_outputs, exchange.submit_stream = original_stream, original_submit
@@ -435,13 +436,18 @@ def run_case(options, directory, diagnostics):
             TorchTrainer.__init__, TorchTrainer.fit = configure, fit
             sys.argv = [str(script), *script_args]
             sys.path.insert(0, str(script.parent))
-            control = (data_owner_fault(directory, enabled, crash_head,
-                                        case_args.executor_node_ids, diagnostics)
-                       if owner_failure else nullcontext())
+
+            def workload():
+                with DataContext.current(context):
+                    return runpy.run_path(str(script), run_name="__main__")
+
             workload_started = time.monotonic()
             try:
-                with control:
-                    runpy.run_path(str(script), run_name="__main__")
+                if owner_failure:
+                    data_owner_fault(directory, enabled, crash_head,
+                                     case_args.executor_node_ids, diagnostics, workload)
+                else:
+                    workload()
                 diagnostics["workload_completed"] = True
             finally:
                 diagnostics["workload_s"] = time.monotonic() - workload_started
