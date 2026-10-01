@@ -216,6 +216,11 @@ def run_observation(options, pair, directory, provenance):
             path = directory / filename
             if path.exists():
                 sample.update(json.loads(path.read_text()))
+        if options.get("owner_progress_plan") is not None:
+            sample["map_progress"] = sorted(
+                (json.loads(p.read_text()) for p in directory.glob("map-computed-*.json")),
+                key=lambda event: event["index"],
+            )
     sample["observation_wall_s"] = time.monotonic() - started
     write_json(directory / "sample.json", sample)
     return sample

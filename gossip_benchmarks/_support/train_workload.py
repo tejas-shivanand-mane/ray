@@ -181,9 +181,56 @@ def prepare_regression_input(directory):
     return str(path)
 
 
+def owner_progress_plan(directory):
+    path = Path(directory) / "owner-progress-plan.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def owner_target_index(directory):
+    plan = owner_progress_plan(directory)
+    return plan["target_index"] if plan else 0
+
+
+def map_progress(directory):
+    return sorted((json.loads(p.read_text()) for p in Path(directory).glob("map-computed-*.json")),
+                  key=lambda event: event["index"])
+
+
+def before_ordered_map(directory, index):
+    """A controlled compute order, identical in OFF/ON controls and fault runs.
+
+    Counts completed map computations, not copied outputs or elapsed fractions.
+    Later maps wait for injection to finish; replay reuses the same input index.
+    """
+    plan = owner_progress_plan(directory)
+    if plan is None:
+        return False
+    if not 0 <= index < plan["map_count"]:
+        raise ValueError("Unexpected shuffle map count in controlled workload")
+    directory = Path(directory)
+    deadline = time.monotonic() + 60
+    while ((plan["inject"] and index > plan["target_index"]
+            and not (directory / "release-data-owner").exists())
+           or (index > 0 and not (directory / f"map-computed-{index - 1}.json").exists())):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Ordered shuffle map did not become runnable")
+        time.sleep(.01)
+    if plan["inject"]:
+        wait_for_owner_fault(directory, index)
+    return True
+
+
+def record_map_computed(directory, index):
+    path = Path(directory) / f"map-computed-{index}.json"
+    if not path.exists():
+        runtime = ray.get_runtime_context()
+        write_record(path, {"index": index, "time_ns": time.monotonic_ns(),
+                            "task_id": runtime.get_task_id(), "node_id": runtime.get_node_id()})
+
+
 def wait_for_owner_fault(directory, task_index):
-    """Pause task zero before it exports its first shuffle partition."""
-    if task_index != 0:
+    """Pause the selected task; legacy experiments select map zero."""
+    if task_index != owner_target_index(directory):
         return
     directory = Path(directory)
     release = directory / "release-data-owner"
@@ -195,6 +242,7 @@ def wait_for_owner_fault(directory, task_index):
         write_record(marker, {
             "task_id": runtime.get_task_id(), "node_id": runtime.get_node_id(),
             "blocked_ns": time.monotonic_ns(), "stage": "RandomShuffle.map",
+            "map_index": task_index,
         })
     deadline = time.monotonic() + 60
     while not release.exists():
@@ -204,14 +252,18 @@ def wait_for_owner_fault(directory, task_index):
 
 
 def owner_gated_map(original, directory, streaming):
-    # Both adapters compute the normal partitions, then pause before exporting
-    # task zero's first result. They neither change nor regenerate workload data.
+    # Ordered experiments gate BEFORE computing the selected map. Legacy
+    # experiments pause map zero after computation, before its first export.
     if streaming:
         def produce(*args):
+            random_shuffle = args[0]._map_args[2]
+            ordered = random_shuffle and before_ordered_map(directory, args[1])
             outputs = original(*args)
             try:
                 first = next(outputs)
-                if args[0]._map_args[2]:
+                if ordered:
+                    record_map_computed(directory, args[1])
+                elif random_shuffle:
                     wait_for_owner_fault(directory, args[1])
                 yield first
                 yield from outputs
@@ -219,13 +271,36 @@ def owner_gated_map(original, directory, streaming):
                 outputs.close()
     else:
         def produce(*args):
+            ordered = args[5] and before_ordered_map(directory, args[0])
             outputs = original(*args)
             # ShuffleTaskSpec.map also implements shuffled repartition. Only
             # random_shuffle=True is the selected failure point.
-            if args[5]:
+            if ordered:
+                record_map_computed(directory, args[0])
+            elif args[5]:
                 wait_for_owner_fault(directory, args[0])
             return outputs
     return produce
+
+
+@contextmanager
+def ordered_owner_control(directory, enabled, active):
+    """Apply the same map ordering to controls without injecting a fault."""
+    if not active:
+        yield
+        return
+    from ray.data._internal.planner.exchange import streaming_recovery as exchange
+    from ray.data._internal.planner.exchange.shuffle_task_spec import ShuffleTaskSpec
+    original_map, original_stream = ShuffleTaskSpec.map, exchange._map_outputs
+    if enabled:
+        exchange._map_outputs = owner_gated_map(original_stream, str(directory), True)
+    else:
+        ShuffleTaskSpec.map = staticmethod(owner_gated_map(original_map, str(directory), False))
+    try:
+        yield
+    finally:
+        ShuffleTaskSpec.map = staticmethod(original_map)
+        exchange._map_outputs = original_stream
 
 
 class OrdinaryShuffleOwner:
@@ -252,6 +327,7 @@ def matched_shuffle_ownership(directory, enabled, owner_node_id, executor_ids, d
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
     directory = Path(directory)
+    target_index = owner_target_index(directory)
     actors, target_refs = [], []
     original_remote, original_submit = pull.cached_remote_fn, exchange.submit_stream
     original_fetch = BaseProgressBar.fetch_until_complete
@@ -286,7 +362,7 @@ def matched_shuffle_ownership(directory, enabled, owner_node_id, executor_ids, d
                        "scheduling_strategy": NodeAffinitySchedulingStrategy(
                            executor_ids[args[0] % len(executor_ids)], soft=False)}
             refs = ray.get(owner.submit.remote(self.producer, args, options), timeout=30)
-            if args[0] == 0:
+            if args[0] == target_index:
                 ref = refs[-1]  # Metadata is fetched by the original shuffle scheduler.
                 target_refs.append(ref)
                 address = Address.FromString(
@@ -303,7 +379,7 @@ def matched_shuffle_ownership(directory, enabled, owner_node_id, executor_ids, d
         stream = original_submit(*args, **kwargs)
         task_args = args[2]
         if (len(task_args) == 4 and type(task_args[1]) is int
-                and task_args[1] == 0 and task_args[0]._map_args[2]):
+                and task_args[1] == target_index and task_args[0]._map_args[2]):
             if stream.reader is None:
                 raise ValueError("Target shuffle map was not enrolled before owner loss")
             descriptor = RecoveryStreamDescriptor.FromString(stream.reader.descriptor)
@@ -371,6 +447,7 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, 
     if current_thread() is not main_thread():
         raise RuntimeError("Head replacement must run on the main thread")
     directory = Path(directory)
+    target_index = owner_target_index(directory)
     blocked = directory / "data-owner-blocked.json"
     enrolled = directory / "data-owner-enrolled.json"
     batch_ready = directory / "data-owner-batch-ready"
@@ -400,7 +477,7 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, 
         stream = original_submit(*args, **kwargs)
         task_args = args[2]
         if (len(task_args) == 4 and type(task_args[1]) is int
-                and task_args[1] == 0 and task_args[0]._map_args[2]):
+                and task_args[1] == target_index and task_args[0]._map_args[2]):
             # A running producer alone is not enough: wait for the descriptor
             # and witness enrollment to finish before killing its owner.
             if stream.reader is None:
@@ -436,6 +513,14 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, 
             fault.update(target=target, request_ns=time.monotonic_ns(),
                          submission_batch_settled=batch_ready.exists(),
                          fixed_r_submission_batch_settled=enabled and batch_ready.exists())
+            plan = owner_progress_plan(directory)
+            if plan:
+                progress = map_progress(directory)
+                if ([event["index"] for event in progress] != list(range(target_index))
+                        or target.get("map_index") != target_index
+                        or any(event["time_ns"] > target["blocked_ns"] for event in progress)):
+                    raise ValueError("Failure did not reach the selected shuffle compute prefix")
+                fault.update(progress_plan=plan, completed_maps_before_failure=progress)
             write_record(directory / "data-owner-fault.json", fault)
             fault["head_replacement"] = crash_head()
             if matched_owner and ownership["owner_node_id"] != fault["head_replacement"]["original_head_node_id"]:
@@ -665,6 +750,17 @@ def run_case(options, directory, diagnostics):
     owner_failure = options["scenario"] == "data-owner"
     enabled = options["mode"] == "on"
     matched_owner = options.get("owner_placement", "default") == "head"
+    ordered_plan = options.get("owner_progress_plan")
+    if ordered_plan is not None:
+        if (not fashion or not matched_owner or selective
+                or options["scenario"] not in ("none", "data-owner")
+                or ordered_plan.get("map_count") != 4
+                or type(ordered_plan.get("target_index")) is not int
+                or not 0 <= ordered_plan["target_index"] < 4
+                or ordered_plan.get("inject") is not owner_failure):
+            raise ValueError("Invalid controlled Fashion-MNIST owner-loss plan")
+        write_record(directory / "owner-progress-plan.json", ordered_plan)
+        diagnostics["owner_progress_plan"] = ordered_plan
     report_number = options.get("fault_after_epoch", 1) if inject or node_scenario else 1
     if type(report_number) is not int or report_number < 1 or (
         training_epochs is not None and report_number >= training_epochs
@@ -781,7 +877,8 @@ def run_case(options, directory, diagnostics):
                     directory, enabled, case_args.owner_node_id,
                     tuple(sorted(case_args.executor_node_ids)), diagnostics, owner_failure,
                 ) if matched_owner else nullcontext())
-                with DataContext.current(context), ownership:
+                with ordered_owner_control(directory, enabled, ordered_plan is not None and not owner_failure), \
+                        DataContext.current(context), ownership:
                     return runpy.run_path(str(script), run_name="__main__")
 
             workload_started = time.monotonic()
@@ -814,6 +911,10 @@ def run_case(options, directory, diagnostics):
                     record for path in sorted((directory / "exchanges").glob("*.json"))
                     for record in json.loads(path.read_text())
                 ]
+                if ordered_plan is not None:
+                    diagnostics["map_progress"] = map_progress(directory)
+            if ordered_plan is not None and [e["index"] for e in diagnostics["map_progress"]] != list(range(4)):
+                raise ValueError("Workload did not compute all four controlled shuffle maps")
             if len(timings) != 1:
                 raise ValueError("The script did not execute exactly one TorchTrainer.fit")
             diagnostics.update(validate(directory, selective, inject, node_scenario))

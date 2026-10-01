@@ -9,6 +9,9 @@ import sys
 
 
 SOURCE_PATHS = (
+    "gossip_benchmarks/run_fashion_owner_comparison.py",
+    "gossip_benchmarks/plot_fashion_owner_recovery.py",
+    "gossip_benchmarks/validate_fashion_owner.sh",
     "gossip_benchmarks/run_fashion_training_comparison.py",
     "gossip_benchmarks/plot_fashion_training.py",
     "gossip_benchmarks/validate_fashion_training.sh",

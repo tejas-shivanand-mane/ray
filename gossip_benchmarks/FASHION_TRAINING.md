@@ -1,5 +1,10 @@
 # Full-dataset CPU training comparison
 
+For matched owner loss during active preprocessing, see
+[FASHION_OWNER_RECOVERY.md](FASHION_OWNER_RECOVERY.md). That experiment has its
+own benchmark and separate plotting command. The matrix below concerns node
+failures during training, which ordinary Ray may already recover from.
+
 This experiment uses the official Fashion-MNIST split (60,000 training images,
 10,000 test images) and a 784–256–128–10 MLP with 235,146 parameters. Each worker
 processes 30,000 images in 118 Adam steps per epoch. This is a real learning
