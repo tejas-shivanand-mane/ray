@@ -9,6 +9,7 @@ import sys
 
 
 SOURCE_PATHS = (
+    "gossip_benchmarks/plot_train_failure_progress.py",
     "gossip_benchmarks/run_train_retry_comparison.py",
     "gossip_benchmarks/validate_train_retry.sh",
     "gossip_benchmarks/_support/train_retry.py",

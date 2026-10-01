@@ -751,6 +751,115 @@ def calibration_pilot():
                         for epoch in (1, 2, 3)]}
 
 
+@pytest.fixture
+def progress_plot(monkeypatch):
+    import importlib
+
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(root / "gossip_benchmarks"))
+    return importlib.import_module("plot_train_failure_progress")
+
+
+def test_progress_plot_preserves_failure_and_censors_timeout(progress_plot):
+    sample = {"status": "failed", "workload_started_ns": 10**9,
+              "workload_finished_ns": 9 * 10**9, "expected_owner_loss": True,
+              "ordinary_owner_loss": {"observed_ns": 7 * 10**9},
+              "data_owner_fault": {"request_ns": 3 * 10**9}, "reports": []}
+    trace = progress_plot.progress_trace(sample)
+    assert trace == {"seconds": [0, 6], "epochs": [0, 0],
+                     "fault_s": 2, "outcome": "OwnerDiedError"}
+    assert sample["status"] == "failed"
+    sample["timeout"] = True
+    trace = progress_plot.progress_trace(sample)
+    assert trace["seconds"] == [0]
+    assert trace["outcome"] == "timeout (censored)"
+
+
+@pytest.mark.parametrize("invalid", [None, "missing_epoch", "early_end", "incomplete", "timeout"])
+def test_progress_plot_requires_real_completion(progress_plot, invalid):
+    sample = calibration_pilot()
+    sample.update(workload_started_ns=10 * 10**9, workload_finished_ns=17 * 10**9,
+                  workload_completed=True)
+    if invalid == "missing_epoch":
+        sample["reports"].pop(1)
+    elif invalid == "early_end":
+        sample["workload_finished_ns"] = 15 * 10**9
+    elif invalid == "incomplete":
+        sample["workload_completed"] = False
+    elif invalid == "timeout":
+        sample["timeout"] = True
+    if invalid:
+        with pytest.raises(ValueError):
+            progress_plot.progress_trace(sample)
+    else:
+        trace = progress_plot.progress_trace(sample)
+        assert trace["seconds"] == [0, 2, 4, 6, 7]
+        assert trace["epochs"] == [0, 1, 2, 3, 3]
+        assert trace["outcome"] == "completed"
+
+
+def test_progress_figure_renders_from_embedded_report_only(progress_plot, tmp_path):
+    pytest.importorskip("matplotlib")
+    experiments = {}
+    for experiment, failure in (("worker", "worker"), ("head", "data-owner")):
+        samples = []
+        for scenario in ("none", failure):
+            for enhanced in (False, True):
+                sample = calibration_pilot()
+                sample.update(scenario=scenario, pair=1, workload_started_ns=10 * 10**9,
+                              workload_finished_ns=17 * 10**9, workload_completed=True,
+                              mode="on" if experiment == "head" and enhanced else "off",
+                              restart_scope="selective" if experiment == "worker" and enhanced else "full")
+                if scenario == "worker":
+                    sample["fault"] = {"request_ns": 12 * 10**9}
+                if scenario == "data-owner":
+                    sample["data_owner_fault"] = {"request_ns": 11 * 10**9}
+                    if not enhanced:
+                        sample.update(status="failed", reports=[], workload_completed=False,
+                                      expected_owner_loss=True,
+                                      ordinary_owner_loss={"observed_ns": 12 * 10**9})
+                samples.append(sample)
+        experiments[experiment] = {"samples": samples}
+    report = {"profile": "torch-failure-progress", "status": "passed",
+              "training_epochs": 3, "preliminary": True, "experiments": experiments}
+    paths = progress_plot.plot_report(report, tmp_path / "progress.png")
+    assert [Path(p).suffix for p in paths] == [".png", ".pdf"]
+    assert all(Path(p).stat().st_size > 1000 for p in paths)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_failure_suite_keeps_comparison_axes_and_failure_status(
+    monkeypatch, tmp_path, fixed_r_workload_pair, progress_plot, failed,
+):
+    import json
+
+    pytest.importorskip("matplotlib")
+    module, _ = fixed_r_workload_pair
+    calls = []
+
+    def run(args, directory, provenance):
+        calls.append(args)
+        module.write_json(args.output, {"status": "failed" if failed else "passed",
+                                        "samples": []})
+
+    monkeypatch.setattr(module, "run_retry_comparison", run)
+    monkeypatch.setattr(module, "run_fixed_r_workload_comparison", run)
+    plotted = []
+    monkeypatch.setattr(progress_plot, "plot_report",
+                        lambda report, output: plotted.append(report["status"]) or [str(output)])
+    args = NS(training_epochs=30, repeats=1, target_workload_s=None,
+              output=tmp_path / "report.json")
+    assert module.run_failure_comparison(args, tmp_path, {}) == int(failed)
+    worker, head = calls
+    assert worker.scenario == ["none", "worker"] and worker.mode == "off"
+    assert worker.owner_placement == "default"
+    assert head.scenario == ["none", "data-owner"] and head.owner_placement == "head"
+    assert worker.training_epochs == head.training_epochs == 30
+    report = json.loads(args.output.read_text())
+    assert plotted == [report["status"]]
+    assert set(report["experiments"]) == {"worker", "head"}
+
+
 def test_duration_calibration_preserves_fixed_work(fixed_r_workload_pair):
     module, _ = fixed_r_workload_pair
     result = module.calibrate_workload_epochs(calibration_pilot(), 300)

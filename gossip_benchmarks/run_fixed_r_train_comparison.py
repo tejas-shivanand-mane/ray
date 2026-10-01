@@ -210,6 +210,12 @@ def run_observation(options, pair, directory, provenance):
         # Keep the completed fault operation visible even when the child times
         # out during cleanup. Partial evidence never promotes a failed run.
         sample["data_owner_fault"] = json.loads((directory / "data-owner-fault.json").read_text())
+    if options.get("training_strategy") == "ray-train-workload":
+        # Preserve real progress even on exceptions/timeouts. Never change status.
+        for filename in ("progress.json", "timeline.json"):
+            path = directory / filename
+            if path.exists():
+                sample.update(json.loads(path.read_text()))
     sample["observation_wall_s"] = time.monotonic() - started
     write_json(directory / "sample.json", sample)
     return sample

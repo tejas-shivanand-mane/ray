@@ -526,3 +526,50 @@ change does not fix the underlying recovery runtime failure.
 
 Manual source review only; no tests, builds, lint, benchmarks or plot rendering
 were run for this change.
+
+## PyTorch failure progress in one figure
+
+Run the existing regression example with worker-process loss and matched
+head/owner-process loss, including no-failure controls:
+
+```bash
+bash gossip_benchmarks/validate_train_retry.sh \
+  --comparison failures --training-epochs 30 --repeats 1 --timeout-s 180
+```
+
+This produces `~/ray-coverage/train-retry-comparison.json` and matching `.png`
+and `.pdf` files. The JSON embeds both comparisons and all recorded epoch
+timelines, so it can be copied and replotted without the result directories:
+
+```bash
+python gossip_benchmarks/plot_train_failure_progress.py \
+  ~/ray-coverage/train-retry-comparison.json --output ~/ray-coverage/progress.png
+```
+
+Matplotlib must be installed in the benchmark environment. There is no native
+code change or rebuild requirement. The benchmark's workload file is unchanged.
+`--training-epochs 144 --timeout-s 420` uses the work amount that previously took
+about five minutes on the local test machine; duration is not guaranteed. Each
+pair runs eight observations (four controls and four fault cases), with the
+expected ordinary owner-loss case ending early. Use `--repeats 3` for repeated
+trials; the plot shows each trial, not an averaged trajectory.
+
+The four panels show committed epochs against elapsed workload time. Dotted
+lines mark each arm's actual failure time, circles mark completed workloads,
+and crosses mark failures or censored timeouts. Failed observations are never
+converted into completed curves. Unexpected failures mark the figure and
+report as failed; a verified baseline `OwnerDiedError` remains a failed sample
+even when it satisfies the experiment's validation criteria.
+
+The worker comparison uses Fixed-R OFF in both arms, comparing ordinary full
+worker-group retry with selective retry. Both allow one retry and restore the
+first committed checkpoint; ordinary Ray is expected to recover too. The head
+comparison uses full Train retry in both arms and compares Fixed-R OFF/ON with
+shuffle-map owners explicitly placed on the head. This is a controlled ownership
+experiment, not the default ordinary Ray Data placement policy.
+
+Head loss occurs during preprocessing before the first epoch, so this figure
+does not demonstrate resuming an interrupted training epoch after head loss.
+All logical nodes share one physical machine. The driver and local RocksDB
+storage survive, and the harness replaces the head processes. Physical machine
+loss, driver loss, network partitions, and storage loss are not tested here.

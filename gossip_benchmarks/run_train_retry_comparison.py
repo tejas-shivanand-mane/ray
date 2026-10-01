@@ -18,12 +18,16 @@ This changes OFF's ownership topology explicitly; it is not default Ray Data.
 --target-workload-s 300 calibrates the regression example's epoch count with a
 short OFF pilot, then measures the same fixed work in OFF and ON without faults.
 The target is approximate OFF script time; ON is allowed to take longer.
+--comparison failures runs worker retry and matched head-owner comparisons,
+including no-failure controls, and writes one four-panel PNG/PDF progress plot.
+--training-epochs sets identical fixed work; the failures suite defaults to 30.
 
 Without --workload, retain the matched fixed-partition XGBoost benchmark.
 """
 
 import argparse
 import math
+import json
 from pathlib import Path
 import statistics
 import sys
@@ -37,6 +41,8 @@ from training_provenance import source_provenance
 def compare_pair(full, selective):
     if any(s["status"] != "passed" for s in (full, selective)):
         raise ValueError("Both policies must pass before timing comparison")
+    if full.get("training_epochs") != selective.get("training_epochs"):
+        raise ValueError("Cannot compare different training epoch counts")
     keys = ["scenario", "mode", "native_settings"]
     keys += (["workload_sha256", "torch_version"] if "workload_sha256" in full else ["final_tree_sha256"])
     for key in keys:
@@ -233,7 +239,7 @@ def run_fixed_r_workload_comparison(args, directory, provenance):
         write_json(directory / "comparison.json", report)
 
     save()
-    training_epochs = None
+    training_epochs = getattr(args, "training_epochs", None)
     if target_s is not None:
         options = {"training_strategy": "ray-train-workload", "scenario": "none",
                    "mode": "off", "restart_scope": "full", "timeout_s": min(120, args.timeout_s),
@@ -343,11 +349,140 @@ def run_fixed_r_workload_comparison(args, directory, provenance):
     return int(report["status"] != "passed")
 
 
+def run_retry_comparison(args, directory, provenance):
+    scenarios = args.scenario or (["none", "worker"] if args.workload else ["none", "worker-node"])
+    report = {"profile": "ray-train-selective-xgboost", "status": "running",
+              "source_provenance": provenance, "samples": [], "pairs": [], "failed_observations": [],
+              "preliminary": args.repeats == 1,
+              "comparison_axis": "standard Ray Train retry versus selective retry; Fixed-R identical",
+              "measurement_scope": "trainer.fit including ingestion, retries, final integrity probe and teardown; excludes cluster startup",
+              "limitations": ["fixed CPU partitions; explicit input cache helper; no shared streaming shards",
+                              "controlled callback allreduces; not arbitrary native tree-building failures",
+                              "logical nodes on one machine; shared storage and input service survive",
+                              "Fixed-R independent contribution requires a separate OFF/ON comparison"]}
+    if args.workload:
+        report.update(profile="ray-train-existing-workload", workload=str(args.workload.resolve()),
+                      measurement_scope="trainer.fit including ingestion, retries and teardown; excludes cluster startup, driver preprocessing and final numerical probe",
+                      limitations=["CPU Gloo; synchronous, application-restored checkpoints",
+                                   "worker-process failure after a committed checkpoint; not node or head loss",
+                                   "fresh dataset iterators; no retained streaming position or cached-partition guarantee",
+                                   "existing regression example has a numerical probe; other scripts need workload-specific correctness checks",
+                                   "Fixed-R is identical in both policies; its independent benefit is not measured"])
+
+    def save():
+        write_json(args.output, report)
+        write_json(directory / "comparison.json", report)
+
+    save()
+    for scenario in dict.fromkeys(scenarios):
+        for pair in range(1, args.repeats + 1):
+            samples = {}
+            for policy in (("full", "selective") if pair % 2 else ("selective", "full")):
+                options = {"training_strategy": "ray-train-selective", "scenario": scenario,
+                           "mode": args.mode, "restart_scope": policy, "timeout_s": args.timeout_s}
+                if args.workload:
+                    options.update(training_strategy="ray-train-workload",
+                                   workload=str(args.workload.resolve()), workload_args=args.workload_arg)
+                if getattr(args, "training_epochs", None) is not None:
+                    options["training_epochs"] = args.training_epochs
+                print(f"{scenario}: pair {pair}/{args.repeats}, {policy}, Fixed-R {args.mode.upper()} ({args.timeout_s:g}s)", flush=True)
+                sample = run_observation(options, pair, directory / f"{scenario}-{pair}-{policy}", provenance)
+                sample["restart_scope"] = policy
+                if (getattr(args, "training_epochs", None) is not None
+                        and sample.get("training_epochs") != args.training_epochs):
+                    sample.update(status="failed", error="Workload did not use the requested epoch count")
+                report["samples"].append(sample)
+                samples[policy] = sample
+                print(f"  {sample['status']}: {sample.get('error', str(sample.get('training_s')) + 's training')}", flush=True)
+                if sample["status"] != "passed":
+                    report["failed_observations"].append({"scenario": scenario, "pair": pair,
+                                                          "policy": policy, "error": sample.get("error")})
+                save()
+            if all(s["status"] == "passed" for s in samples.values()):
+                try:
+                    values = compare_pair(samples["full"], samples["selective"])
+                    report["pairs"].append({"scenario": scenario, "pair": pair,
+                                            **values})
+                    print(f"  matched change: {values['selective_vs_full_pct']:+.2f}%", flush=True)
+                except (ValueError, AssertionError, OSError) as exc:
+                    report["failed_observations"].append({"scenario": scenario, "pair": pair,
+                                                          "error": f"Comparison: {exc}"})
+                save()
+    report["summary"] = []
+    for scenario in dict.fromkeys(scenarios):
+        rows = [p for p in report["pairs"] if p["scenario"] == scenario]
+        if rows:
+            changes = [r["selective_vs_full_pct"] for r in rows]
+            report["summary"].append({"scenario": scenario, "pairs": len(rows),
+                                      "full_s_mean": statistics.mean(r["full_s"] for r in rows),
+                                      "selective_s_mean": statistics.mean(r["selective_s"] for r in rows),
+                                      "selective_vs_full_pct_mean": statistics.mean(changes),
+                                      "selective_vs_full_pct_stdev": statistics.stdev(changes) if len(rows) > 1 else None})
+    report["status"] = "failed" if report["failed_observations"] else "passed"
+    save()
+    print(f"Report: {args.output}")
+    return int(report["status"] != "passed")
+
+
+def run_failure_comparison(args, directory, provenance):
+    """Two controlled comparisons in one figure; never disable baseline retries."""
+    from plot_train_failure_progress import plot_report
+
+    # Fail before expensive observations if plotting is unavailable.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot  # noqa: F401
+
+    report = {"profile": "torch-failure-progress", "status": "running",
+              "training_epochs": args.training_epochs, "experiments": {},
+              "source_provenance": provenance, "preliminary": args.repeats == 1,
+              "limitations": [
+                  "worker loss follows the first committed epoch; both arms allow one Train retry",
+                  "worker comparison uses Fixed-R OFF in both arms to isolate selective retry",
+                  "head loss occurs during preprocessing, before training; matched head ownership",
+                  "head processes are externally replaced; local GCS storage and driver survive",
+                  "logical nodes share one machine; not physical machine failure",
+                  "small regression dataset/model; epoch time includes checkpoint/report coordination",
+              ]}
+
+    def save():
+        write_json(args.output, report)
+        write_json(directory / "comparison.json", report)
+
+    save()
+    for name, runner, settings in (
+        ("worker", run_retry_comparison,
+         dict(comparison="retry", mode="off", owner_placement="default", scenario=["none", "worker"])),
+        ("head", run_fixed_r_workload_comparison,
+         dict(comparison="fixed-r", mode=None, owner_placement="head", scenario=["none", "data-owner"])),
+    ):
+        child_dir = directory / name
+        child_dir.mkdir()
+        child = argparse.Namespace(**{**vars(args), **settings,
+                                     "output": child_dir / "comparison.json"})
+        runner(child, child_dir, provenance)
+        report["experiments"][name] = json.loads(child.output.read_text())
+        save()
+    report["status"] = ("passed" if all(
+        r["status"] == "passed" for r in report["experiments"].values()
+    ) else "failed")
+    save()
+    try:
+        report["plots"] = plot_report(report, args.output.with_suffix(".png"))
+    except Exception as exc:
+        report.update(status="failed", plot_error=f"{type(exc).__name__}: {exc}")
+        save()
+        raise
+    save()
+    print(f"Report: {args.output}\nPlots: {', '.join(report['plots'])}", flush=True)
+    return int(report["status"] != "passed")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-directory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--comparison", choices=("retry", "fixed-r"), default="retry")
+    parser.add_argument("--comparison", choices=("retry", "fixed-r", "failures"), default="retry")
     parser.add_argument("--owner-placement", choices=("default", "head"), default="default",
                         help="With --comparison fixed-r, head matches shuffle-map owners on the failed head in both modes")
     parser.add_argument("--mode", choices=("on", "off"),
@@ -361,7 +496,22 @@ def main():
     parser.add_argument("--timeout-s", type=float, default=120)
     parser.add_argument("--target-workload-s", type=float,
                         help="Calibrate a no-failure OFF regression workload to approximately this duration, then run identical epochs in both modes")
+    parser.add_argument("--training-epochs", type=int,
+                        help="Fixed regression epoch count; failures suite defaults to 30")
     args = parser.parse_args()
+    regression = ROOT / "python/ray/train/examples/pytorch/torch_regression_example.py"
+    if args.comparison == "failures":
+        if args.scenario or args.mode or args.workload_arg or args.owner_placement != "default":
+            parser.error("failures selects its own scenarios, modes and owner placement")
+        args.workload = args.workload or regression
+        if args.workload.resolve() != regression.resolve() or args.target_workload_s is not None:
+            parser.error("failures uses the regression example and --training-epochs")
+        args.training_epochs = args.training_epochs if args.training_epochs is not None else 30
+    if args.training_epochs is not None:
+        if (args.training_epochs < 3 or args.workload is None
+                or args.workload.resolve() != regression.resolve() or args.workload_arg
+                or args.target_workload_s is not None):
+            parser.error("--training-epochs requires the regression example, >=3 epochs, and no custom arguments or duration calibration")
     if args.target_workload_s is not None:
         regression = ROOT / "python/ray/train/examples/pytorch/torch_regression_example.py"
         if (args.comparison != "fixed-r" or args.workload is None
@@ -396,74 +546,11 @@ def main():
     directory = args.result_directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
     provenance = source_provenance(ROOT)
+    if args.comparison == "failures":
+        return run_failure_comparison(args, directory, provenance)
     if args.comparison == "fixed-r":
         return run_fixed_r_workload_comparison(args, directory, provenance)
-    report = {"profile": "ray-train-selective-xgboost", "status": "running",
-              "source_provenance": provenance, "samples": [], "pairs": [], "failed_observations": [],
-              "preliminary": args.repeats == 1,
-              "comparison_axis": "standard Ray Train retry versus selective retry; Fixed-R identical",
-              "measurement_scope": "trainer.fit including ingestion, retries, final integrity probe and teardown; excludes cluster startup",
-              "limitations": ["fixed CPU partitions; explicit input cache helper; no shared streaming shards",
-                              "controlled callback allreduces; not arbitrary native tree-building failures",
-                              "logical nodes on one machine; shared storage and input service survive",
-                              "Fixed-R independent contribution requires a separate OFF/ON comparison"]}
-    if args.workload:
-        report.update(profile="ray-train-existing-workload", workload=str(args.workload.resolve()),
-                      measurement_scope="trainer.fit including ingestion, retries and teardown; excludes cluster startup, driver preprocessing and final numerical probe",
-                      limitations=["CPU Gloo; synchronous, application-restored checkpoints",
-                                   "worker-process failure after a committed checkpoint; not node or head loss",
-                                   "fresh dataset iterators; no retained streaming position or cached-partition guarantee",
-                                   "existing regression example has a numerical probe; other scripts need workload-specific correctness checks",
-                                   "Fixed-R is identical in both policies; its independent benefit is not measured"])
-
-    def save():
-        write_json(args.output, report)
-        write_json(directory / "comparison.json", report)
-
-    save()
-    for scenario in dict.fromkeys(scenarios):
-        for pair in range(1, args.repeats + 1):
-            samples = {}
-            for policy in (("full", "selective") if pair % 2 else ("selective", "full")):
-                options = {"training_strategy": "ray-train-selective", "scenario": scenario,
-                           "mode": args.mode, "restart_scope": policy, "timeout_s": args.timeout_s}
-                if args.workload:
-                    options.update(training_strategy="ray-train-workload",
-                                   workload=str(args.workload.resolve()), workload_args=args.workload_arg)
-                print(f"{scenario}: pair {pair}/{args.repeats}, {policy}, Fixed-R {args.mode.upper()} ({args.timeout_s:g}s)", flush=True)
-                sample = run_observation(options, pair, directory / f"{scenario}-{pair}-{policy}", provenance)
-                sample["restart_scope"] = policy
-                report["samples"].append(sample)
-                samples[policy] = sample
-                print(f"  {sample['status']}: {sample.get('error', str(sample.get('training_s')) + 's training')}", flush=True)
-                if sample["status"] != "passed":
-                    report["failed_observations"].append({"scenario": scenario, "pair": pair,
-                                                          "policy": policy, "error": sample.get("error")})
-                save()
-            if all(s["status"] == "passed" for s in samples.values()):
-                try:
-                    values = compare_pair(samples["full"], samples["selective"])
-                    report["pairs"].append({"scenario": scenario, "pair": pair,
-                                            **values})
-                    print(f"  matched change: {values['selective_vs_full_pct']:+.2f}%", flush=True)
-                except (ValueError, AssertionError, OSError) as exc:
-                    report["failed_observations"].append({"scenario": scenario, "pair": pair,
-                                                          "error": f"Comparison: {exc}"})
-                save()
-    report["summary"] = []
-    for scenario in dict.fromkeys(scenarios):
-        rows = [p for p in report["pairs"] if p["scenario"] == scenario]
-        if rows:
-            changes = [r["selective_vs_full_pct"] for r in rows]
-            report["summary"].append({"scenario": scenario, "pairs": len(rows),
-                                      "full_s_mean": statistics.mean(r["full_s"] for r in rows),
-                                      "selective_s_mean": statistics.mean(r["selective_s"] for r in rows),
-                                      "selective_vs_full_pct_mean": statistics.mean(changes),
-                                      "selective_vs_full_pct_stdev": statistics.stdev(changes) if len(rows) > 1 else None})
-    report["status"] = "failed" if report["failed_observations"] else "passed"
-    save()
-    print(f"Report: {args.output}")
-    return int(report["status"] != "passed")
+    return run_retry_comparison(args, directory, provenance)
 
 
 if __name__ == "__main__":

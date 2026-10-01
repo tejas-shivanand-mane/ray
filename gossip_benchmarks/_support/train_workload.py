@@ -504,6 +504,10 @@ def run_case(options, directory, diagnostics):
                        numerical_probe=regression, torch_version=torch.__version__,
                        owner_placement=options.get("owner_placement", "default"),
                        workload_completed=False)
+    if regression:
+        # Owner loss can end preprocessing before TorchTrainer is constructed.
+        # Keep the planned fixed work available for that failed baseline too.
+        diagnostics["training_epochs"] = training_epochs if training_epochs is not None else 3
     args = argparse.Namespace(local_executor_nodes=4, local_object_store_mb=512,
                               owner_node_id=None, executor_node_ids=None,
                               producer_concurrency=None, recovery_timeout_s=30)
@@ -599,6 +603,10 @@ def run_case(options, directory, diagnostics):
                     return runpy.run_path(str(script), run_name="__main__")
 
             workload_started = time.monotonic()
+            diagnostics["workload_started_ns"] = time.monotonic_ns()
+            write_record(directory / "progress.json", {
+                "workload_started_ns": diagnostics["workload_started_ns"],
+            })
             try:
                 if owner_failure:
                     data_owner_fault(directory, enabled, crash_head,
@@ -608,7 +616,14 @@ def run_case(options, directory, diagnostics):
                     workload()
                 diagnostics["workload_completed"] = True
             finally:
+                diagnostics["workload_finished_ns"] = time.monotonic_ns()
                 diagnostics["workload_s"] = time.monotonic() - workload_started
+                write_record(directory / "progress.json", {
+                    key: diagnostics[key] for key in (
+                        "workload_started_ns", "workload_finished_ns", "workload_s",
+                        "workload_completed",
+                    )
+                })
                 diagnostics["data_exchanges"] = [
                     record for path in sorted((directory / "exchanges").glob("*.json"))
                     for record in json.loads(path.read_text())
