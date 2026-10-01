@@ -160,7 +160,7 @@ def test_control_failure_skips_expensive_fault_trials(modules, monkeypatch, tmp_
         return sample
 
     monkeypatch.setattr(modules.runner, "run_observation", observation)
-    args = NS(epochs=8, failure_point=["early", "middle", "late"], repeats=1,
+    args = NS(epochs=8, failure_point=["early", "middle", "late"], failure_kind=["head-node", "worker-node"], repeats=1,
               data_directory=tmp_path, timeout_s=420, output=tmp_path / "report.json")
     assert modules.runner.run_comparison(args, tmp_path, {}) == 1
     assert len(calls) == 2
@@ -168,6 +168,7 @@ def test_control_failure_skips_expensive_fault_trials(modules, monkeypatch, tmp_
     assert all(o["scenario"] == "none" for o in calls)
     report = json.loads(args.output.read_text())
     assert report["skipped_failure_points"] == ["early", "middle", "late"]
+    assert len(report["skipped_cases"]) == 6
     assert not report["pairs"]
 
 
@@ -179,24 +180,173 @@ def test_entire_suite_keeps_consistent_arms_and_checks_controls(modules, monkeyp
         calls.append(options)
         sample = copy.deepcopy(matched_pair[options["mode"] == "on"])
         sample.update(scenario=options["scenario"], training_epochs=8,
+                      placement_strategy=options["placement_strategy"],
                       reports=[{"time_ns": i * 10**9} for i in range(1, 9)])
-        if options["scenario"] == "worker":
+        if options["scenario"] != "none":
             sample["recoveries"] = [{"failure_to_next_report_s": 2}]
+            sample["node_fault"] = {"completed": True, "scenario": options["scenario"],
+                                    "report_number": options["fault_after_epoch"]}
         return sample
 
     monkeypatch.setattr(modules.runner, "run_observation", observation)
-    args = NS(epochs=8, failure_point=["early", "middle", "late"], repeats=1,
+    args = NS(epochs=8, failure_point=["early", "middle", "late"], failure_kind=["head-node", "worker-node"], repeats=1,
               data_directory=tmp_path, timeout_s=420, output=tmp_path / "report.json")
     assert modules.runner.run_comparison(args, tmp_path, {}) == 0
-    assert len(calls) == 8
+    assert len(calls) == 14
     assert {(o["mode"], o["restart_scope"]) for o in calls} == {("off", "full"), ("on", "selective")}
-    assert [o["fault_after_epoch"] for o in calls] == [0, 0, 1, 1, 4, 4, 7, 7]
+    assert all(o["placement_strategy"] == "STRICT_SPREAD" for o in calls)
+    assert [o["fault_after_epoch"] for o in calls] == [0, 0, 1, 1, 4, 4, 7, 7, 1, 1, 4, 4, 7, 7]
     report = json.loads(args.output.read_text())
-    assert len(report["pairs"]) == 4
+    assert len(report["pairs"]) == 7
+    assert {p["scenario"] for p in report["pairs"]} == {"none", "head-node", "worker-node"}
     for sample in report["samples"][2:]:
         assert sample["matches_no_failure_predictions"]
         assert sample["recoveries"][0]["next_report_excess_vs_control_s"] == 1
         assert sample["recoveries"][0]["lost_uncommitted_optimizer_steps"] is None
+
+
+def test_plot_panels_do_not_mix_head_and_worker_or_duplicate_controls(modules):
+    plot = importlib.import_module("plot_fashion_training")
+    cases = modules.runner.comparison_cases(8, ["early", "middle", "late"], ["head-node", "worker-node"])
+    report = {"profile": "fashion-mnist-failure-matrix", "failure_kinds": ["head-node", "worker-node"],
+              "failure_epochs": {"none": 0, "early": 1, "middle": 4, "late": 7},
+              "samples": [{**c, "arm": a} for c in cases for a in ("ordinary", "integrated")]}
+    rows, columns, panels = plot.panel_layout(report)
+    assert (rows, columns) == (2, 4)
+    for kind, point in panels:
+        for arm in ("ordinary", "integrated"):
+            samples = plot.panel_samples(report, kind, point, arm)
+            assert len(samples) == 1
+            assert samples[0]["scenario"] == ("none" if point == "none" else kind)
+    assert plot.panel_samples(report, "head-node", "none", "ordinary")[0] is (
+        plot.panel_samples(report, "worker-node", "none", "ordinary")[0])
+    report["samples"] = report["samples"][:2]
+    assert plot.panel_layout(report) == (rows, columns, panels)
+    assert plot.panel_samples(report, "head-node", "late", "ordinary") == []
+
+
+@pytest.fixture
+def node_checkpoint(later_checkpoint):
+    path = later_checkpoint / "timeline.json"
+    timeline = json.loads(path.read_text())
+    for group, nodes in zip(timeline["groups"], (("a", "b"), ("c", "b"))):
+        for worker, node in zip(group, nodes):
+            worker["node_id"] = node
+    fault = {**timeline["fault"], "scenario": "worker-node", "completed": True,
+             "groups": [timeline["groups"][0]], "checkpoint": timeline["reports"][2]["checkpoint"],
+             "checkpoint_committed_ns": 3000000000, "operation_finished_ns": 3400000000,
+             "original_head_node_id": "head", "executor_node_ids": ["a", "b", "c", "d"],
+             "worker_node_failure": {
+                 "failure_scope": "logical_worker_node_processes_with_surviving_shared_storage",
+                 "all_node_processes_exited": True, "gcs_marked_dead": True,
+                 "node_id": "a", "training_worker_pid": 10, "node_process_pids": [10, 11, 12],
+                 "surviving_node_ids": ["head", "coordinator", "b", "c", "d"]}}
+    path.write_text(json.dumps(timeline))
+    (later_checkpoint / "node-fault.json").write_text(json.dumps({"node_fault": fault}))
+    return later_checkpoint, timeline, fault
+
+
+def test_worker_node_validation_requires_loss_and_checkpoint_retry(modules, node_checkpoint):
+    directory, _, _ = node_checkpoint
+    result = modules.workload.validate(directory, selective=True, inject=False, node_scenario="worker-node")
+    assert result["recoveries"][0]["worker_retry_occurred"]
+    assert result["recoveries"][0]["retained_ranks"] == [1]
+    assert result["recoveries"][0]["node_operation_s"] == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize("corruption", ["process_only", "wrong_victim", "same_node", "missing_checkpoint", "late_injection", "dead_destination"])
+def test_worker_node_evidence_rejects_wrong_scope(modules, node_checkpoint, corruption):
+    directory, timeline, fault = node_checkpoint
+    if corruption == "process_only":
+        fault["worker_node_failure"]["all_node_processes_exited"] = False
+    elif corruption == "wrong_victim":
+        fault["worker_node_failure"]["training_worker_pid"] = 99
+    elif corruption == "same_node":
+        timeline["groups"][0][1]["node_id"] = "a"
+    elif corruption == "missing_checkpoint":
+        fault["checkpoint"] = {}
+    elif corruption == "late_injection":
+        fault["operation_finished_ns"] = 4100000000
+    else:
+        timeline["groups"][1][0]["node_id"] = "a"
+    (directory / "timeline.json").write_text(json.dumps(timeline))
+    (directory / "node-fault.json").write_text(json.dumps({"node_fault": fault}))
+    with pytest.raises(ValueError):
+        modules.workload.validate(directory, selective=True, inject=False, node_scenario="worker-node")
+
+
+def test_head_replacement_can_preserve_training_workers(modules, node_checkpoint):
+    directory, timeline, fault = node_checkpoint
+    timeline["groups"] = timeline["groups"][:1]
+    for filename in ("2.json", "3.json"):
+        (directory / "starts" / filename).unlink()
+    fault.update(scenario="head-node", head_replacement={
+        "failure_scope": "all_head_processes_with_surviving_gcs_storage",
+        "gcs_storage_backend": "rocksdb", "original_head_processes_exited": True,
+        "original_head_node_id": "head", "replacement_head_node_id": "new-head",
+        "original_gcs_pid": 100, "replacement_gcs_pid": 200,
+        "surviving_node_ids": ["coordinator", "a", "b", "c", "d"],
+    })
+    fault.pop("worker_node_failure")
+    (directory / "timeline.json").write_text(json.dumps(timeline))
+    (directory / "node-fault.json").write_text(json.dumps({"node_fault": fault}))
+    result = modules.workload.validate(directory, selective=False, inject=False, node_scenario="head-node")
+    recovery = result["recoveries"][0]
+    assert recovery["worker_retry_occurred"] is False
+    assert recovery["retained_ranks"] == [0, 1]
+    assert recovery["failure_to_all_workers_invoked_s"] is None
+    assert recovery["failure_to_next_report_s"] == pytest.approx(0.9)
+    fault["head_replacement"]["original_head_processes_exited"] = False
+    (directory / "node-fault.json").write_text(json.dumps({"node_fault": fault}))
+    with pytest.raises(ValueError, match="Head replacement"):
+        modules.workload.validate(directory, selective=False, inject=False, node_scenario="head-node")
+
+
+@pytest.mark.parametrize("scenario", ["head-node", "worker-node"])
+def test_node_supervisor_runs_on_main_thread_and_releases_gate(modules, tmp_path, scenario):
+    import threading
+    import time
+
+    calls = []
+    def crash(*args):
+        assert threading.current_thread() is threading.main_thread()
+        calls.append(args)
+        return {"observed": True}
+
+    def workload():
+        assert threading.current_thread() is not threading.main_thread()
+        modules.workload.write_record(tmp_path / "node-fault-request.json", {
+            "scenario": scenario, "report_number": 3, "checkpoint": {"model": "sha"},
+            "checkpoint_committed_ns": time.monotonic_ns(),
+            "groups": [[{"rank": 0, "node_id": "a", "pid": 101},
+                        {"rank": 1, "node_id": "b", "pid": 102}]],
+        })
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "release-report-3.json").exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Supervisor failed to release the workload")
+            time.sleep(.01)
+        return "complete"
+
+    assert modules.workload.training_node_fault(
+        tmp_path, scenario, 3, ("a", "b", "c", "d"), "head", crash, crash, workload, 5) == "complete"
+    assert calls == ([()] if scenario == "head-node" else [("a", 101)])
+    fault = json.loads((tmp_path / "node-fault.json").read_text())["node_fault"]
+    assert fault["completed"]
+    assert fault["checkpoint_committed_ns"] <= fault["request_ns"] <= fault["operation_finished_ns"]
+
+
+def test_node_supervisor_preserves_failure_before_injection(modules, tmp_path):
+    def workload():
+        raise LookupError("original workload failure")
+    def crash(*args):
+        pytest.fail("Must not inject before the requested epoch")
+    with pytest.raises(LookupError, match="original workload failure"):
+        modules.workload.training_node_fault(
+            tmp_path, "head-node", 3, ("a", "b"), "head", crash, crash, workload, 5)
+    fault = json.loads((tmp_path / "node-fault.json").read_text())["node_fault"]
+    assert fault["completed"] is False
+    assert (tmp_path / "release-report-3.json").exists()
 
 
 def test_input_fingerprint_rejects_changed_dataset(modules, tmp_path):

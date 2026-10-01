@@ -212,7 +212,7 @@ def run_observation(options, pair, directory, provenance):
         sample["data_owner_fault"] = json.loads((directory / "data-owner-fault.json").read_text())
     if options.get("training_strategy") == "ray-train-workload":
         # Preserve real progress even on exceptions/timeouts. Never change status.
-        for filename in ("progress.json", "timeline.json"):
+        for filename in ("progress.json", "timeline.json", "node-fault.json"):
             path = directory / filename
             if path.exists():
                 sample.update(json.loads(path.read_text()))

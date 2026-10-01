@@ -2,8 +2,9 @@
 
 The script keeps its own model, optimizer, datasets and train function. This
 adapter selects the retry policy, local storage and callbacks at construction.
-It kills a worker after a selected committed checkpoint and checks actor reuse,
-checkpoint delivery and subsequent reports. It does not make an arbitrary
+It kills a worker process or logical node after a selected committed checkpoint
+and checks node/process evidence, actor reuse, checkpoint delivery and subsequent
+reports. It does not make an arbitrary
 application resumable: that application must save and restore its own state.
 The data-owner scenario instead holds a random-shuffle map task while the local
 harness replaces head processes, then checks end-to-end completion and replay.
@@ -55,9 +56,10 @@ def checkpoint_files(checkpoint):
 class ReportGate(TrainContextCallback):
     """Hold a selected report until the controller commits it and injects."""
 
-    def __init__(self, directory, report_number=1):
+    def __init__(self, directory, report_number=1, timeout_s=30):
         self.directory = directory
         self.report_number = report_number
+        self.timeout_s = timeout_s
 
     @contextmanager
     def on_report(self):
@@ -66,7 +68,7 @@ class ReportGate(TrainContextCallback):
         selected = get_train_context().report_call_index == self.report_number - 1
         yield
         if selected:
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + self.timeout_s
             release = Path(self.directory) / f"release-report-{self.report_number}.json"
             while not release.exists():
                 if time.monotonic() >= deadline:
@@ -75,10 +77,11 @@ class ReportGate(TrainContextCallback):
 
 
 class WorkloadObserver(WorkerGroupCallback, ReportCallback):
-    def __init__(self, directory, inject, report_number=1):
+    def __init__(self, directory, inject, report_number=1, node_scenario=None):
         self.directory = Path(directory)
         self.inject = inject
         self.report_number = report_number
+        self.node_scenario = node_scenario
         self.groups = []
         self.reports = []
         self.fault = None
@@ -112,7 +115,28 @@ class WorkloadObserver(WorkerGroupCallback, ReportCallback):
         if len(self.reports) == self.report_number:
             if not record["checkpoint"]:
                 raise ValueError("Selected failure report has no committed checkpoint")
-            if self.inject:
+            if self.node_scenario:
+                # The controller and workers wait at a committed epoch while
+                # the driver's MAIN thread operates the local node supervisor.
+                self.fault = {"scenario": self.node_scenario,
+                              "report_number": self.report_number,
+                              "groups": self.groups,
+                              "checkpoint": record["checkpoint"],
+                              "checkpoint_committed_ns": record["time_ns"],
+                              "request_ns": time.monotonic_ns(), "completed": False}
+                self.save()
+                write_record(self.directory / "node-fault-request.json", self.fault)
+                response = self.directory / "node-fault.json"
+                deadline = time.monotonic() + 90
+                while not response.exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Node supervisor did not finish the selected failure")
+                    time.sleep(.02)
+                self.fault = json.loads(response.read_text())["node_fault"]
+                self.save()
+                if not self.fault.get("completed"):
+                    raise RuntimeError(self.fault.get("error", "Node failure did not complete"))
+            elif self.inject:
                 self.fault = {"rank": 0, "actor_id": self.groups[0][0]["actor_id"],
                               "report_number": self.report_number,
                               "request_ns": time.monotonic_ns()}
@@ -446,10 +470,117 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, 
             del exchange._ExchangeTask.on_data_ready
 
 
-def validate(directory, selective, inject):
+def training_node_fault(directory, scenario, report_number, executor_ids, head_id,
+                        crash_head, crash_worker, workload, timeout_s):
+    """Inject one real logical-node failure from the driver's main thread.
+
+    Training runs in a background thread; only the supervisor creates/removes
+    Ray nodes, because process startup registers signal handlers. The workers
+    remain at the selected committed report until the operation has finished.
+    """
+    if current_thread() is not main_thread():
+        raise RuntimeError("Node failure supervision must run on the main thread")
+    if scenario not in ("head-node", "worker-node"):
+        raise ValueError("Unsupported training node failure")
+    request = directory / "node-fault-request.json"
+    response = directory / "node-fault.json"
+    release = directory / f"release-report-{report_number}.json"
+    fault = {"scenario": scenario, "report_number": report_number, "completed": False}
+    with ThreadPoolExecutor(1) as pool:
+        future = pool.submit(workload)
+        try:
+            deadline = time.monotonic() + timeout_s
+            while not request.exists():
+                if future.done():
+                    future.result()
+                    raise ValueError("Workload ended before the requested node failure")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Training did not reach the requested node failure")
+                time.sleep(.02)
+            fault = json.loads(request.read_text())
+            if (fault.get("scenario") != scenario or fault.get("report_number") != report_number
+                    or not fault.get("checkpoint") or len(fault.get("groups", [])) != 1):
+                raise ValueError("Unmatched node failure request or premature retry")
+            group = fault["groups"][0]
+            if ([w["rank"] for w in group] != [0, 1]
+                    or len({w["node_id"] for w in group}) != 2
+                    or any(w["node_id"] not in executor_ids for w in group)):
+                raise ValueError("Node comparison requires two distinct executor nodes")
+            fault.update(request_ns=time.monotonic_ns(), original_head_node_id=head_id,
+                         executor_node_ids=sorted(executor_ids))
+            if fault["checkpoint_committed_ns"] > fault["request_ns"]:
+                raise ValueError("Node failure preceded checkpoint commitment")
+            if scenario == "head-node":
+                fault["head_replacement"] = crash_head()
+            else:
+                target = group[0]
+                fault["worker_node_failure"] = crash_worker(target["node_id"], target["pid"])
+            fault.update(completed=True, operation_finished_ns=time.monotonic_ns())
+        except Exception as exc:
+            fault.update(completed=False, error_type=type(exc).__name__, error=str(exc))
+            raise
+        finally:
+            write_record(response, {"node_fault": fault})
+            write_record(release, {"released": True})
+        return future.result()
+
+
+def validate_node_evidence(fault, groups, reports):
+    if not fault.get("completed") or not groups:
+        raise ValueError("Missing completed node-failure evidence")
+    epoch = fault["report_number"]
+    if (type(epoch) is not int or not 1 <= epoch < len(reports)
+            or groups[0] != fault["groups"][0]
+            or fault["checkpoint"] != reports[epoch - 1]["checkpoint"]
+            or fault["checkpoint_committed_ns"] != reports[epoch - 1]["time_ns"]
+            or not fault["checkpoint_committed_ns"] <= fault["request_ns"]
+            < fault["operation_finished_ns"] < reports[epoch]["time_ns"]):
+        raise ValueError("Node failure lacks matched checkpoint and subsequent progress")
+    original = groups[0]
+    nodes = {w["node_id"] for w in original}
+    executors = set(fault["executor_node_ids"])
+    if (len(original) != 2 or [w["rank"] for w in original] != [0, 1]
+            or len(nodes) != 2 or not nodes <= executors
+            or fault["original_head_node_id"] in nodes):
+        raise ValueError("Training workers were not on separate surviving executor nodes")
+    if fault["scenario"] == "worker-node":
+        loss = fault["worker_node_failure"]
+        if (loss.get("failure_scope") != "logical_worker_node_processes_with_surviving_shared_storage"
+                or not loss.get("all_node_processes_exited") or not loss.get("gcs_marked_dead")
+                or loss["node_id"] != original[0]["node_id"]
+                or loss["training_worker_pid"] != original[0]["pid"]
+                or loss["training_worker_pid"] not in loss["node_process_pids"]
+                or loss["node_id"] in loss["surviving_node_ids"]
+                or not (executors - {loss["node_id"]}) <= set(loss["surviving_node_ids"])
+                or fault["original_head_node_id"] not in loss["surviving_node_ids"]
+                or len(groups) != 2
+                or any(w["node_id"] == loss["node_id"] for w in groups[1])):
+            raise ValueError("Worker-node loss or replacement was not verified")
+    elif fault["scenario"] == "head-node":
+        head = fault["head_replacement"]
+        if (head.get("failure_scope") != "all_head_processes_with_surviving_gcs_storage"
+                or not head.get("original_head_processes_exited")
+                or head.get("gcs_storage_backend") != "rocksdb"
+                or head["original_head_node_id"] != fault["original_head_node_id"]
+                or head["original_head_node_id"] == head["replacement_head_node_id"]
+                or head["original_gcs_pid"] == head["replacement_gcs_pid"]
+                or not executors <= set(head["surviving_node_ids"])):
+            raise ValueError("Head replacement with surviving executors was not verified")
+    else:
+        raise ValueError("Unknown node-failure scope")
+
+
+def validate(directory, selective, inject, node_scenario=None):
     timeline = json.loads((directory / "timeline.json").read_text())
     groups, reports = timeline["groups"], timeline["reports"]
-    if len(groups) != (2 if inject else 1):
+    if node_scenario:
+        fault = json.loads((directory / "node-fault.json").read_text())["node_fault"]
+        if fault["scenario"] != node_scenario:
+            raise ValueError("Observed node failure differs from the requested scope")
+        validate_node_evidence(fault, groups, reports)
+        timeline.update(fault=fault, node_fault=fault)
+    retry = inject or node_scenario == "worker-node" or (node_scenario == "head-node" and len(groups) == 2)
+    if len(groups) != (2 if retry else 1):
         raise ValueError("Unexpected retry count; inspect timeline.json")
     if len(reports) < 2 or not reports[-1]["checkpoint"]:
         raise ValueError("Workload must commit a checkpoint and then make further progress")
@@ -458,7 +589,7 @@ def validate(directory, selective, inject):
     if len(starts) != expected_starts:
         raise ValueError("Missing or unexpected train function invocations")
     recovery = []
-    if inject:
+    if retry:
         fault = timeline["fault"]
         if not fault:
             raise ValueError("Requested worker failure was not injected")
@@ -472,7 +603,9 @@ def validate(directory, selective, inject):
         if [w["rank"] for w in old] != [w["rank"] for w in new]:
             raise ValueError("Global ranks changed across recovery")
         retained = [w["rank"] for w, n in zip(old, new) if w["actor_id"] == n["actor_id"]]
-        if retained != (list(range(1, len(old))) if selective else []):
+        expected_retained = list(range(1, len(old))) if selective else []
+        if ((node_scenario != "head-node" and retained != expected_retained)
+                or (node_scenario == "head-node" and not selective and retained)):
             raise ValueError(f"Unexpected retained ranks: {retained}; fallback is not selective success")
         resumed = [s for s in starts if s["checkpoint"] is not None]
         if len(resumed) != len(new) or any(s["checkpoint"] != committed["checkpoint"] for s in resumed):
@@ -491,6 +624,15 @@ def validate(directory, selective, inject):
                          "failure_to_next_report_s": (reports[report_number]["time_ns"] - fault["request_ns"]) / 1e9})
     elif any(s["checkpoint"] is not None for s in starts):
         raise ValueError("No-failure run unexpectedly restored a checkpoint")
+    if node_scenario == "head-node" and not retry:
+        epoch = fault["report_number"]
+        recovery.append({"retained_ranks": [w["rank"] for w in groups[0]], "replaced_ranks": [],
+                         "committed_reports_before_failure": epoch,
+                         "failure_to_all_workers_invoked_s": None,
+                         "failure_to_next_report_s": (reports[epoch]["time_ns"] - fault["request_ns"]) / 1e9})
+    if node_scenario:
+        recovery[0].update(worker_retry_occurred=retry,
+                           node_operation_s=(fault["operation_finished_ns"] - fault["request_ns"]) / 1e9)
     return {**timeline, "starts": starts, "recoveries": recovery}
 
 
@@ -519,10 +661,11 @@ def run_case(options, directory, diagnostics):
         script_args = ["--num-workers", "2", "--data-path", prepare_regression_input(directory)]
     selective = options["restart_scope"] == "selective"
     inject = options["scenario"] == "worker"
+    node_scenario = options["scenario"] if options["scenario"] in ("head-node", "worker-node") else None
     owner_failure = options["scenario"] == "data-owner"
     enabled = options["mode"] == "on"
     matched_owner = options.get("owner_placement", "default") == "head"
-    report_number = options.get("fault_after_epoch", 1) if inject else 1
+    report_number = options.get("fault_after_epoch", 1) if inject or node_scenario else 1
     if type(report_number) is not int or report_number < 1 or (
         training_epochs is not None and report_number >= training_epochs
     ):
@@ -537,6 +680,7 @@ def run_case(options, directory, diagnostics):
                        workload=str(script), workload_sha256=file_sha256(script),
                        numerical_probe=regression or fashion, torch_version=torch.__version__,
                        owner_placement=options.get("owner_placement", "default"),
+                       placement_strategy=options.get("placement_strategy", "PACK"),
                        workload_completed=False)
     if regression or fashion:
         # Owner loss can end preprocessing before TorchTrainer is constructed.
@@ -579,11 +723,15 @@ def run_case(options, directory, diagnostics):
         run = kwargs.get("run_config") or RunConfig()
         run = replace(run, storage_path=str(directory / "storage"), name="workload",
                       failure_config=FailureConfig(max_failures=1), callbacks=[
-                          *(run.callbacks or []), ReportGate(str(directory), report_number),
-                          WorkloadObserver(str(directory), inject, report_number)])
+                          *(run.callbacks or []), ReportGate(str(directory), report_number, 90 if node_scenario else 30),
+                          WorkloadObserver(str(directory), inject, report_number, node_scenario)])
         scaling = kwargs.get("scaling_config")
         if scaling is None or scaling.num_workers < 2 or scaling.use_gpu or scaling.use_tpu:
             raise ValueError("Use at least two CPU workers in the workload")
+        if options.get("placement_strategy"):
+            kwargs["scaling_config"] = replace(scaling, placement_strategy=options["placement_strategy"])
+        if node_scenario and options.get("placement_strategy") != "STRICT_SPREAD":
+            raise ValueError("Training node failures require STRICT_SPREAD placement")
         kwargs.update(torch_config=config, run_config=run)
         originals[0](trainer, observe_function(train_loop_per_worker, str(directory)), **kwargs)
 
@@ -599,8 +747,8 @@ def run_case(options, directory, diagnostics):
     try:
         ray.cloudpickle.register_pickle_by_value(sys.modules[__name__])
         with local_head_failure_cluster(args, coordinator_cpus=0, recovery_enabled=enabled,
-                                        allow_head_failure=owner_failure,
-                                        include_worker_failure=True) as (case_args, crash_head, _):
+                                        allow_head_failure=owner_failure or node_scenario == "head-node",
+                                        include_worker_failure=True) as (case_args, crash_head, crash_worker):
             diagnostics["selected_owner_node_id"] = case_args.owner_node_id
             native = ray._private.state.state.get_system_config()
             diagnostics["native_settings"] = {key: native.get(key) for key in system_config()}
@@ -646,6 +794,10 @@ def run_case(options, directory, diagnostics):
                     data_owner_fault(directory, enabled, crash_head,
                                      case_args.executor_node_ids, diagnostics, workload,
                                      matched_owner=matched_owner)
+                elif node_scenario:
+                    training_node_fault(directory, node_scenario, report_number,
+                                        case_args.executor_node_ids, case_args.owner_node_id,
+                                        crash_head, crash_worker, workload, options["timeout_s"])
                 else:
                     workload()
                 diagnostics["workload_completed"] = True
@@ -664,7 +816,7 @@ def run_case(options, directory, diagnostics):
                 ]
             if len(timings) != 1:
                 raise ValueError("The script did not execute exactly one TorchTrainer.fit")
-            diagnostics.update(validate(directory, selective, inject))
+            diagnostics.update(validate(directory, selective, inject, node_scenario))
             exchanges = diagnostics["data_exchanges"]
             if (regression or fashion) and enabled:
                 for name in ("Repartition", "RandomShuffle"):

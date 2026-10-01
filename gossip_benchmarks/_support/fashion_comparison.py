@@ -35,13 +35,14 @@ def validate_fashion(directory, options, diagnostics):
     import torch
 
     epochs = options["training_epochs"]
-    failure_epoch = options["fault_after_epoch"] if options["scenario"] == "worker" else 0
+    failure_epoch = options["fault_after_epoch"] if options["scenario"] != "none" else 0
+    retry_epoch = failure_epoch if len(diagnostics["groups"]) == 2 else 0
     reports = diagnostics["reports"]
     if [r["metrics"][0]["epoch"] for r in reports] != list(range(1, epochs + 1)):
         raise ValueError("Training did not commit every requested epoch exactly once")
     for index, report in enumerate(reports):
         metrics = report["metrics"]
-        resumed = failure_epoch if failure_epoch and index >= failure_epoch else 0
+        resumed = retry_epoch if retry_epoch and index >= retry_epoch else 0
         if len(metrics) != 2 or any(
             m["epoch"] != index + 1 or m["resumed_from_epoch"] != resumed
             or m["train_rows"] != 30000 or m["optimizer_steps"] != 118 for m in metrics
@@ -53,7 +54,10 @@ def validate_fashion(directory, options, diagnostics):
                 or not math.isfinite(first["validation_loss"]) or first["validation_loss"] < 0):
             raise ValueError("Invalid full-test-set validation")
     if failure_epoch and diagnostics["fault"].get("report_number") != failure_epoch:
-        raise ValueError("Worker failed at a different epoch than requested")
+        raise ValueError("Failure occurred at a different epoch than requested")
+    if options.get("placement_strategy") == "STRICT_SPREAD":
+        if any(len(g) != 2 or len({w["node_id"] for w in g}) != 2 for g in diagnostics["groups"]):
+            raise ValueError("Training workers did not occupy separate logical nodes")
     if input_identity(Path(options["data_directory"])) != diagnostics["input_identity"]:
         raise ValueError("Input changed during observation")
     state = torch.load(directory / "final-checkpoint/training.pt", map_location="cpu", weights_only=True)
@@ -104,6 +108,8 @@ def compare_pair(ordinary, integrated):
                 "training_rows_per_epoch", "validation_rows_per_epoch", "checkpoint_policy"):
         if ordinary[key] != integrated[key]:
             raise ValueError(f"Mismatched {key}")
+    if ordinary.get("placement_strategy") != integrated.get("placement_strategy"):
+        raise ValueError("Mismatched training worker placement")
     if ordinary["owner_placement"] != "default":
         raise ValueError("Training comparison uses default ownership in both arms")
     for key in PROVENANCE_KEYS:
@@ -116,10 +122,16 @@ def compare_pair(ordinary, integrated):
         if ((key.startswith("enable_") and (value is not False or other is not True))
                 or (not key.startswith("enable_") and value != other)):
             raise ValueError(f"Mismatched native setting: {key}")
-    if ordinary["scenario"] == "worker":
+    if ordinary["scenario"] != "none":
         for sample in (ordinary, integrated):
             if not sample.get("matches_no_failure_predictions") or len(sample.get("recoveries", [])) != 1:
                 raise ValueError("Missing recovery and no-failure correctness evidence")
+            if sample["scenario"] in ("head-node", "worker-node"):
+                fault = sample.get("node_fault", {})
+                if (not fault.get("completed") or fault.get("scenario") != sample["scenario"]
+                        or fault.get("report_number") != sample["fault_after_epoch"]
+                        or sample.get("placement_strategy") != "STRICT_SPREAD"):
+                    raise ValueError("Missing matched node-failure evidence")
     maximum_error = predictions_match(ordinary, integrated)
     values = {"predictions_max_abs_difference": maximum_error}
     for metric in ("workload_s", "training_s"):
@@ -141,6 +153,8 @@ def compare_control(sample, control):
     for key in PROVENANCE_KEYS:
         if sample["provenance"][key] != control["provenance"][key]:
             raise ValueError(f"Control provenance differs in {key}")
+    if sample.get("placement_strategy") != control.get("placement_strategy"):
+        raise ValueError("Control differs in training worker placement")
     error = predictions_match(sample, control)
     epoch = sample["fault_after_epoch"]
     recovery = sample["recoveries"][0]
