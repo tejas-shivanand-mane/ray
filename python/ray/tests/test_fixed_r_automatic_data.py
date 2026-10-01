@@ -49,10 +49,13 @@ def arguments(mode="fixed_r_head_failure", failure_stage="map"):
 def test_unschedulable_helper_only_fails_over_before_begin(monkeypatch, failure_point, head_dead):
     from ray.data._internal.execution import streaming_recovery as runtime
 
+    # Exercise real affinity validation before the mocked helper failure.
+    head_id = ray.NodeID.from_random().hex()
+    worker_id = ray.NodeID.from_random().hex()
     config = SimpleNamespace(
         automatic_outputs=False, dynamic_task_outputs=True, mode="fixed_r",
         profile_timing=False,
-        timeout_s=1, owner_node_id="head", executor_for_task=lambda index: "worker",
+        timeout_s=1, owner_node_id=head_id, executor_for_task=lambda index: worker_id,
     )
     liveness = iter([True, False if head_dead else True])
     monkeypatch.setattr(runtime, "_owner_alive", lambda config: next(liveness))
