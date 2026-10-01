@@ -206,6 +206,10 @@ def run_observation(options, pair, directory, provenance):
                                                         "event": json.loads(path.read_text())})
             except (OSError, ValueError) as exc:
                 sample["active_worker_events"].append({"path": str(path), "read_error": str(exc)})
+    if options["scenario"] == "data-owner" and (directory / "data-owner-fault.json").exists():
+        # Keep the completed fault operation visible even when the child times
+        # out during cleanup. Partial evidence never promotes a failed run.
+        sample["data_owner_fault"] = json.loads((directory / "data-owner-fault.json").read_text())
     sample["observation_wall_s"] = time.monotonic() - started
     write_json(directory / "sample.json", sample)
     return sample

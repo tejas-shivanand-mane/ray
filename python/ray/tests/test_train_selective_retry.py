@@ -331,6 +331,12 @@ def test_benchmark_payload_does_not_require_support_module(monkeypatch, tmp_path
                    if module_name == "train_retry" else
                    (module.WorkloadObserver, module.ReportGate, module.observe_function,
                     module.checkpoint_files))
+        if module_name == "train_workload":
+            from ray.data._internal.planner.exchange.shuffle_task_spec import ShuffleTaskSpec
+            from ray.data._internal.planner.exchange.streaming_recovery import _map_outputs
+
+            payload += (module.owner_gated_map(ShuffleTaskSpec.map, str(tmp_path), False),
+                        module.owner_gated_map(_map_outputs, str(tmp_path), True))
         path.write_bytes(ray.cloudpickle.dumps(payload))
         subprocess.run([sys.executable, "-c", '''
 import importlib.abc, sys
@@ -342,7 +348,135 @@ class Block(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Block())
 with open(sys.argv[1], "rb") as f:
     payload = ray.cloudpickle.load(f)
-assert len(payload) == 4
+assert len(payload) in (4, 6)
 ''', str(path)], check=True, cwd=tmp_path, timeout=20)
     finally:
         ray.cloudpickle.unregister_pickle_by_value(module)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_owner_fault_gate_preserves_shuffle_outputs(monkeypatch, streaming):
+    import importlib
+
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(root / "gossip_benchmarks/_support"))
+    module = importlib.import_module("train_workload")
+    calls = []
+    monkeypatch.setattr(module, "wait_for_owner_fault", lambda path, index: calls.append(index))
+    if streaming:
+        def original(*args):
+            yield "partition"
+            yield "metadata"
+        wrapped = module.owner_gated_map(original, "/unused", True)
+        output = wrapped(NS(_map_args=[None, None, True]), 0, None, 1)
+        assert next(output) == "partition"
+        assert calls == [0]
+        assert list(output) == ["metadata"]
+    else:
+        output = ["partition", "metadata"]
+        wrapped = module.owner_gated_map(lambda *args: output, "/unused", False)
+        assert wrapped(0, None, 1, None, None, True, 0) is output
+        assert calls == [0]
+
+
+@pytest.fixture
+def fixed_r_workload_pair(monkeypatch, tmp_path):
+    import importlib
+    import numpy as np
+
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(root / "gossip_benchmarks"))
+    comparison = importlib.import_module("run_train_retry_comparison")
+    samples = []
+    for mode in ("off", "on"):
+        directory = tmp_path / mode
+        directory.mkdir()
+        np.save(directory / "predictions.npy", np.array([1., 2.]))
+        samples.append({
+            "status": "passed", "scenario": "data-owner", "mode": mode,
+            "restart_scope": "full", "workload_sha256": "script", "torch_version": "torch",
+            "directory": str(directory), "workload_s": 10 if mode == "off" else 12,
+            "numerical_probe": True,
+            "provenance": {key: "same" for key in (
+                "source_sha256", "native_extension_sha256", "python", "platform", "ray_version",
+                "xgboost_version", "numpy_version", "pyarrow_version", "pandas_version")},
+            "native_settings": {"enable_recovery_streaming_fixed_r": mode == "on", "holders": 2},
+            "data_owner_fault": {"completed": True, "stage": "RandomShuffle.map", "request_ns": 2,
+                                 "fixed_r_submission_batch_settled": mode == "on",
+                                 "target": {"task_id": "target", "blocked_ns": 1},
+                                 "head_replacement": {"original_head_processes_exited": True,
+                                                      "failure_scope": "all_head_processes_with_surviving_gcs_storage"}},
+            "data_exchanges": [{"operator": "RandomShuffle", "fixed_r_recovered_tasks": 1 if mode == "on" else 0,
+                                "fixed_r_recovered_task_details": [{"task_id": "target"}] if mode == "on" else []}],
+        })
+    return comparison, samples
+
+
+def test_owner_fault_waits_for_settled_submission_batch(monkeypatch, tmp_path):
+    import importlib
+    from threading import Event
+    from ray.data._internal.planner.exchange import streaming_recovery as exchange
+
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(root / "gossip_benchmarks/_support"))
+    module = importlib.import_module("train_workload")
+    calls, diagnostics = [], {}
+    crashed = Event()
+    stream = NS(reader=object(), task_id=NS(hex=lambda: "target"))
+
+    class BaseTask:
+        def on_data_ready(self):
+            calls.append("consume")
+
+    class Task(BaseTask):
+        pass
+
+    monkeypatch.setattr(exchange, "_ExchangeTask", Task)
+    monkeypatch.setattr(exchange, "submit_stream", lambda *a, **kw: stream)
+
+    def crash():
+        calls.append("crash")
+        crashed.set()
+        return {"original_head_processes_exited": True}
+
+    with module.data_owner_fault(tmp_path, True, crash, ("executor",), diagnostics):
+        module.write_record(tmp_path / "data-owner-blocked.json", {
+            "task_id": "target", "node_id": "executor", "blocked_ns": 1,
+        })
+        exchange.submit_stream(None, None, (NS(_map_args=[None, None, True]), 0, None, 4))
+        assert not crashed.wait(.05), "Owner died while further submissions could be in flight"
+        task = Task()
+        task.stream = stream
+        task.on_data_ready()
+    assert calls == ["crash", "consume"]
+    assert diagnostics["data_owner_fault"]["completed"]
+    assert diagnostics["data_owner_fault"]["fixed_r_submission_batch_settled"]
+
+
+def test_fixed_r_comparison_records_surviving_baseline(fixed_r_workload_pair):
+    module, (off, on) = fixed_r_workload_pair
+    result = module.compare_fixed_r_pair(off, on)
+    assert result["off_completed"] and result["on_completed"]
+    assert result["on_vs_off_pct"] == pytest.approx(20)
+    assert result["on_replayed_tasks"] == 1
+
+
+@pytest.mark.parametrize("invalid", ["missing_fault", "wrong_replay", "different_build", "flags", "failed_baseline", "different_predictions"])
+def test_fixed_r_comparison_rejects_inadequate_evidence(fixed_r_workload_pair, invalid):
+    import numpy as np
+
+    module, (off, on) = fixed_r_workload_pair
+    if invalid == "missing_fault":
+        off["data_owner_fault"]["completed"] = False
+    elif invalid == "wrong_replay":
+        on["data_exchanges"][0]["fixed_r_recovered_task_details"] = [{"task_id": "another"}]
+    elif invalid == "different_build":
+        on["provenance"]["native_extension_sha256"] = "different"
+    elif invalid == "flags":
+        off["native_settings"]["enable_recovery_streaming_fixed_r"] = True
+    elif invalid == "failed_baseline":
+        off["status"] = "failed"
+    else:
+        np.save(Path(on["directory"]) / "predictions.npy", np.array([99., 2.]))
+    with pytest.raises((ValueError, AssertionError)):
+        module.compare_fixed_r_pair(off, on)

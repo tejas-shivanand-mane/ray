@@ -1,14 +1,17 @@
-"""External worker-failure harness for existing CPU TorchTrainer scripts.
+"""External worker/owner-failure harness for existing CPU TorchTrainer scripts.
 
 The script keeps its own model, optimizer, datasets and train function. This
 adapter selects the retry policy, local storage and callbacks at construction.
 It kills a worker after the first committed checkpoint and checks actor reuse,
 checkpoint delivery and subsequent reports. It does not make an arbitrary
 application resumable: that application must save and restore its own state.
+The data-owner scenario instead holds a random-shuffle map task while the local
+harness replaces head processes, then checks end-to-end completion and replay.
 """
 
 import argparse
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 import hashlib
 import inspect
@@ -17,6 +20,7 @@ from pathlib import Path
 import runpy
 import shutil
 import sys
+from threading import Event
 import time
 import uuid
 
@@ -147,6 +151,156 @@ def prepare_regression_input(directory):
     return str(path)
 
 
+def wait_for_owner_fault(directory, task_index):
+    """Pause task zero before it exports its first shuffle partition."""
+    if task_index != 0:
+        return
+    directory = Path(directory)
+    release = directory / "release-data-owner"
+    if release.exists():
+        return
+    runtime = ray.get_runtime_context()
+    marker = directory / "data-owner-blocked.json"
+    if not marker.exists():
+        write_record(marker, {
+            "task_id": runtime.get_task_id(), "node_id": runtime.get_node_id(),
+            "blocked_ns": time.monotonic_ns(), "stage": "RandomShuffle.map",
+        })
+    deadline = time.monotonic() + 60
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Owner-failure gate was not released")
+        time.sleep(.01)
+
+
+def owner_gated_map(original, directory, streaming):
+    # Both adapters compute the normal partitions, then pause before exporting
+    # task zero's first result. They neither change nor regenerate workload data.
+    if streaming:
+        def produce(*args):
+            outputs = original(*args)
+            try:
+                first = next(outputs)
+                if args[0]._map_args[2]:
+                    wait_for_owner_fault(directory, args[1])
+                yield first
+                yield from outputs
+            finally:
+                outputs.close()
+    else:
+        def produce(*args):
+            outputs = original(*args)
+            # ShuffleTaskSpec.map also implements shuffled repartition. Only
+            # random_shuffle=True is the selected failure point.
+            if args[5]:
+                wait_for_owner_fault(directory, args[0])
+            return outputs
+    return produce
+
+
+@contextmanager
+def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics):
+    """Kill/replace head processes after a real shuffle task reaches its gate.
+
+    OFF retains ordinary coordinator-owned shuffle tasks. ON retains the normal
+    head-owned Fixed-R tasks. No artificial owner-loss exception is injected into
+    OFF; its surviving coordinator may allow it to finish too.
+    """
+    from ray.data._internal.planner.exchange import streaming_recovery as exchange
+    from ray.data._internal.planner.exchange.shuffle_task_spec import ShuffleTaskSpec
+
+    directory = Path(directory)
+    blocked = directory / "data-owner-blocked.json"
+    enrolled = directory / "data-owner-enrolled.json"
+    batch_ready = directory / "data-owner-batch-ready"
+    release = directory / "release-data-owner"
+    done = Event()
+    fault = {"completed": False, "stage": "RandomShuffle.map"}
+    diagnostics["data_owner_fault"] = fault
+    original_map, original_stream = ShuffleTaskSpec.map, exchange._map_outputs
+    original_submit = exchange.submit_stream
+
+    def before_consume(task, *args, **kwargs):
+        if enrolled.exists() and not release.exists():
+            if json.loads(enrolled.read_text())["task_id"] == task.stream.task_id.hex():
+                # The exchange loop consumes only after its submission batch
+                # has settled. Pause it here so no ambiguous new enrollment can
+                # race head loss. Workers keep the ordinary output gate too.
+                batch_ready.touch()
+                deadline = time.monotonic() + 60
+                while not release.exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Owner-failure controller did not release the consumer")
+                    time.sleep(.01)
+        return original_consume(task, *args, **kwargs)
+
+    original_consume = exchange._ExchangeTask.on_data_ready
+
+    def capture_submit(*args, **kwargs):
+        stream = original_submit(*args, **kwargs)
+        task_args = args[2]
+        if (len(task_args) == 4 and type(task_args[1]) is int
+                and task_args[1] == 0 and task_args[0]._map_args[2]):
+            # A running producer alone is not enough: wait for the descriptor
+            # and witness enrollment to finish before killing its owner.
+            if stream.reader is None:
+                raise ValueError("Fault target was not enrolled in Fixed-R")
+            write_record(enrolled, {"task_id": stream.task_id.hex()})
+        return stream
+
+    def inject():
+        deadline = time.monotonic() + 60
+        try:
+            while not (blocked.exists() and (not enabled or (enrolled.exists() and batch_ready.exists()))):
+                if done.wait(.02):
+                    raise ValueError("Workload ended before the shuffle failure point")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Workload did not reach the shuffle failure point")
+            target = json.loads(blocked.read_text())
+            if target["node_id"] not in executor_ids:
+                raise ValueError("Shuffle task must execute on a surviving executor")
+            if enabled and json.loads(enrolled.read_text())["task_id"] != target["task_id"]:
+                raise ValueError("Blocked task differs from the enrolled recovery task")
+            fault.update(target=target, request_ns=time.monotonic_ns(),
+                         fixed_r_submission_batch_settled=enabled and batch_ready.exists())
+            write_record(directory / "data-owner-fault.json", fault)
+            fault["head_replacement"] = crash_head()
+            fault.update(completed=True, replacement_ready_ns=time.monotonic_ns())
+            write_record(directory / "data-owner-fault.json", fault)
+        except Exception as exc:
+            fault.update(error_type=type(exc).__name__, error=str(exc))
+            write_record(directory / "data-owner-fault.json", fault)
+            raise
+        finally:
+            release.touch()
+
+    if enabled:
+        exchange._map_outputs = owner_gated_map(original_stream, str(directory), True)
+        exchange.submit_stream = capture_submit
+        exchange._ExchangeTask.on_data_ready = before_consume
+    else:
+        ShuffleTaskSpec.map = staticmethod(owner_gated_map(original_map, str(directory), False))
+    try:
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(inject)
+            try:
+                yield
+            finally:
+                unwinding = sys.exc_info()[0] is not None
+                done.set()
+                release.touch()
+                try:
+                    future.result(timeout=35)
+                except Exception:
+                    if not unwinding:
+                        raise
+    finally:
+        ShuffleTaskSpec.map = staticmethod(original_map)
+        exchange._map_outputs, exchange.submit_stream = original_stream, original_submit
+        if enabled:
+            del exchange._ExchangeTask.on_data_ready
+
+
 def validate(directory, selective, inject):
     timeline = json.loads((directory / "timeline.json").read_text())
     groups, reports = timeline["groups"], timeline["reports"]
@@ -182,6 +336,7 @@ def validate(directory, selective, inject):
 def run_case(options, directory, diagnostics):
     import torch
     from ray.data import DataContext
+    from ray.data.context import ShuffleStrategy
     from ray.data._internal.execution.streaming_recovery import clear_config, get_config
     from ray.data._internal.execution.execution_callback import ExecutionCallback
     from ray.data._internal.execution.operators.base_physical_operator import AllToAllOperator
@@ -197,6 +352,7 @@ def run_case(options, directory, diagnostics):
         script_args = ["--num-workers", "2", "--data-path", prepare_regression_input(directory)]
     selective = options["restart_scope"] == "selective"
     inject = options["scenario"] == "worker"
+    owner_failure = options["scenario"] == "data-owner"
     enabled = options["mode"] == "on"
     diagnostics.update(implementation="existing_TorchTrainer_script", restart_scope=options["restart_scope"],
                        workload=str(script), workload_sha256=file_sha256(script),
@@ -206,15 +362,22 @@ def run_case(options, directory, diagnostics):
                               producer_concurrency=None, recovery_timeout_s=30)
     originals = TorchTrainer.__init__, TorchTrainer.fit, ray.init, sys.argv[:], sys.path[:]
     timings = []
+    workload_started = None
 
     class ExchangeObserver(ExecutionCallback):
-        def after_execution_succeeds(self, executor):
+        def record(self, executor):
             exchanges = [
                 {"operator": op.name, **op.metrics.extra_metrics}
                 for op in executor._topology if isinstance(op, AllToAllOperator)
             ]
             if exchanges:
                 write_record(directory / "exchanges" / f"{uuid.uuid4().hex}.json", exchanges)
+
+        def after_execution_succeeds(self, executor):
+            self.record(executor)
+
+        def after_execution_fails(self, executor, error):
+            self.record(executor)
 
     def configure(trainer, train_loop_per_worker, **kwargs):
         config = kwargs.get("torch_config") or TorchConfig()
@@ -237,6 +400,7 @@ def run_case(options, directory, diagnostics):
         if timings:
             raise ValueError("Run one Trainer.fit per observation")
         started = time.monotonic()
+        diagnostics["before_trainer_fit_s"] = started - workload_started
         result = originals[1](trainer, *a, **kw)
         timings.append(time.monotonic() - started)
         return result
@@ -244,7 +408,8 @@ def run_case(options, directory, diagnostics):
     try:
         ray.cloudpickle.register_pickle_by_value(sys.modules[__name__])
         with local_head_failure_cluster(args, coordinator_cpus=0, recovery_enabled=enabled,
-                                        allow_head_failure=False, include_worker_failure=True):
+                                        allow_head_failure=owner_failure,
+                                        include_worker_failure=True) as (case_args, crash_head, _):
             native = ray._private.state.state.get_system_config()
             diagnostics["native_settings"] = {key: native.get(key) for key in system_config()}
             if any(native.get(k) != (enabled if k.startswith("enable_") else v)
@@ -257,34 +422,52 @@ def run_case(options, directory, diagnostics):
             context.fixed_r_task_recovery_timeout_s = 30
             context.execution_options.preserve_order = True
             context.enable_progress_bars = False
+            if options.get("comparison") == "fixed-r":
+                context.shuffle_strategy = ShuffleStrategy.SORT_SHUFFLE_PULL_BASED
             if enabled:
                 get_config(context)
-                context.custom_execution_callback_classes = [
-                    *context.custom_execution_callback_classes, ExchangeObserver
-                ]
+            context.custom_execution_callback_classes = [
+                *context.custom_execution_callback_classes, ExchangeObserver
+            ]
             # The external harness owns this isolated cluster; script ray.init()
             # must attach to it rather than create a different benchmark cluster.
             ray.init = lambda *a, **kw: originals[2](ignore_reinit_error=True)
             TorchTrainer.__init__, TorchTrainer.fit = configure, fit
             sys.argv = [str(script), *script_args]
             sys.path.insert(0, str(script.parent))
-            runpy.run_path(str(script), run_name="__main__")
+            control = (data_owner_fault(directory, enabled, crash_head,
+                                        case_args.executor_node_ids, diagnostics)
+                       if owner_failure else nullcontext())
+            workload_started = time.monotonic()
+            try:
+                with control:
+                    runpy.run_path(str(script), run_name="__main__")
+                diagnostics["workload_completed"] = True
+            finally:
+                diagnostics["workload_s"] = time.monotonic() - workload_started
+                diagnostics["data_exchanges"] = [
+                    record for path in sorted((directory / "exchanges").glob("*.json"))
+                    for record in json.loads(path.read_text())
+                ]
             if len(timings) != 1:
                 raise ValueError("The script did not execute exactly one TorchTrainer.fit")
             diagnostics.update(validate(directory, selective, inject))
-            exchanges = [
-                record for path in sorted((directory / "exchanges").glob("*.json"))
-                for record in json.loads(path.read_text())
-            ]
-            diagnostics["data_exchanges"] = exchanges
+            exchanges = diagnostics["data_exchanges"]
             if regression and enabled:
                 for name in ("Repartition", "RandomShuffle"):
                     if not any(record["operator"].startswith(name)
                                and record.get("fixed_r_enrolled_tasks", 0) > 0
                                and record.get("fixed_r_closed_streams", 0)
-                               == record.get("fixed_r_enrolled_tasks", 0)
+                               == (record.get("fixed_r_enrolled_tasks", 0)
+                                   + record.get("fixed_r_survivor_tasks", 0))
                                for record in exchanges):
                         raise ValueError(f"Missing completed Fixed-R exchange evidence: {name}")
+            if owner_failure and enabled:
+                target_id = diagnostics["data_owner_fault"]["target"]["task_id"]
+                if not any(detail["task_id"] == target_id
+                           for record in exchanges if record["operator"].startswith("RandomShuffle")
+                           for detail in record.get("fixed_r_recovered_task_details", [])):
+                    raise ValueError("ON completed without replaying the blocked shuffle task")
             if regression:
                 reports = diagnostics["reports"]
                 if [r["metrics"][0]["epoch"] for r in reports] != [1, 2, 3]:
