@@ -138,7 +138,8 @@ def validate_progress(sample, options):
         "optimizer_accounting": "observed completed updates; a killed worker may lose its final telemetry write",
         "failure_to_both_ranks_next_update_s": (max(first) - fault["request_ns"]) / 1e9 if inject else None,
         "failure_to_both_ranks_beyond_prefault_progress_s": (
-            (max(caught_up) - fault["request_ns"]) / 1e9 if inject else None,
+            (max(caught_up) - fault["request_ns"]) / 1e9 if inject else None
+        ),
     }
     # Count completed decode work, including replay; no inference from time alone.
     sample["decoded_training_rows"] = sum(len(e["sample_ids"]) for e in sample["stream_events"]
