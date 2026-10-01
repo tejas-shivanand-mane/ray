@@ -2,10 +2,11 @@
 
 Status: the user reports that the complete focused correctness suite passed
 locally at `25dab161` on 2026-10-01. The agent did not run the suite. This covers
-the small CPU/Gloo mechanism test described below; CIFAR/ResNet recovery and
-steady-state overhead remain unmeasured.
+the small CPU/Gloo mechanism test described below. A subsequent uploaded
+CIFAR/ResNet report passed all four observations at `bf0806eb`; see the preliminary
+results below. Repeated timing measurements remain open.
 This extends Ray Data input delivery. It is **not Fixed-R**, selective Train
-retry, physical-machine recovery, or a measured performance improvement.
+retry, physical-machine recovery, or evidence of a general performance advantage.
 
 ## What it attempts
 
@@ -137,8 +138,9 @@ with a separate command. Do not claim a benefit before those results exist.
 
 ## Short CIFAR/ResNet comparison
 
-The benchmark harness is implemented but **not yet validated locally**. The
-agent reviewed source only and did not run tests, training or rendering.
+The user ran the benchmark locally and uploaded a passing report at `bf0806eb`.
+The agent inspected its process, checkpoint and optimizer evidence, and did not
+run tests, training or rendering. Plot rendering remains user-validated separately.
 
 ```bash
 conda activate ray-dev
@@ -211,3 +213,47 @@ application validation and checkpoint writes, but excludes cluster startup and
 the harness's final checkpoint verification. Total observation time is also
 saved. This is coordinator-process coverage, not head-node or physical-machine
 recovery and not evidence that Fixed-R improves ML performance.
+
+## First measured CIFAR result (2026-10-01)
+
+Source: user-uploaded `coordinator-training-comparison.json`, clean checkout
+`bf0806ebef632190ed95470a9b0ff407b5822624`. All four observations passed with
+matching source and loaded native-extension fingerprints. This is one repetition,
+2,048 training images, 512 validation images, two epochs and 32 updates per rank
+per epoch. The coordinator fault follows epoch-2 update 16 on both ranks.
+
+| Observation / metric | Ordinary Ray | Coordinator input resume |
+| --- | ---: | ---: |
+| No-failure workload | 88.9156 s | 85.8888 s |
+| Faulted workload | 110.5169 s | 89.0767 s |
+| Fault versus own control | +24.29% | +3.71% |
+| Observed repeated optimizer updates per rank | 18 | 0 |
+| Fault to next update on both recovered/continuing ranks | 8.3973 s | 1.9933 s |
+| Fault to both ranks exceeding injection-point progress | 23.9283 s | 1.9933 s |
+
+Ordinary Ray replaced both training actors, restored the epoch-1 checkpoint,
+and executed 50 initial plus 32 restored updates per rank (82 versus the 64
+required). The initial workers made two further buffered updates after injection
+before retry. Input resume retained both training actors and executed exactly
+64 updates per rank in one invocation, with no checkpoint restoration. Its
+coordinator process identity changed on the same surviving node, and a completed
+data execution was recorded in the replacement process. All logical nodes stayed
+alive in both fault cases.
+
+Both faulted runs' checkpoint file hashes matched their respective controls.
+The resume arm also passed exact per-rank sample-order comparison. The faulted
+resume workload was 21.4402 seconds (19.40%) shorter than ordinary Ray in this
+pair. Its control was 3.40% shorter, which does not establish negative overhead:
+run variation and the different splitter are confounded. The optional
+same-sharding, zero-restart baseline was not run.
+
+The two splitter configurations produced different model trajectories: final
+accuracy was 36.328125% for ordinary Ray and 34.9609375% for input resume, with
+no fault/control difference within either arm. Cross-arm equal weights or
+convergence quality are not claimed. Training-image decode counts were 4,096
+in each control, 5,484 in the ordinary fault case and 5,628 in the resume fault
+case. Input replay still recomputes data; the demonstrated benefit is preserving
+model/optimizer work in surviving training processes. Fixed-R and selective
+Train retry were OFF throughout. This result does not demonstrate node, driver,
+storage or physical-machine recovery, or generalize the timing benefit beyond
+this preliminary workload/configuration.
