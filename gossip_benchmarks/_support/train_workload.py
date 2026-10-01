@@ -2,7 +2,7 @@
 
 The script keeps its own model, optimizer, datasets and train function. This
 adapter selects the retry policy, local storage and callbacks at construction.
-It kills a worker after the first committed checkpoint and checks actor reuse,
+It kills a worker after a selected committed checkpoint and checks actor reuse,
 checkpoint delivery and subsequent reports. It does not make an arbitrary
 application resumable: that application must save and restore its own state.
 The data-owner scenario instead holds a random-shuffle map task while the local
@@ -53,30 +53,32 @@ def checkpoint_files(checkpoint):
 
 
 class ReportGate(TrainContextCallback):
-    """Keep the first checkpoint from racing ahead of fault injection."""
+    """Hold a selected report until the controller commits it and injects."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, report_number=1):
         self.directory = directory
+        self.report_number = report_number
 
     @contextmanager
     def on_report(self):
         from ray.train.v2._internal.execution.context import get_train_context
 
-        first = get_train_context().report_call_index == 0
+        selected = get_train_context().report_call_index == self.report_number - 1
         yield
-        if first:
+        if selected:
             deadline = time.monotonic() + 30
-            release = Path(self.directory) / "release-first-report.json"
+            release = Path(self.directory) / f"release-report-{self.report_number}.json"
             while not release.exists():
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("Controller did not commit the first checkpoint")
+                    raise TimeoutError("Controller did not commit the selected checkpoint")
                 time.sleep(.02)
 
 
 class WorkloadObserver(WorkerGroupCallback, ReportCallback):
-    def __init__(self, directory, inject):
+    def __init__(self, directory, inject, report_number=1):
         self.directory = Path(directory)
         self.inject = inject
+        self.report_number = report_number
         self.groups = []
         self.reports = []
         self.fault = None
@@ -107,14 +109,18 @@ class WorkloadObserver(WorkerGroupCallback, ReportCallback):
         if training_report.checkpoint:
             with training_report.checkpoint.as_directory() as path:
                 shutil.copytree(path, self.directory / "final-checkpoint", dirs_exist_ok=True)
-        if len(self.reports) == 1:
+        if len(self.reports) == self.report_number:
+            if not record["checkpoint"]:
+                raise ValueError("Selected failure report has no committed checkpoint")
             if self.inject:
                 self.fault = {"rank": 0, "actor_id": self.groups[0][0]["actor_id"],
+                              "report_number": self.report_number,
                               "request_ns": time.monotonic_ns()}
+                self.save()
                 ray.kill(self.workers[0].actor, no_restart=True)
             # Healthy workers continue the workload and encounter the dead peer
             # through ordinary Gloo/data/report operations. No injected user exception.
-            write_record(self.directory / "release-first-report.json", {"released": True})
+            write_record(self.directory / f"release-report-{self.report_number}.json", {"released": True})
         self.save()
 
 
@@ -453,6 +459,15 @@ def validate(directory, selective, inject):
         raise ValueError("Missing or unexpected train function invocations")
     recovery = []
     if inject:
+        fault = timeline["fault"]
+        if not fault:
+            raise ValueError("Requested worker failure was not injected")
+        report_number = fault.get("report_number", 1)
+        if type(report_number) is not int or not 1 <= report_number < len(reports):
+            raise ValueError("No progress after the selected failure checkpoint")
+        committed = reports[report_number - 1]
+        if not committed["checkpoint"] or committed["time_ns"] > fault["request_ns"]:
+            raise ValueError("Failure does not follow a committed checkpoint")
         old, new = groups
         if [w["rank"] for w in old] != [w["rank"] for w in new]:
             raise ValueError("Global ranks changed across recovery")
@@ -460,13 +475,20 @@ def validate(directory, selective, inject):
         if retained != (list(range(1, len(old))) if selective else []):
             raise ValueError(f"Unexpected retained ranks: {retained}; fallback is not selective success")
         resumed = [s for s in starts if s["checkpoint"] is not None]
-        if len(resumed) != len(new) or any(s["checkpoint"] != reports[0]["checkpoint"] for s in resumed):
+        if len(resumed) != len(new) or any(s["checkpoint"] != committed["checkpoint"] for s in resumed):
             raise ValueError("Retry did not receive the exact committed checkpoint on every rank")
+        identity = lambda worker: (worker["rank"], worker["actor_id"], worker["pid"])
+        if sorted(map(identity, resumed)) != sorted(map(identity, new)):
+            raise ValueError("Checkpoint delivery evidence does not match the resumed worker ranks")
         if any(s["time_ns"] <= timeline["fault"]["request_ns"] for s in resumed):
             raise ValueError("Recorded retry predates injection")
+        if reports[report_number]["time_ns"] <= max(s["time_ns"] for s in resumed):
+            raise ValueError("Post-recovery report predates resumed train functions")
         recovery.append({"retained_ranks": retained,
                          "replaced_ranks": [w["rank"] for w in old if w["rank"] not in retained],
-                         "failure_to_next_report_s": (reports[1]["time_ns"] - timeline["fault"]["request_ns"]) / 1e9})
+                         "committed_reports_before_failure": report_number,
+                         "failure_to_all_workers_invoked_s": (max(s["time_ns"] for s in resumed) - fault["request_ns"]) / 1e9,
+                         "failure_to_next_report_s": (reports[report_number]["time_ns"] - fault["request_ns"]) / 1e9})
     elif any(s["checkpoint"] is not None for s in starts):
         raise ValueError("No-failure run unexpectedly restored a checkpoint")
     return {**timeline, "starts": starts, "recoveries": recovery}
@@ -487,11 +509,12 @@ def run_case(options, directory, diagnostics):
     script = Path(options["workload"]).resolve()
     script_args = list(options["workload_args"])
     regression = script == Path(__file__).resolve().parents[2] / "python/ray/train/examples/pytorch/torch_regression_example.py"
+    fashion = script == Path(__file__).resolve().parents[1] / "workloads/fashion_mnist.py"
     training_epochs = options.get("training_epochs")
     if training_epochs is not None and (
-        not regression or type(training_epochs) is not int or training_epochs < 3
+        not (regression or fashion) or type(training_epochs) is not int or training_epochs < 3
     ):
-        raise ValueError("Epoch override requires the regression example and at least three epochs")
+        raise ValueError("Epoch override requires a supported workload and at least three epochs")
     if regression and not script_args:
         script_args = ["--num-workers", "2", "--data-path", prepare_regression_input(directory)]
     selective = options["restart_scope"] == "selective"
@@ -499,12 +522,23 @@ def run_case(options, directory, diagnostics):
     owner_failure = options["scenario"] == "data-owner"
     enabled = options["mode"] == "on"
     matched_owner = options.get("owner_placement", "default") == "head"
+    report_number = options.get("fault_after_epoch", 1) if inject else 1
+    if type(report_number) is not int or report_number < 1 or (
+        training_epochs is not None and report_number >= training_epochs
+    ):
+        raise ValueError("Failure must follow a positive epoch with training remaining")
+    if fashion:
+        from fashion_comparison import input_identity
+        identity = input_identity(Path(options["data_directory"]))
+        if identity != options["input_identity"]:
+            raise ValueError("Fashion-MNIST input changed before observation")
+        diagnostics["input_identity"] = identity
     diagnostics.update(implementation="existing_TorchTrainer_script", restart_scope=options["restart_scope"],
                        workload=str(script), workload_sha256=file_sha256(script),
-                       numerical_probe=regression, torch_version=torch.__version__,
+                       numerical_probe=regression or fashion, torch_version=torch.__version__,
                        owner_placement=options.get("owner_placement", "default"),
                        workload_completed=False)
-    if regression:
+    if regression or fashion:
         # Owner loss can end preprocessing before TorchTrainer is constructed.
         # Keep the planned fixed work available for that failed baseline too.
         diagnostics["training_epochs"] = training_epochs if training_epochs is not None else 3
@@ -531,7 +565,7 @@ def run_case(options, directory, diagnostics):
             self.record(executor)
 
     def configure(trainer, train_loop_per_worker, **kwargs):
-        if regression:
+        if regression or fashion:
             loop_config = dict(kwargs.get("train_loop_config") or {})
             if training_epochs is not None:
                 loop_config["epochs"] = training_epochs
@@ -545,8 +579,8 @@ def run_case(options, directory, diagnostics):
         run = kwargs.get("run_config") or RunConfig()
         run = replace(run, storage_path=str(directory / "storage"), name="workload",
                       failure_config=FailureConfig(max_failures=1), callbacks=[
-                          *(run.callbacks or []), ReportGate(str(directory)),
-                          WorkloadObserver(str(directory), inject)])
+                          *(run.callbacks or []), ReportGate(str(directory), report_number),
+                          WorkloadObserver(str(directory), inject, report_number)])
         scaling = kwargs.get("scaling_config")
         if scaling is None or scaling.num_workers < 2 or scaling.use_gpu or scaling.use_tpu:
             raise ValueError("Use at least two CPU workers in the workload")
@@ -580,7 +614,7 @@ def run_case(options, directory, diagnostics):
             context.fixed_r_task_recovery_timeout_s = 30
             context.execution_options.preserve_order = True
             context.enable_progress_bars = False
-            if options.get("comparison") == "fixed-r":
+            if options.get("comparison") in ("fixed-r", "integrated"):
                 context.shuffle_strategy = ShuffleStrategy.SORT_SHUFFLE_PULL_BASED
             if enabled:
                 get_config(context)
@@ -632,7 +666,7 @@ def run_case(options, directory, diagnostics):
                 raise ValueError("The script did not execute exactly one TorchTrainer.fit")
             diagnostics.update(validate(directory, selective, inject))
             exchanges = diagnostics["data_exchanges"]
-            if regression and enabled:
+            if (regression or fashion) and enabled:
                 for name in ("Repartition", "RandomShuffle"):
                     if not any(record["operator"].startswith(name)
                                and record.get("fixed_r_enrolled_tasks", 0) > 0
@@ -653,8 +687,8 @@ def run_case(options, directory, diagnostics):
                     range(1, diagnostics["training_epochs"] + 1)
                 ):
                     raise ValueError("Regression did not complete each epoch exactly once")
-                if any(m["resumed_from_epoch"] != (1 if inject else 0)
-                       for r in reports[1:] for m in r["metrics"]):
+                if any(m["resumed_from_epoch"] != (report_number if inject and i >= report_number else 0)
+                       for i, r in enumerate(reports) for m in r["metrics"]):
                     raise ValueError("Regression did not restore epoch progress")
                 state = torch.load(directory / "final-checkpoint/model.pt", weights_only=True)
                 model = torch.nn.Sequential(torch.nn.Linear(100, 20), torch.nn.ReLU(), torch.nn.Linear(20, 1))
@@ -665,6 +699,9 @@ def run_case(options, directory, diagnostics):
                 if not np.isfinite(predictions).all():
                     raise ValueError("Final predictions are not finite")
                 np.save(directory / "predictions.npy", predictions)
+            if fashion:
+                from fashion_comparison import validate_fashion
+                validate_fashion(directory, options, diagnostics)
             return {"validation_status": "passed", "training_s": timings[0]}
     finally:
         TorchTrainer.__init__, TorchTrainer.fit, ray.init, sys.argv, sys.path = originals
