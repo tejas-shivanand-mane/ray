@@ -2206,6 +2206,12 @@ class Dataset:
                 Unlike :meth:`~Dataset.streaming_split`, :meth:`~Dataset.split`
                 materializes the dataset in memory.
         """
+        resume_options = self.context.get_config("experimental_resumable_split")
+        if resume_options is not None:
+            from ray.data._internal.iterator.resumable_split import create_resumable_split
+
+            return create_resumable_split(self, n, equal, resume_options)
+
         op = StreamingSplit(
             num_splits=n,
             equal=equal,
