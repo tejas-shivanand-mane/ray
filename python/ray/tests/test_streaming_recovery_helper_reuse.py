@@ -177,7 +177,7 @@ def test_failed_retirement_is_not_recycled_or_killed_by_pool_shutdown(pool_envir
 
     reader.close = close
     monkeypatch.setattr(runtime, "_inspect_recovery_stream_descriptor",
-                        lambda _: {"task_id": ray.TaskID.from_random().binary()})
+                        lambda _: {"task_id": b"\x01" * 24})
     stream = runtime._DataStream(-1, env.stats, reader=reader, owner=lease, owner_pool=env.pool)
     with pytest.raises(RuntimeError) as raised:
         stream.close()
