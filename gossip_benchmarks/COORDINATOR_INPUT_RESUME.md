@@ -257,3 +257,61 @@ model/optimizer work in surviving training processes. Fixed-R and selective
 Train retry were OFF throughout. This result does not demonstrate node, driver,
 storage or physical-machine recovery, or generalize the timing benefit beyond
 this preliminary workload/configuration.
+
+## Same-sharding result and repeated measurement
+
+A second user-uploaded report at clean `5f95070f` passed all six observations:
+ordinary Ray, the deterministic splitter with coordinator restart disabled, and
+input resume, each with a control and a middle-training coordinator fault. The
+uploaded PNG was also inspected. No agent-side training or rendering was run.
+
+| Workload time | Ordinary Ray | Deterministic, restart disabled | Deterministic, restart enabled |
+| --- | ---: | ---: | ---: |
+| No failure | 93.2296 s | 90.9993 s | 89.4460 s |
+| Coordinator process failure | 110.6067 s | 110.4387 s | 90.9056 s |
+
+Both checkpoint-retry arms restored epoch 1 and repeated 18 observed updates per
+rank. Input resume retained the workers, restored no checkpoint and repeated no
+updates. It exceeded injection-point progress after 2.1348 seconds versus
+23.8502 seconds for the deterministic checkpoint baseline. Checkpoint hashes
+and per-rank sample order matched across the two deterministic configurations,
+for both controls and fault cases. Their faulted workload difference was
+-17.69%, or 19.5332 seconds. This remains a single pair; the control difference
+of -1.71% is not evidence of negative restart overhead.
+
+The next measurement can omit the ordinary splitter, since its comparison has
+already been checked. The new `--same-sharding-only` option is mutually exclusive
+with `--include-deterministic-baseline`. It still runs a fresh no-failure control
+and fault case for each configuration and repetition, with the same application
+checkpoints and full-group Train retry budget. Three repetitions therefore run
+12 observations instead of 18. Work remains two epochs; the default fault is
+still after epoch-2 update 16. Execution order reverses on even repetitions.
+
+```bash
+bash gossip_benchmarks/validate_coordinator_training.sh \
+  --data-directory ~/ray-coverage/cifar-streaming \
+  --same-sharding-only --repeats 3 \
+  --output ~/ray-coverage/coordinator-training-repeats.json
+
+python gossip_benchmarks/plot_coordinator_training.py \
+  ~/ray-coverage/coordinator-training-repeats.json \
+  --output ~/ray-coverage/coordinator-training-repeats.png
+```
+
+Based on the observed workloads, budget roughly 20-25 minutes for all 12
+observations including startup and verification, with variation possible.
+The hard per-observation cap remains 300 seconds; timeout cleanup is additional.
+Use `--repeats 2` for eight observations if a shorter first check is needed.
+The two commands are separate: training never invokes plotting.
+
+The JSON and console report mean paired percentage change, sample standard
+deviation in percentage points, and the number of valid pairs. The JSON also
+retains individual timings, differences in seconds, included repetition IDs
+and missing pairs. Standard deviation is descriptive spread, not a confidence
+interval. Failed observations never enter timing averages, and incomplete
+pairs remain visible. The same-sharding comparison now explicitly requires
+matching checkpoint hashes and per-rank sample order across configurations,
+in addition to checking each faulted run against its own control.
+
+These runner/summary changes have been source-reviewed but are pending user
+validation. The recovery implementation and CIFAR workload are unchanged.

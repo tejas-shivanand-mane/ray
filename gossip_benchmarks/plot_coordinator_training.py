@@ -14,6 +14,12 @@ LABELS = {"ordinary": "Ordinary Ray + checkpoint retry", "resume": "Coordinator 
 COLORS = {"ordinary": "#d97706", "resume": "#0072b2", "deterministic": "#7b3294"}
 
 
+def comparison_caption(report):
+    if set(report["modes"]) == {"deterministic", "resume"}:
+        return "Identical deterministic sharding; coordinator restart disabled versus enabled. "
+    return "Ordinary and resume sharding differ; each fault is checked against its own control. "
+
+
 def plot(report, output):
     import matplotlib
     matplotlib.use("Agg")
@@ -53,7 +59,7 @@ def plot(report, output):
     axes[0][0].set_ylabel("Current optimizer progress\n(minimum completed updates across two ranks)")
     fig.suptitle("CIFAR-10 / ResNet-18: checkpoint retry versus coordinator input resume")
     fig.text(.5, .02, "Fixed-R OFF; full Train retry enabled; one physical machine. Dotted lines: fault requests.\n"
-             "Ordinary and resume sharding differ; each fault is checked against its own control. "
+             + comparison_caption(report)
              + ("One repetition is preliminary." if report["preliminary"] else "Individual repetitions shown."),
              ha="center", fontsize=8)
     fig.tight_layout(rect=(0, .1, 1, .94))

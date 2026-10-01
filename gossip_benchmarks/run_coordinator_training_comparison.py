@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 from run_fixed_r_train_comparison import ROOT, run_observation, write_json
-from coordinator_comparison import compare_samples
+from coordinator_comparison import compare_samples, summarize_comparisons
 from streaming_learning import input_identity
 from training_provenance import source_provenance
 
@@ -20,14 +20,18 @@ def run_comparison(args):
     step = args.fault_after_step if args.fault_after_step is not None else steps // 2
     if not 0 < step < steps:
         raise ValueError("Leave optimizer work before and after the fault within its epoch")
-    modes = ["ordinary", "resume"]
+    modes = ["deterministic", "resume"] if args.same_sharding_only else ["ordinary", "resume"]
     if args.include_deterministic_baseline:
         modes.insert(1, "deterministic")
+    pair_modes = [("ordinary", mode) for mode in modes if mode != "ordinary"] if "ordinary" in modes else []
+    if "deterministic" in modes:
+        pair_modes.append(("deterministic", "resume"))
     cases = ["none"] if args.controls_only else ["none", "coordinator-process"]
     provenance = source_provenance(ROOT)
     report = {
         "profile": "cifar-coordinator-resume", "status": "running", "modes": modes,
         "scenarios": cases, "repeats": args.repeats, "preliminary": args.repeats == 1,
+        "comparison_modes": pair_modes,
         "training_epochs": args.epochs, "steps_per_epoch": steps, "batch_size": args.batch_size,
         "fault_after_epoch": args.fault_after_epoch, "fault_after_step": step,
         "observations_per_repetition": len(cases) * len(modes), "timeout_s": args.timeout_s,
@@ -48,6 +52,7 @@ def run_comparison(args):
     }
 
     def save():
+        report["summary"] = summarize_comparisons(report)
         write_json(args.output, report)
         write_json(args.result_directory / "comparison.json", report)
 
@@ -93,9 +98,6 @@ def run_comparison(args):
                     r = sample["recovery"]
                     print(f"  {r['kind']}; observed repeated optimizer updates/rank: "
                           f"{r['repeated_optimizer_updates_per_rank']}", flush=True)
-            pair_modes = [("ordinary", mode) for mode in modes if mode != "ordinary"]
-            if "deterministic" in modes:
-                pair_modes.append(("deterministic", "resume"))
             for left_mode, right_mode in pair_modes:
                 left, right = samples.get(left_mode), samples.get(right_mode)
                 if not left or not right or any(s["status"] != "passed" for s in (left, right)):
@@ -114,6 +116,12 @@ def run_comparison(args):
     for row in report["comparisons"]:
         print(f"{row['scenario']}, pair {row['pair']}: {row['right']} versus {row['left']} workload time "
               f"{row['workload_s_change_pct']:+.2f}%")
+    for row in report["summary"]:
+        mean, stdev = row["paired_change_pct"]["mean"], row["paired_change_pct"]["stdev"]
+        spread = f", sample SD {stdev:.2f} percentage points" if stdev is not None else ", SD unavailable"
+        timing = f"mean paired change {mean:+.2f}%{spread}" if mean is not None else "no valid timing pairs"
+        print(f"{row['scenario']}: {row['right']} versus {row['left']}: {timing}; "
+              f"{row['completed_pairs']}/{row['requested_pairs']} valid pairs")
     return 0 if report["status"] == "passed" else 1
 
 
@@ -127,7 +135,10 @@ def main():
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-s", type=float, default=300)
     parser.add_argument("--controls-only", action="store_true")
-    parser.add_argument("--include-deterministic-baseline", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--include-deterministic-baseline", action="store_true")
+    modes.add_argument("--same-sharding-only", action="store_true",
+                       help="Compare deterministic checkpoint retry with input resume; omit ordinary Ray")
     parser.add_argument("--result-directory", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

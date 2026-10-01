@@ -1,6 +1,7 @@
 """JSON evidence checks and progress traces for coordinator input recovery."""
 
 import math
+import statistics
 
 
 def updates(sample):
@@ -178,24 +179,57 @@ def compare_samples(left, right, *, control=False):
     if control:
         if left["scenario"] != "none" or left["mode"] != right["mode"] or left["pair"] != right["pair"]:
             raise ValueError("Expected a matching no-failure control")
-        if right["mode"] != "ordinary":
-            for a, b in zip(left["reports"], right["reports"]):
-                if a["checkpoint"] != b["checkpoint"]:
-                    raise ValueError("Deterministic recovery changed model/optimizer/RNG checkpoint")
-                ids = lambda r: [m["sample_ids"] for m in sorted(r["metrics"], key=lambda m: m["rank"])]
-                if ids(a) != ids(b):
-                    raise ValueError("Deterministic recovery changed per-rank sample order")
-            if len(left["reports"]) != len(right["reports"]):
-                raise ValueError("Missing recovered epochs")
-            equivalent = True
     elif (left["scenario"] != right["scenario"] or left["pair"] != right["pair"]
           or left["fault_after_epoch"] != right["fault_after_epoch"]
           or left["fault_after_step"] != right["fault_after_step"]):
         raise ValueError("Mismatched fault configuration")
-    return {"workload_s_change_pct": 100 * (right["workload_s"] / left["workload_s"] - 1),
+    if left["sharding"] == right["sharding"] == "deterministic_chunks":
+        for a, b in zip(left["reports"], right["reports"]):
+            if a["checkpoint"] != b["checkpoint"]:
+                raise ValueError("Deterministic recovery changed model/optimizer/RNG checkpoint")
+            ids = lambda r: [m["sample_ids"] for m in sorted(r["metrics"], key=lambda m: m["rank"])]
+            if ids(a) != ids(b):
+                raise ValueError("Deterministic recovery changed per-rank sample order")
+        if len(left["reports"]) != len(right["reports"]):
+            raise ValueError("Missing recovered epochs")
+        equivalent = True
+    return {"left_workload_s": left["workload_s"], "right_workload_s": right["workload_s"],
+            "workload_s_change_pct": 100 * (right["workload_s"] / left["workload_s"] - 1),
             "accuracy_difference_pp": 100 * (right["final_accuracy"] - left["final_accuracy"]),
             "exact_checkpoint_and_sample_order_match": equivalent,
             "decoded_training_rows_change": right["decoded_training_rows"] - left["decoded_training_rows"]}
+
+
+def summarize_comparisons(report):
+    """Summarize only evidence-validated pairs, exposing missing repetitions.
+
+    A standard deviation is descriptive spread across pairs, not a confidence
+    interval. Average the per-pair percentages instead of taking a ratio of means.
+    """
+    def describe(values):
+        return {"mean": statistics.mean(values) if values else None,
+                "stdev": statistics.stdev(values) if len(values) > 1 else None,
+                "values": values}
+
+    result = []
+    for scenario in report["scenarios"]:
+        for left, right in report["comparison_modes"]:
+            rows = sorted((r for r in report["comparisons"] if r["scenario"] == scenario
+                           and (r["left"], r["right"]) == (left, right)), key=lambda r: r["pair"])
+            pairs = [r["pair"] for r in rows]
+            if len(pairs) != len(set(pairs)) or any(not 1 <= p <= report["repeats"] for p in pairs):
+                raise ValueError("Duplicate or unexpected comparison repetition")
+            result.append({
+                "scenario": scenario, "left": left, "right": right,
+                "requested_pairs": report["repeats"], "completed_pairs": len(rows),
+                "included_pairs": pairs,
+                "missing_pairs": [p for p in range(1, report["repeats"] + 1) if p not in pairs],
+                "left_workload_s": describe([r["left_workload_s"] for r in rows]),
+                "right_workload_s": describe([r["right_workload_s"] for r in rows]),
+                "paired_change_pct": describe([r["workload_s_change_pct"] for r in rows]),
+                "paired_difference_s": describe([r["right_workload_s"] - r["left_workload_s"] for r in rows]),
+            })
+    return result
 
 
 def progress_trace(sample, steps):

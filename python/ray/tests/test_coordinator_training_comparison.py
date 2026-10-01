@@ -206,3 +206,94 @@ def test_plot_uses_checkpoint_actually_delivered_not_fault_epoch(checks):
         if start["checkpoint"]:
             start["checkpoint"] = sample["reports"][1]["checkpoint"]
     assert checks.restored_epoch(sample) == 2
+
+
+@pytest.mark.parametrize("changed", [None, "checkpoint", "sample_order"])
+def test_same_sharding_arms_must_match_each_other(checks, changed):
+    _, right = paired_samples()
+    left = copy.deepcopy(right)
+    left.update(mode="deterministic", coordinator_restart_budget=0)
+    if changed == "checkpoint":
+        right["reports"][-1]["checkpoint"]["training.pt"] = "different weights"
+    elif changed == "sample_order":
+        right["reports"][-1]["metrics"][0]["sample_ids"] = [99]
+    if changed:
+        with pytest.raises(ValueError):
+            checks.compare_samples(left, right)
+    else:
+        assert checks.compare_samples(left, right)["exact_checkpoint_and_sample_order_match"]
+
+
+def test_summary_averages_paired_changes_and_exposes_missing_pairs(checks):
+    report = {"scenarios": ["none", "coordinator-process"], "repeats": 3,
+              "comparison_modes": [("deterministic", "resume")], "comparisons": [
+                  {"scenario": "none", "left": "deterministic", "right": "resume", "pair": 1,
+                   "left_workload_s": 10, "right_workload_s": 8, "workload_s_change_pct": -20},
+                  {"scenario": "none", "left": "deterministic", "right": "resume", "pair": 3,
+                   "left_workload_s": 20, "right_workload_s": 18, "workload_s_change_pct": -10},
+              ]}
+    control, fault = checks.summarize_comparisons(report)
+    assert control["completed_pairs"] == 2
+    assert control["included_pairs"] == [1, 3]
+    assert control["missing_pairs"] == [2]
+    assert control["paired_change_pct"]["mean"] == -15
+    assert control["paired_change_pct"]["stdev"] == pytest.approx(50 ** .5)
+    assert control["paired_difference_s"]["values"] == [-2, -2]
+    assert fault["completed_pairs"] == 0
+    assert fault["paired_change_pct"]["mean"] is None
+    assert fault["paired_change_pct"]["stdev"] is None
+    report["comparisons"] = report["comparisons"][:1]
+    assert checks.summarize_comparisons(report)[0]["paired_change_pct"]["stdev"] is None
+    report["comparisons"].append(copy.deepcopy(report["comparisons"][0]))
+    with pytest.raises(ValueError):
+        checks.summarize_comparisons(report)
+
+
+@pytest.mark.parametrize("failed_control", [False, True])
+def test_short_runner_pairs_only_requested_modes_and_valid_observations(checks, monkeypatch, tmp_path, failed_control):
+    import json
+    runner = importlib.import_module("run_coordinator_training_comparison")
+    monkeypatch.setattr(runner, "input_identity", lambda _: {"training_rows": 16})
+    monkeypatch.setattr(runner, "source_provenance", lambda _: {})
+    calls = []
+
+    def observe(options, pair, directory, provenance):
+        calls.append((options["scenario"], pair, options["mode"]))
+        _, sample = paired_samples()
+        sample.update(mode=options["mode"], scenario=options["scenario"], pair=pair,
+                      coordinator_restart_budget=1 if options["mode"] == "resume" else 0)
+        if failed_control and calls[-1] == ("none", 2, "resume"):
+            sample.update(status="failed", workload_completed=False, timeout=True, error="timed out")
+        return sample
+
+    monkeypatch.setattr(runner, "run_observation", observe)
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    monkeypatch.setattr(runner.sys, "argv", ["comparison", "--same-sharding-only", "--repeats", "2",
+                                            "--batch-size", "2", "--data-directory", str(tmp_path),
+                                            "--result-directory", str(tmp_path),
+                                            "--output", str(tmp_path / "report.json")])
+    assert runner.main() == (1 if failed_control else 0)
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["modes"] == ["deterministic", "resume"]
+    assert calls[:4] == [("none", 1, "deterministic"), ("none", 1, "resume"),
+                         ("none", 2, "resume"), ("none", 2, "deterministic")]
+    assert report["observations_per_repetition"] == 4
+    assert len(calls) == (7 if failed_control else 8)
+    assert all(row["completed_pairs"] == (1 if failed_control else 2) for row in report["summary"])
+    assert bool(report["skipped"]) == failed_control
+    assert all(row["exact_checkpoint_and_sample_order_match"] for row in report["comparisons"])
+
+
+def test_short_mode_and_three_arm_mode_are_mutually_exclusive(checks, monkeypatch, tmp_path):
+    runner = importlib.import_module("run_coordinator_training_comparison")
+    monkeypatch.setattr(runner.sys, "argv", ["comparison", "--same-sharding-only",
+                                            "--include-deterministic-baseline", "--data-directory", str(tmp_path)])
+    with pytest.raises(SystemExit) as raised:
+        runner.main()
+    assert raised.value.code == 2
+
+
+def test_plot_caption_describes_actual_sharding(checks):
+    plot = importlib.import_module("plot_coordinator_training")
+    assert "Identical deterministic sharding" in plot.comparison_caption({"modes": ["deterministic", "resume"]})
+    assert "sharding differ" in plot.comparison_caption({"modes": ["ordinary", "deterministic", "resume"]})
