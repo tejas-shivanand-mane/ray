@@ -39,6 +39,7 @@ def plot_report(report, output):
 
     rows, columns, panels = panel_layout(report)
     node_matrix = report["profile"] == "fashion-mnist-failure-matrix"
+    active = report.get("failure_timing") == "active"
     names = {"head-node": "Head-node processes", "worker-node": "Worker node", "worker": "Worker process"}
     fig, axes = plt.subplots(rows, columns, figsize=(max(10, 5 * columns), 4 * rows + 1.5),
                              squeeze=False, sharex=True, sharey=True)
@@ -57,6 +58,13 @@ def plot_report(report, output):
                     ax.plot([], [], color=color, linestyle=style, label=title + " (not run)")
                     continue
                 label = title + f" ({sum(s['status'] == 'passed' for s in samples)}/{len(samples)} validated)"
+                if active and point != "none":
+                    repeated = sorted({r["recomputed_optimizer_steps_per_rank"]
+                                       for s in samples if s["status"] == "passed"
+                                       for r in s.get("recoveries", [])
+                                       if "recomputed_optimizer_steps_per_rank" in r})
+                    if repeated:
+                        label += "\nRepeated updates/rank: " + ", ".join(map(str, repeated))
                 ax.plot([], [], color=color, linestyle=style, label=label)
                 for sample in samples:
                     if not sample.get("workload_started_ns"):
@@ -79,7 +87,8 @@ def plot_report(report, output):
                         ax.annotate(trace["outcome"], (trace["seconds"][-1], trace["epochs"][-1]),
                                     xytext=(4, 8), textcoords="offset points", fontsize=8)
             title = ("Shared no-failure control" if node_matrix else "No failure") if point == "none" else (
-                f"{point.capitalize()}: after epoch {report['failure_epochs'][point]}"
+                (f"{point.capitalize()}: epoch {report['failure_epochs'][point] + 1}, step {report['fault_after_step']}"
+                 if active else f"{point.capitalize()}: after epoch {report['failure_epochs'][point]}")
             )
             title = f"{names[kind]}\n{title}"
             ax.set_title(title)
@@ -105,7 +114,9 @@ def plot_report(report, output):
             scope = "Worker-process loss only; no node failure. Fixed-R protects preprocessing; this fault does not demonstrate owner-loss replay.\n"
         fig.text(0.5, 0.02,
                  "Full 60,000/10,000 split; same model, epochs and application checkpoints. Two CPU workers on one machine.\n"
-                 "Both arms allow checkpoint recovery. Dotted lines: failure at a committed epoch; dots: completed, crosses: failed/censored. Each line is one trial.\n"
+                 "Both arms allow checkpoint recovery. Dots: completed; crosses: failed/censored. Each line is one trial.\n"
+                 + ("Dotted lines: mid-epoch failure after real optimizer updates; both ranks gated. Checkpoints remain at the previous epoch.\n"
+                    if active else "Dotted lines: failure at a committed epoch.\n")
                  + scope
                  + ("One pair per case: preliminary evidence." if report.get("preliminary") else "All repetitions shown; no averaged trajectory."),
                  ha="center", fontsize=9)

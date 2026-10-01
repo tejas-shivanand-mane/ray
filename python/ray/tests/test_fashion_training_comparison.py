@@ -361,3 +361,128 @@ def test_input_fingerprint_rejects_changed_dataset(modules, tmp_path):
     (tmp_path / "train.parquet").write_bytes(b"changed input")
     with pytest.raises(ValueError, match="identity mismatch"):
         modules.checks.input_identity(tmp_path)
+
+
+def test_optimizer_gate_counts_real_updates_and_restores_method(modules, monkeypatch, tmp_path):
+    import torch
+
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.Adam([parameter], lr=.001)
+    original = torch.optim.Adam.step
+    identity = {"rank": 0, "actor_id": "actor", "pid": 10, "checkpoint": None}
+    writer = modules.workload.write_record
+
+    def release_gate(path, value):
+        writer(path, value)
+        if Path(path).name == "active-ready-0.json":
+            assert int(optimizer.state[parameter]["step"]) == 121
+            writer(tmp_path / "release-active.json", {})
+
+    monkeypatch.setattr(modules.workload, "write_record", release_gate)
+    with modules.workload.active_optimizer_steps(tmp_path, {"checkpoint_epoch": 1, "step": 3}, identity, None):
+        for _ in range(122):
+            parameter.grad = torch.ones_like(parameter)
+            optimizer.step()
+    assert torch.optim.Adam.step is original
+    ready = json.loads((tmp_path / "active-ready-0.json").read_text())
+    continued = json.loads((tmp_path / "active-continued-0.json").read_text())
+    assert ready["epoch"] == 2 and ready["step"] == 3
+    assert ready["absolute_update"] == 121 and continued["absolute_update"] == 122
+    assert not (tmp_path / "active-recomputed-0.json").exists()
+
+
+def test_optimizer_gate_records_recomputation_from_restored_epoch(modules, tmp_path):
+    import torch
+    from ray.train import Checkpoint
+
+    checkpoint_path = tmp_path / "checkpoint"
+    checkpoint_path.mkdir()
+    torch.save({"epoch": 1}, checkpoint_path / "training.pt")
+    checkpoint = Checkpoint.from_directory(str(checkpoint_path))
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.Adam([parameter])
+    identity = {"rank": 1, "actor_id": "retained", "pid": 11, "checkpoint": {"training.pt": "sha"}}
+    with modules.workload.active_optimizer_steps(tmp_path, {"checkpoint_epoch": 1, "step": 3}, identity, checkpoint):
+        for _ in range(3):
+            parameter.grad = torch.ones_like(parameter)
+            optimizer.step()
+    event = json.loads((tmp_path / "active-recomputed-1.json").read_text())
+    assert event["restored_epoch"] == 1
+    assert event["optimizer_updates_this_invocation"] == 3
+    assert event["absolute_update"] == 121
+    assert not (tmp_path / "active-ready-1.json").exists()
+
+
+@pytest.mark.parametrize("retry", [True, False])
+def test_active_recovery_distinguishes_rollback_from_continuation(modules, tmp_path, retry):
+    old = [{"rank": r, "actor_id": f"old-{r}", "pid": 10 + r} for r in (0, 1)]
+    new = [{**w, "actor_id": f"new-{w['rank']}"} for w in old] if retry else old
+    plan = {"checkpoint_epoch": 1, "step": 59}
+    gates = [{**w, "checkpoint": None, "restored_epoch": 0, "checkpoint_epoch": 1,
+              "epoch": 2, "step": 59, "absolute_update": 177,
+              "optimizer_updates_this_invocation": 177, "time_ns": 200} for w in old]
+    checkpoint = {"training.pt": "sha"}
+    fault = {"failure_timing": "active", "groups": [old], "gates": gates,
+             "checkpoint": checkpoint, "checkpoint_committed_ns": 100,
+             "request_ns": 300, "operation_finished_ns": 400}
+    diagnostics = {"node_fault": fault, "groups": [old, new] if retry else [old],
+                   "starts": [{**w, "checkpoint": checkpoint, "time_ns": 450} for w in new] if retry else [],
+                   "reports": [{"time_ns": 100}, {"time_ns": 700}], "recoveries": [{}]}
+    kind = "recomputed" if retry else "continued"
+    for w in new:
+        modules.workload.write_record(tmp_path / f"active-{kind}-{w['rank']}.json", {
+            **w, "time_ns": 600, "restored_epoch": 1 if retry else 0,
+            "absolute_update": 177 if retry else 178,
+            "optimizer_updates_this_invocation": 59 if retry else 178,
+            "checkpoint": checkpoint if retry else None,
+        })
+    modules.workload.validate_active_training(tmp_path, diagnostics, plan)
+    recovery = diagnostics["recoveries"][0]
+    assert recovery["model_checkpoint_restored"] is retry
+    assert recovery["recomputed_optimizer_steps_per_rank"] == (59 if retry else 0)
+    fault["gates"][1]["optimizer_updates_this_invocation"] -= 1
+    with pytest.raises(ValueError, match="uncheckpointed optimizer work"):
+        modules.workload.validate_active_training(tmp_path, diagnostics, plan)
+
+
+@pytest.mark.parametrize("fail_supervisor", [False, True])
+def test_active_supervisor_waits_for_both_ranks_and_releases_on_error(modules, tmp_path, fail_supervisor):
+    import threading
+    import time
+
+    group = [{"rank": r, "node_id": node, "pid": 10 + r, "actor_id": f"actor-{r}"}
+             for r, node in enumerate(("a", "b"))]
+
+    def workload():
+        modules.workload.write_record(tmp_path / "active-checkpoint.json", {
+            "groups": [group], "report_number": 1, "checkpoint": {"training.pt": "sha"},
+            "checkpoint_committed_ns": time.monotonic_ns()})
+        for w in group:
+            modules.workload.write_record(tmp_path / f"active-ready-{w['rank']}.json", {
+                **w, "checkpoint": None, "restored_epoch": 0, "checkpoint_epoch": 1,
+                "epoch": 2, "step": 59, "absolute_update": 177,
+                "optimizer_updates_this_invocation": 177, "time_ns": time.monotonic_ns()})
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "release-active.json").exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Gate was not released")
+            time.sleep(.01)
+        return "finished"
+
+    def crash():
+        assert threading.current_thread() is threading.main_thread()
+        assert all((tmp_path / f"active-ready-{r}.json").exists() for r in (0, 1))
+        if fail_supervisor:
+            raise LookupError("head replacement failed")
+        return {"replaced": True}
+
+    args = (tmp_path, "head-node", {"checkpoint_epoch": 1, "step": 59},
+            ("a", "b"), "head", crash, None, workload, 5)
+    if fail_supervisor:
+        with pytest.raises(LookupError, match="head replacement failed"):
+            modules.workload.active_training_fault(*args)
+    else:
+        assert modules.workload.active_training_fault(*args) == "finished"
+    fault = json.loads((tmp_path / "node-fault.json").read_text())["node_fault"]
+    assert fault["completed"] is not fail_supervisor
+    assert (tmp_path / "release-active.json").exists()

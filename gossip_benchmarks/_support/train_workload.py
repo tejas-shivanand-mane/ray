@@ -2,9 +2,10 @@
 
 The script keeps its own model, optimizer, datasets and train function. This
 adapter selects the retry policy, local storage and callbacks at construction.
-It kills a worker process or logical node after a selected committed checkpoint
-and checks node/process evidence, actor reuse, checkpoint delivery and subsequent
-reports. It does not make an arbitrary
+It kills a worker process or logical node after a selected committed checkpoint.
+The optional Fashion active mode first completes real optimizer updates inside
+the next unfinished epoch. It checks node/process evidence, actor reuse,
+checkpoint delivery, recomputation and subsequent reports. It does not make an arbitrary
 application resumable: that application must save and restore its own state.
 The data-owner scenario instead holds a random-shuffle map task while the local
 harness replaces head processes, then checks end-to-end completion and replay.
@@ -77,17 +78,21 @@ class ReportGate(TrainContextCallback):
 
 
 class WorkloadObserver(WorkerGroupCallback, ReportCallback):
-    def __init__(self, directory, inject, report_number=1, node_scenario=None):
+    def __init__(self, directory, inject, report_number=1, node_scenario=None, active=False):
         self.directory = Path(directory)
         self.inject = inject
         self.report_number = report_number
         self.node_scenario = node_scenario
+        self.active = active
         self.groups = []
         self.reports = []
         self.fault = None
         self.workers = []
 
     def save(self):
+        active_fault = self.directory / "node-fault.json"
+        if self.active and active_fault.exists():
+            self.fault = json.loads(active_fault.read_text())["node_fault"]
         write_record(self.directory / "timeline.json", {
             "groups": self.groups, "reports": self.reports, "fault": self.fault,
         })
@@ -115,7 +120,15 @@ class WorkloadObserver(WorkerGroupCallback, ReportCallback):
         if len(self.reports) == self.report_number:
             if not record["checkpoint"]:
                 raise ValueError("Selected failure report has no committed checkpoint")
-            if self.node_scenario:
+            if self.active:
+                # The step gate will request the fault inside the NEXT epoch.
+                # Publish the committed checkpoint without injecting here.
+                write_record(self.directory / "active-checkpoint.json", {
+                    "report_number": self.report_number, "groups": self.groups,
+                    "checkpoint": record["checkpoint"],
+                    "checkpoint_committed_ns": record["time_ns"],
+                })
+            elif self.node_scenario:
                 # The controller and workers wait at a committed epoch while
                 # the driver's MAIN thread operates the local node supervisor.
                 self.fault = {"scenario": self.node_scenario,
@@ -148,7 +161,7 @@ class WorkloadObserver(WorkerGroupCallback, ReportCallback):
         self.save()
 
 
-def observe_function(function, directory):
+def observe_function(function, directory, active_plan=None):
     """Record which committed checkpoint Ray supplies to each actual invocation."""
     takes_config = bool(inspect.signature(function).parameters)
 
@@ -163,9 +176,159 @@ def observe_function(function, directory):
                     "checkpoint": checkpoint_files(checkpoint),
                     "time_ns": time.monotonic_ns()}
         write_record(Path(directory) / "starts" / f"{uuid.uuid4().hex}.json", identity)
-        return function(config) if takes_config else function()
+        gate = (active_optimizer_steps(directory, active_plan, identity, checkpoint)
+                if active_plan else nullcontext())
+        with gate:
+            return function(config) if takes_config else function()
 
     return wrapped
+
+
+@contextmanager
+def active_optimizer_steps(directory, plan, identity, checkpoint):
+    """Instrument the existing Fashion Adam loop without changing its workload.
+
+    The gate follows a real optimizer update, within an uncommitted epoch. This
+    is not an arbitrary mid-kernel or in-flight-collective injection.
+    """
+    import torch
+
+    directory = Path(directory)
+    restored_epoch = 0
+    if checkpoint:
+        with checkpoint.as_directory() as path:
+            restored_epoch = torch.load(Path(path) / "training.pt", map_location="cpu", weights_only=True)["epoch"]
+    original = torch.optim.Adam.step
+    updates = 0
+    target = plan["checkpoint_epoch"] * 118 + plan["step"]
+    release = directory / "release-active.json"
+
+    def step(optimizer, *args, **kwargs):
+        nonlocal updates
+        result = original(optimizer, *args, **kwargs)
+        updates += 1
+        absolute = restored_epoch * 118 + updates
+        event = {**identity, "time_ns": time.monotonic_ns(),
+                 "restored_epoch": restored_epoch, "optimizer_updates_this_invocation": updates,
+                 "absolute_update": absolute, "checkpoint_epoch": plan["checkpoint_epoch"],
+                 "step": plan["step"], "epoch": plan["checkpoint_epoch"] + 1}
+        if absolute == target:
+            if restored_epoch:
+                write_record(directory / f"active-recomputed-{identity['rank']}.json", event)
+            else:
+                write_record(directory / f"active-ready-{identity['rank']}.json", event)
+                deadline = time.monotonic() + 90
+                while not release.exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Active training fault supervisor did not release the optimizer gate")
+                    time.sleep(.02)
+        elif absolute == target + 1 and not restored_epoch:
+            write_record(directory / f"active-continued-{identity['rank']}.json", event)
+        return result
+
+    torch.optim.Adam.step = step
+    try:
+        yield
+    finally:
+        torch.optim.Adam.step = original
+
+
+def active_training_fault(directory, scenario, plan, executor_ids, head_id,
+                          crash_head, crash_worker, workload, timeout_s):
+    """Operate logical nodes on the main thread while workers are mid-epoch."""
+    if current_thread() is not main_thread():
+        raise RuntimeError("Active fault supervision must run on the main thread")
+    fault = {"scenario": scenario, "report_number": plan["checkpoint_epoch"],
+             "failure_timing": "active", "completed": False}
+    with ThreadPoolExecutor(1) as pool:
+        future = pool.submit(workload)
+        try:
+            deadline = time.monotonic() + timeout_s
+            paths = [directory / "active-checkpoint.json", *[
+                directory / f"active-ready-{rank}.json" for rank in (0, 1)]]
+            while not all(path.exists() for path in paths):
+                if future.done():
+                    future.result()
+                    raise ValueError("Workload ended before the active training gate")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Training did not reach the active optimizer gate")
+                time.sleep(.02)
+            committed, *gates = [json.loads(path.read_text()) for path in paths]
+            fault.update(committed, gates=gates, request_ns=time.monotonic_ns(),
+                         original_head_node_id=head_id, executor_node_ids=sorted(executor_ids))
+            group = fault["groups"][0]
+            if (len(fault["groups"]) != 1 or len(group) != 2
+                    or [w["rank"] for w in group] != [0, 1]
+                    or len({w["node_id"] for w in group}) != 2
+                    or any(w["node_id"] not in executor_ids for w in group)
+                    or fault["report_number"] != plan["checkpoint_epoch"]
+                    or not fault["checkpoint"]):
+                raise ValueError("Active fault requires a committed checkpoint and two separate executor nodes")
+            validate_active_gates(fault, plan)
+            if scenario == "head-node":
+                fault["head_replacement"] = crash_head()
+            elif scenario == "worker-node":
+                fault["worker_node_failure"] = crash_worker(group[0]["node_id"], group[0]["pid"])
+            else:
+                raise ValueError("Unsupported active failure scope")
+            fault.update(completed=True, operation_finished_ns=time.monotonic_ns())
+        except Exception as exc:
+            fault.update(error_type=type(exc).__name__, error=str(exc))
+            raise
+        finally:
+            write_record(directory / "node-fault.json", {"node_fault": fault})
+            write_record(directory / "release-active.json", {"released": True})
+        return future.result()
+
+
+def validate_active_gates(fault, plan):
+    group, gates = fault["groups"][0], fault["gates"]
+    if len(gates) != 2:
+        raise ValueError("Active failure lacks both rank gates")
+    for worker, gate in zip(group, gates):
+        if (any(worker[k] != gate[k] for k in ("rank", "actor_id", "pid"))
+                or gate["restored_epoch"] != 0 or gate["checkpoint"] is not None
+                or gate["checkpoint_epoch"] != plan["checkpoint_epoch"]
+                or gate["epoch"] != plan["checkpoint_epoch"] + 1
+                or gate["step"] != plan["step"] or not 0 < gate["step"] < 118
+                or gate["absolute_update"] != plan["checkpoint_epoch"] * 118 + plan["step"]
+                or gate["optimizer_updates_this_invocation"] != gate["absolute_update"]
+                or not fault["checkpoint_committed_ns"] < gate["time_ns"] <= fault["request_ns"]):
+            raise ValueError("Failure did not follow matched uncheckpointed optimizer work on both ranks")
+
+
+def validate_active_training(directory, diagnostics, plan):
+    fault = diagnostics["node_fault"]
+    if fault.get("failure_timing") != "active":
+        raise ValueError("Expected a mid-epoch fault")
+    validate_active_gates(fault, plan)
+    retried = len(diagnostics["groups"]) == 2
+    label = "recomputed" if retried else "continued"
+    events = [json.loads((directory / f"active-{label}-{rank}.json").read_text()) for rank in (0, 1)]
+    resumed = [s for s in diagnostics["starts"] if s["checkpoint"] is not None]
+    for worker, event in zip(diagnostics["groups"][-1], events):
+        expected_epoch = plan["checkpoint_epoch"] if retried else 0
+        expected_update = plan["checkpoint_epoch"] * 118 + plan["step"] + (0 if retried else 1)
+        if (any(event[k] != worker[k] for k in ("rank", "actor_id", "pid"))
+                or event["restored_epoch"] != expected_epoch
+                or event["absolute_update"] != expected_update
+                or event["optimizer_updates_this_invocation"] != expected_update - expected_epoch * 118
+                or event["checkpoint"] != (fault["checkpoint"] if retried else None)
+                or not fault["operation_finished_ns"] < event["time_ns"]
+                < diagnostics["reports"][plan["checkpoint_epoch"]]["time_ns"]):
+            raise ValueError("Missing matched post-failure optimizer progress")
+    recovery = diagnostics["recoveries"][0]
+    recovery.update(
+        failure_timing="active", interrupted_epoch=plan["checkpoint_epoch"] + 1,
+        completed_uncheckpointed_steps_per_rank=plan["step"],
+        lost_uncommitted_optimizer_steps_per_rank=plan["step"] if retried else 0,
+        recomputed_optimizer_steps_per_rank=plan["step"] if retried else 0,
+        model_checkpoint_restored=retried, optimizer_progress=events,
+        fault_boundary="after an optimizer update inside an unfinished epoch; both ranks gated",
+        gate_wait_before_fault_s=(fault["request_ns"] - min(e["time_ns"] for e in fault["gates"])) / 1e9,
+        restore_invocation_to_recomputed_step_s=(
+            (max(e["time_ns"] for e in events) - max(s["time_ns"] for s in resumed)) / 1e9 if retried else None),
+    )
 
 
 def prepare_regression_input(directory):
@@ -766,6 +929,18 @@ def run_case(options, directory, diagnostics):
         training_epochs is not None and report_number >= training_epochs
     ):
         raise ValueError("Failure must follow a positive epoch with training remaining")
+    active_mode = options.get("failure_timing", "boundary") == "active"
+    active_plan = None
+    if active_mode:
+        step = options.get("fault_after_step", 59)
+        if (not fashion or options["scenario"] not in ("none", "head-node", "worker-node")
+                or type(step) is not int or not 0 < step < 118
+                or options.get("placement_strategy") != "STRICT_SPREAD"):
+            raise ValueError("Active Fashion faults require spread node cases and a step inside the 118-step epoch")
+        if node_scenario:
+            active_plan = {"checkpoint_epoch": report_number, "step": step}
+    diagnostics.update(failure_timing=options.get("failure_timing", "boundary"),
+                       fault_after_step=options.get("fault_after_step", 59) if active_mode else None)
     if fashion:
         from fashion_comparison import input_identity
         identity = input_identity(Path(options["data_directory"]))
@@ -820,7 +995,8 @@ def run_case(options, directory, diagnostics):
         run = replace(run, storage_path=str(directory / "storage"), name="workload",
                       failure_config=FailureConfig(max_failures=1), callbacks=[
                           *(run.callbacks or []), ReportGate(str(directory), report_number, 90 if node_scenario else 30),
-                          WorkloadObserver(str(directory), inject, report_number, node_scenario)])
+                          WorkloadObserver(str(directory), inject, report_number, node_scenario,
+                                           active=active_plan is not None)])
         scaling = kwargs.get("scaling_config")
         if scaling is None or scaling.num_workers < 2 or scaling.use_gpu or scaling.use_tpu:
             raise ValueError("Use at least two CPU workers in the workload")
@@ -829,7 +1005,7 @@ def run_case(options, directory, diagnostics):
         if node_scenario and options.get("placement_strategy") != "STRICT_SPREAD":
             raise ValueError("Training node failures require STRICT_SPREAD placement")
         kwargs.update(torch_config=config, run_config=run)
-        originals[0](trainer, observe_function(train_loop_per_worker, str(directory)), **kwargs)
+        originals[0](trainer, observe_function(train_loop_per_worker, str(directory), active_plan), **kwargs)
 
     def fit(trainer, *a, **kw):
         if timings:
@@ -891,6 +1067,10 @@ def run_case(options, directory, diagnostics):
                     data_owner_fault(directory, enabled, crash_head,
                                      case_args.executor_node_ids, diagnostics, workload,
                                      matched_owner=matched_owner)
+                elif active_plan is not None:
+                    active_training_fault(directory, node_scenario, active_plan,
+                                          case_args.executor_node_ids, case_args.owner_node_id,
+                                          crash_head, crash_worker, workload, options["timeout_s"])
                 elif node_scenario:
                     training_node_fault(directory, node_scenario, report_number,
                                         case_args.executor_node_ids, case_args.owner_node_id,
@@ -918,6 +1098,8 @@ def run_case(options, directory, diagnostics):
             if len(timings) != 1:
                 raise ValueError("The script did not execute exactly one TorchTrainer.fit")
             diagnostics.update(validate(directory, selective, inject, node_scenario))
+            if active_plan is not None:
+                validate_active_training(directory, diagnostics, active_plan)
             exchanges = diagnostics["data_exchanges"]
             if (regression or fashion) and enabled:
                 for name in ("Repartition", "RandomShuffle"):

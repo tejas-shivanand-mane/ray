@@ -110,6 +110,9 @@ def compare_pair(ordinary, integrated):
             raise ValueError(f"Mismatched {key}")
     if ordinary.get("placement_strategy") != integrated.get("placement_strategy"):
         raise ValueError("Mismatched training worker placement")
+    for key in ("failure_timing", "fault_after_step"):
+        if ordinary.get(key) != integrated.get(key):
+            raise ValueError(f"Mismatched {key}")
     if ordinary["owner_placement"] != "default":
         raise ValueError("Training comparison uses default ownership in both arms")
     for key in PROVENANCE_KEYS:
@@ -155,6 +158,9 @@ def compare_control(sample, control):
             raise ValueError(f"Control provenance differs in {key}")
     if sample.get("placement_strategy") != control.get("placement_strategy"):
         raise ValueError("Control differs in training worker placement")
+    for key in ("failure_timing", "fault_after_step"):
+        if sample.get(key) != control.get(key):
+            raise ValueError(f"Control differs in {key}")
     error = predictions_match(sample, control)
     epoch = sample["fault_after_epoch"]
     recovery = sample["recoveries"][0]
@@ -163,7 +169,18 @@ def compare_control(sample, control):
         raise ValueError("Invalid control epoch interval")
     sample.update(matches_no_failure_predictions=True, control_predictions_max_abs_difference=error,
                   workload_increase_vs_control_s=sample["workload_s"] - control["workload_s"])
-    recovery.update(control_next_epoch_interval_s=normal_interval,
-                    next_report_excess_vs_control_s=recovery["failure_to_next_report_s"] - normal_interval,
-                    lost_uncommitted_optimizer_steps=None,
-                    fault_boundary="after committed epoch; unfinished minibatch work is not measured")
+    recovery.update(control_next_epoch_interval_s=normal_interval)
+    if sample.get("failure_timing") == "active":
+        if (recovery.get("failure_timing") != "active"
+                or recovery.get("completed_uncheckpointed_steps_per_rank") != sample["fault_after_step"]):
+            raise ValueError("Missing validated mid-epoch optimizer evidence")
+        # A mid-epoch failure cannot be compared with a whole control epoch
+        # starting at its boundary. Use the common committed-checkpoint origin.
+        fault = sample["node_fault"]
+        span = (sample["reports"][epoch]["time_ns"] - fault["checkpoint_committed_ns"]) / 1e9
+        recovery.update(checkpoint_to_next_report_s=span,
+                        checkpoint_interval_excess_vs_control_s=span - normal_interval)
+    else:
+        recovery.update(next_report_excess_vs_control_s=recovery["failure_to_next_report_s"] - normal_interval,
+                        lost_uncommitted_optimizer_steps=None,
+                        fault_boundary="after committed epoch; unfinished minibatch work is not measured")
