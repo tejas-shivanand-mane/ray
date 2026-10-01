@@ -219,6 +219,9 @@ def run_observation(options, pair, directory, provenance):
             path = directory / filename
             if path.exists():
                 sample.update(json.loads(path.read_text()))
+        if options.get("streaming_learning"):
+            from streaming_learning import collect_evidence
+            sample.update(collect_evidence(directory))
         if options.get("failure_timing") == "active":
             sample["active_optimizer_events"] = [
                 {"file": path.name, "event": json.loads(path.read_text())}

@@ -3,10 +3,12 @@
 Audit base: `06444402929e604670fae1af20cfe5bcf52dd189`.
 This is a source review and experiment design, not a new measured result.
 
-Current priority: finite ML workloads, with streaming recovery and optimization
-deferred. The follow-up [batch ML ownership audit](BATCH_ML_OWNERSHIP_AUDIT.md)
-records the applicability decision for existing inference/feature workloads.
-The streaming design below remains a deferred proposal, not the active work plan.
+The follow-up [batch ML ownership audit](BATCH_ML_OWNERSHIP_AUDIT.md) records the
+applicability decision for existing inference/feature workloads. Following the
+user's scope update, [streaming learning](STREAMING_LEARNING.md) now supplies a
+bounded CIFAR/ResNet experiment using existing recovery. The coordinator-recovery
+design below and overhead optimization remain deferred; the new workload does
+not implement either capability.
 
 ## What the measurements establish
 

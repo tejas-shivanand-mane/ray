@@ -9,6 +9,11 @@ import sys
 
 
 SOURCE_PATHS = (
+    "gossip_benchmarks/run_streaming_learning_comparison.py",
+    "gossip_benchmarks/plot_streaming_learning.py",
+    "gossip_benchmarks/validate_streaming_learning.sh",
+    "gossip_benchmarks/workloads/cifar_streaming.py",
+    "gossip_benchmarks/_support/streaming_learning.py",
     "gossip_benchmarks/run_fashion_restart_comparison.py",
     "gossip_benchmarks/plot_fashion_restart.py",
     "gossip_benchmarks/validate_fashion_restart.sh",

@@ -18,8 +18,10 @@ The Fixed-R Data path introduces separate owner helpers; adding those helpers
 to the OFF arm would create the already-studied controlled ownership experiment,
 not establish a new failure under the workload's normal placement.
 
-The user priority remains finite ML workloads. Streaming training recovery and
-streaming overhead optimization are deferred. A finite Ray Data batch job still
+At the time of this audit, streaming work was deferred. The user subsequently
+requested [a learning workload with streaming input](STREAMING_LEARNING.md);
+that experiment does not change the ownership findings here. Overhead
+optimization remains deferred. A finite Ray Data batch job still
 uses Ray Data's streaming executor internally; calling the job "batch inference"
 does not bypass the current integration or its copying/enrollment costs.
 

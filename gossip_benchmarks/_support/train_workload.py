@@ -186,7 +186,7 @@ def observe_function(function, directory, active_plan=None):
 
 @contextmanager
 def active_optimizer_steps(directory, plan, identity, checkpoint):
-    """Instrument the existing Fashion Adam loop without changing its workload.
+    """Instrument a supported Adam loop without changing its workload.
 
     The gate follows a real optimizer update, within an uncommitted epoch. This
     is not an arbitrary mid-kernel or in-flight-collective injection.
@@ -200,14 +200,15 @@ def active_optimizer_steps(directory, plan, identity, checkpoint):
             restored_epoch = torch.load(Path(path) / "training.pt", map_location="cpu", weights_only=True)["epoch"]
     original = torch.optim.Adam.step
     updates = 0
-    target = plan["checkpoint_epoch"] * 118 + plan["step"]
+    steps_per_epoch = plan.get("steps_per_epoch", 118)
+    target = plan["checkpoint_epoch"] * steps_per_epoch + plan["step"]
     release = directory / "release-active.json"
 
     def step(optimizer, *args, **kwargs):
         nonlocal updates
         result = original(optimizer, *args, **kwargs)
         updates += 1
-        absolute = restored_epoch * 118 + updates
+        absolute = restored_epoch * steps_per_epoch + updates
         event = {**identity, "time_ns": time.monotonic_ns(),
                  "restored_epoch": restored_epoch, "optimizer_updates_this_invocation": updates,
                  "absolute_update": absolute, "checkpoint_epoch": plan["checkpoint_epoch"],
@@ -283,6 +284,7 @@ def active_training_fault(directory, scenario, plan, executor_ids, head_id,
 
 def validate_active_gates(fault, plan):
     group, gates = fault["groups"][0], fault["gates"]
+    steps_per_epoch = plan.get("steps_per_epoch", 118)
     if len(gates) != 2:
         raise ValueError("Active failure lacks both rank gates")
     for worker, gate in zip(group, gates):
@@ -290,8 +292,8 @@ def validate_active_gates(fault, plan):
                 or gate["restored_epoch"] != 0 or gate["checkpoint"] is not None
                 or gate["checkpoint_epoch"] != plan["checkpoint_epoch"]
                 or gate["epoch"] != plan["checkpoint_epoch"] + 1
-                or gate["step"] != plan["step"] or not 0 < gate["step"] < 118
-                or gate["absolute_update"] != plan["checkpoint_epoch"] * 118 + plan["step"]
+                or gate["step"] != plan["step"] or not 0 < gate["step"] < steps_per_epoch
+                or gate["absolute_update"] != plan["checkpoint_epoch"] * steps_per_epoch + plan["step"]
                 or gate["optimizer_updates_this_invocation"] != gate["absolute_update"]
                 or not fault["checkpoint_committed_ns"] < gate["time_ns"] <= fault["request_ns"]):
             raise ValueError("Failure did not follow matched uncheckpointed optimizer work on both ranks")
@@ -306,13 +308,14 @@ def validate_active_training(directory, diagnostics, plan):
     label = "recomputed" if retried else "continued"
     events = [json.loads((directory / f"active-{label}-{rank}.json").read_text()) for rank in (0, 1)]
     resumed = [s for s in diagnostics["starts"] if s["checkpoint"] is not None]
+    steps_per_epoch = plan.get("steps_per_epoch", 118)
     for worker, event in zip(diagnostics["groups"][-1], events):
         expected_epoch = plan["checkpoint_epoch"] if retried else 0
-        expected_update = plan["checkpoint_epoch"] * 118 + plan["step"] + (0 if retried else 1)
+        expected_update = plan["checkpoint_epoch"] * steps_per_epoch + plan["step"] + (0 if retried else 1)
         if (any(event[k] != worker[k] for k in ("rank", "actor_id", "pid"))
                 or event["restored_epoch"] != expected_epoch
                 or event["absolute_update"] != expected_update
-                or event["optimizer_updates_this_invocation"] != expected_update - expected_epoch * 118
+                or event["optimizer_updates_this_invocation"] != expected_update - expected_epoch * steps_per_epoch
                 or event["checkpoint"] != (fault["checkpoint"] if retried else None)
                 or not fault["operation_finished_ns"] < event["time_ns"]
                 < diagnostics["reports"][plan["checkpoint_epoch"]]["time_ns"]):
@@ -901,6 +904,17 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
     regression = script == Path(__file__).resolve().parents[2] / "python/ray/train/examples/pytorch/torch_regression_example.py"
     workloads = Path(__file__).resolve().parents[1] / "workloads"
     fashion = script in (workloads / "fashion_mnist.py", workloads / "fashion_features.py")
+    streaming_learning = script == workloads / "cifar_streaming.py"
+    supported = regression or fashion or streaming_learning
+    if streaming_learning:
+        import torchvision
+        from streaming_learning import input_identity
+        identity = input_identity(Path(options["data_directory"]))
+        if identity != options["input_identity"]:
+            raise ValueError("CIFAR input changed before observation")
+        diagnostics["input_identity"] = identity
+        diagnostics["torchvision_version"] = torchvision.__version__
+        script_args += ["--telemetry-directory", str(directory / "stream-events")]
     features = script == workloads / "fashion_features.py"
     if features:
         from fashion_comparison import feature_identity
@@ -911,7 +925,7 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
         script_args += ["--validation-output", str(directory / "validation-features.npz")]
     training_epochs = options.get("training_epochs")
     if training_epochs is not None and (
-        not (regression or fashion) or type(training_epochs) is not int or training_epochs < 3
+        not supported or type(training_epochs) is not int or training_epochs < 3
     ):
         raise ValueError("Epoch override requires a supported workload and at least three epochs")
     if regression and not script_args:
@@ -942,12 +956,15 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
     active_plan = None
     if active_mode:
         step = options.get("fault_after_step", 59)
-        if (not fashion or options["scenario"] not in ("none", "head-node", "worker-node")
-                or type(step) is not int or not 0 < step < 118
+        steps_per_epoch = options["steps_per_epoch"] if streaming_learning else 118
+        if (not (fashion or streaming_learning) or options["scenario"] not in ("none", "head-node", "worker-node")
+                or type(steps_per_epoch) is not int or steps_per_epoch < 2
+                or type(step) is not int or not 0 < step < steps_per_epoch
                 or options.get("placement_strategy") != "STRICT_SPREAD"):
-            raise ValueError("Active Fashion faults require spread node cases and a step inside the 118-step epoch")
+            raise ValueError("Active faults require spread node cases and a step inside the supported epoch")
         if node_scenario:
-            active_plan = {"checkpoint_epoch": report_number, "step": step}
+            active_plan = {"checkpoint_epoch": report_number, "step": step,
+                           "steps_per_epoch": steps_per_epoch}
     diagnostics.update(failure_timing=options.get("failure_timing", "boundary"),
                        fault_after_step=options.get("fault_after_step", 59) if active_mode else None)
     if fashion:
@@ -958,11 +975,11 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
         diagnostics["input_identity"] = identity
     diagnostics.update(implementation="existing_TorchTrainer_script", restart_scope=options["restart_scope"],
                        workload=str(script), workload_sha256=file_sha256(script),
-                       numerical_probe=regression or fashion, torch_version=torch.__version__,
+                       numerical_probe=supported, torch_version=torch.__version__,
                        owner_placement=options.get("owner_placement", "default"),
                        placement_strategy=options.get("placement_strategy", "PACK"),
                        workload_completed=False)
-    if regression or fashion:
+    if supported:
         # Owner loss can end preprocessing before TorchTrainer is constructed.
         # Keep the planned fixed work available for that failed baseline too.
         diagnostics["training_epochs"] = training_epochs if training_epochs is not None else 3
@@ -982,6 +999,15 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
             ]
             if exchanges:
                 write_record(directory / "exchanges" / f"{uuid.uuid4().hex}.json", exchanges)
+            if streaming_learning:
+                write_record(directory / "data-executions" / f"{uuid.uuid4().hex}.json", {
+                    "time_ns": time.monotonic_ns(),
+                    "node_id": ray.get_runtime_context().get_node_id(),
+                    "worker_id": ray.get_runtime_context().get_worker_id(),
+                    "operators": [{"operator": op.name, **{
+                        key: value for key, value in op.metrics.extra_metrics.items() if key.startswith("fixed_r_")}}
+                                  for op in executor._topology],
+                })
 
         def after_execution_succeeds(self, executor):
             self.record(executor)
@@ -990,7 +1016,7 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
             self.record(executor)
 
     def configure(trainer, train_loop_per_worker, **kwargs):
-        if regression or fashion:
+        if supported:
             loop_config = dict(kwargs.get("train_loop_config") or {})
             if training_epochs is not None:
                 loop_config["epochs"] = training_epochs
@@ -999,7 +1025,7 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
         config = kwargs.get("torch_config") or TorchConfig()
         if type(config) is not TorchConfig or config.backend not in (None, "gloo"):
             raise ValueError("Workload harness requires ordinary CPU Gloo TorchTrainer")
-        config = replace(config, backend="gloo", timeout_s=10,
+        config = replace(config, backend="gloo", timeout_s=60 if streaming_learning else 10,
                          selective_recovery=selective, recovery_timeout_s=25)
         run = kwargs.get("run_config") or RunConfig()
         run = replace(run, storage_path=str(directory / "storage"), name="workload",
@@ -1108,6 +1134,9 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
                     diagnostics["map_progress"] = map_progress(directory)
                 if features and (directory / "feature-progress.json").exists():
                     diagnostics["feature_progress"] = json.loads((directory / "feature-progress.json").read_text())
+                if streaming_learning:
+                    from streaming_learning import collect_evidence
+                    diagnostics.update(collect_evidence(directory))
             if ordered_plan is not None and [e["index"] for e in diagnostics["map_progress"]] != list(range(4)):
                 raise ValueError("Workload did not compute all four controlled shuffle maps")
             if len(timings) != 1:
@@ -1152,6 +1181,9 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
             if fashion:
                 from fashion_comparison import validate_fashion
                 validate_fashion(directory, options, diagnostics)
+            if streaming_learning:
+                from streaming_learning import validate_learning
+                validate_learning(directory, options, diagnostics)
             return {"validation_status": "passed", "training_s": timings[0]}
     finally:
         if context is not None:
