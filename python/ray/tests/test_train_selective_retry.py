@@ -615,7 +615,7 @@ def test_fixed_r_comparison_records_surviving_baseline(fixed_r_workload_pair):
     assert result["on_replayed_tasks"] == 1
 
 
-@pytest.mark.parametrize("invalid", ["missing_fault", "wrong_replay", "different_build", "flags", "failed_baseline", "different_predictions"])
+@pytest.mark.parametrize("invalid", ["missing_fault", "wrong_replay", "different_build", "flags", "failed_baseline", "different_predictions", "different_epochs"])
 def test_fixed_r_comparison_rejects_inadequate_evidence(fixed_r_workload_pair, invalid):
     import numpy as np
 
@@ -630,6 +630,8 @@ def test_fixed_r_comparison_rejects_inadequate_evidence(fixed_r_workload_pair, i
         off["native_settings"]["enable_recovery_streaming_fixed_r"] = True
     elif invalid == "failed_baseline":
         off["status"] = "failed"
+    elif invalid == "different_epochs":
+        off["training_epochs"], on["training_epochs"] = 100, 120
     else:
         np.save(Path(on["directory"]) / "predictions.npy", np.array([99., 2.]))
     with pytest.raises((ValueError, AssertionError)):
@@ -740,3 +742,82 @@ def test_matched_owner_report_preserves_failed_baseline(monkeypatch, tmp_path, m
         assert report["summary"][1]["on_vs_off_pct_mean"] is None
     else:
         assert report["status"] == "failed" and report["failed_observations"]
+
+
+def calibration_pilot():
+    return {"status": "passed", "mode": "off", "scenario": "none",
+            "training_epochs": 3, "workload_s": 16,
+            "reports": [{"metrics": [{"epoch": epoch}], "time_ns": (10 + 2 * epoch) * 10**9}
+                        for epoch in (1, 2, 3)]}
+
+
+def test_duration_calibration_preserves_fixed_work(fixed_r_workload_pair):
+    module, _ = fixed_r_workload_pair
+    result = module.calibrate_workload_epochs(calibration_pilot(), 300)
+    assert result["estimated_epoch_s"] == 2
+    assert result["estimated_fixed_workload_s"] == 10
+    assert result["training_epochs"] == 145
+    assert result["predicted_off_workload_s"] == 300
+    assert module.calibrate_workload_epochs(calibration_pilot(), 301)["training_epochs"] == 146
+    assert module.calibrate_workload_epochs(calibration_pilot(), 1)["training_epochs"] == 3
+
+
+@pytest.mark.parametrize("invalid", ["failed", "on", "missing_epoch", "nonmonotonic", "nan", "short_total"])
+def test_duration_calibration_rejects_invalid_pilot(fixed_r_workload_pair, invalid):
+    module, _ = fixed_r_workload_pair
+    pilot = calibration_pilot()
+    if invalid == "failed":
+        pilot["status"] = "failed"
+    elif invalid == "on":
+        pilot["mode"] = "on"
+    elif invalid == "missing_epoch":
+        pilot["reports"].pop()
+    elif invalid == "nonmonotonic":
+        pilot["reports"][1]["time_ns"] = pilot["reports"][0]["time_ns"]
+    elif invalid == "nan":
+        pilot["workload_s"] = float("nan")
+    else:
+        pilot["workload_s"] = 1
+    with pytest.raises(ValueError):
+        module.calibrate_workload_epochs(pilot, 300)
+
+
+@pytest.mark.parametrize("pilot_fails", [False, True])
+def test_calibrated_overhead_excludes_pilot_and_runs_equal_epochs(
+    monkeypatch, tmp_path, fixed_r_workload_pair, pilot_fails,
+):
+    import copy
+    import json
+
+    module, (off, on) = fixed_r_workload_pair
+    calls = []
+
+    def observe(options, pair, directory, provenance):
+        calls.append(options.copy())
+        if pair == 0:
+            pilot = calibration_pilot()
+            if pilot_fails:
+                pilot["status"] = "failed"
+            return pilot
+        sample = copy.deepcopy(off if options["mode"] == "off" else on)
+        sample.update(scenario="none", training_epochs=options["training_epochs"],
+                      workload_s=300 if options["mode"] == "off" else 330)
+        return sample
+
+    monkeypatch.setattr(module, "run_observation", observe)
+    args = NS(owner_placement="default", repeats=1, scenario=None, workload=Path("example.py"),
+              workload_arg=[], timeout_s=420, target_workload_s=300, output=tmp_path / "report.json")
+    assert module.run_fixed_r_workload_comparison(args, tmp_path, {}) == int(pilot_fails)
+    report = json.loads(args.output.read_text())
+    if pilot_fails:
+        assert len(calls) == 1 and report["status"] == "failed"
+        assert not report["samples"] and not report["pairs"]
+    else:
+        assert [(c["mode"], c["training_epochs"]) for c in calls] == [
+            ("off", 3), ("off", 145), ("on", 145),
+        ]
+        assert all(c["scenario"] == "none" for c in calls)
+        assert len(report["samples"]) == 2 and len(report["pairs"]) == 1
+        assert report["pairs"][0]["on_vs_off_pct"] == pytest.approx(10)
+        assert report["pairs"][0]["training_epochs"] == 145
+        assert report["calibration"]["sample"]["workload_s"] == 16

@@ -15,6 +15,9 @@ first random-shuffle map task is held before exporting its output.
 Add --owner-placement head for a controlled owner-loss comparison: ordinary
 shuffle maps are submitted through head actors, while the driver survives.
 This changes OFF's ownership topology explicitly; it is not default Ray Data.
+--target-workload-s 300 calibrates the regression example's epoch count with a
+short OFF pilot, then measures the same fixed work in OFF and ON without faults.
+The target is approximate OFF script time; ON is allowed to take longer.
 
 Without --workload, retain the matched fixed-partition XGBoost benchmark.
 """
@@ -61,6 +64,8 @@ def compare_fixed_r_pair(off, on):
     placement = on.get("owner_placement", "default")
     if off.get("owner_placement", "default") != placement:
         raise ValueError("Cannot compare different owner placement")
+    if off.get("training_epochs") != on.get("training_epochs"):
+        raise ValueError("Cannot compare different training epoch counts")
     owner_loss = placement == "head" and on["scenario"] == "data-owner"
     if on["status"] != "passed" or (off["status"] != "passed" and not owner_loss):
         raise ValueError("Incomplete OFF/ON pair; inspect failure evidence before claiming a benefit")
@@ -151,7 +156,36 @@ def compare_fixed_r_pair(off, on):
                                      for op in on["data_exchanges"])}
 
 
+def calibrate_workload_epochs(pilot, target_s):
+    """Estimate fixed work from OFF's report cadence, retaining setup cost.
+
+    Never stop each arm at a wall-clock deadline: that would compare different
+    amounts of training. Checkpoint/report costs are part of each measured epoch.
+    """
+    if not math.isfinite(target_s) or target_s <= 0:
+        raise ValueError("Workload target must be finite and positive")
+    if (pilot.get("status") != "passed" or pilot.get("mode") != "off"
+            or pilot.get("scenario") != "none" or pilot.get("training_epochs") != 3):
+        raise ValueError("Calibration requires a successful three-epoch OFF control")
+    reports = pilot.get("reports", [])
+    if [r["metrics"][0]["epoch"] for r in reports] != [1, 2, 3]:
+        raise ValueError("Calibration is missing the three ordered epoch reports")
+    intervals = [(b["time_ns"] - a["time_ns"]) / 1e9 for a, b in zip(reports, reports[1:])]
+    elapsed = pilot["workload_s"]
+    if (not all(math.isfinite(v) and v > 0 for v in (*intervals, elapsed))
+            or elapsed < sum(intervals)):
+        raise ValueError("Invalid calibration timing")
+    epoch_s = statistics.median(intervals)
+    fixed_s = max(0, elapsed - len(reports) * epoch_s)
+    epochs = max(3, math.ceil((target_s - fixed_s) / epoch_s))
+    return {"target_workload_s": target_s, "training_epochs": epochs,
+            "estimated_epoch_s": epoch_s, "estimated_fixed_workload_s": fixed_s,
+            "predicted_off_workload_s": fixed_s + epochs * epoch_s}
+
+
 def run_fixed_r_workload_comparison(args, directory, provenance):
+    target_s = getattr(args, "target_workload_s", None)
+    scenarios = ("none",) if target_s is not None else (args.scenario or ("none", "data-owner"))
     report = {
         "profile": "torch-workload-fixed-r-owner-comparison", "status": "running",
         "source_provenance": provenance, "samples": [], "pairs": [],
@@ -179,6 +213,18 @@ def run_fixed_r_workload_comparison(args, directory, provenance):
         report["limitations"].append(
             "verified OFF OwnerDiedError is an expected experimental outcome, not a completed workload or a speedup measurement"
         )
+    if target_s is not None:
+        report["profile"] = "torch-workload-calibrated-overhead"
+        report["measurement_scope"] = "script execution including data preparation, all training epochs, checkpoints and teardown; excludes cluster startup, calibration pilot and final numerical probe"
+        report["limitations"] = [
+            report["limitations"][0], report["limitations"][1],
+            "no failures are injected; this measures overhead, not recovery",
+            "the original small CSV and model are retained; more epochs repeat training, validation, checkpointing and reporting",
+            "epoch report intervals include framework coordination; this is not a compute-only training measurement",
+            "OFF duration is estimated from a short pilot; actual measured durations are reported",
+            "both arms use the same calibrated epoch count, never separate wall-clock stopping rules",
+            "one preprocessing phase per run; longer training amortizes its fixed cost",
+        ]
     controls = {}
     validated_control_pairs = set()
 
@@ -187,8 +233,31 @@ def run_fixed_r_workload_comparison(args, directory, provenance):
         write_json(directory / "comparison.json", report)
 
     save()
+    training_epochs = None
+    if target_s is not None:
+        options = {"training_strategy": "ray-train-workload", "scenario": "none",
+                   "mode": "off", "restart_scope": "full", "timeout_s": min(120, args.timeout_s),
+                   "workload": str(args.workload.resolve()), "workload_args": args.workload_arg,
+                   "comparison": "fixed-r", "owner_placement": args.owner_placement,
+                   "training_epochs": 3}
+        print("Calibrating with a three-epoch OFF pilot (excluded from overhead results)", flush=True)
+        pilot = run_observation(options, 0, directory / "calibration-off", provenance)
+        report["calibration"] = {"sample": pilot}
+        try:
+            calibration = calibrate_workload_epochs(pilot, target_s)
+        except (KeyError, ValueError) as exc:
+            report["status"] = "failed"
+            report["failed_observations"].append({"phase": "calibration", "error": str(exc)})
+            save()
+            print(f"Calibration failed: {exc}\nReport: {args.output}", flush=True)
+            return 1
+        report["calibration"].update(calibration)
+        training_epochs = calibration["training_epochs"]
+        print(f"Fixed work: {training_epochs} epochs in each arm; predicted OFF workload "
+              f"{calibration['predicted_off_workload_s']:.1f}s (target {target_s:g}s)", flush=True)
+        save()
     for scenario in ("none", "data-owner"):
-        if scenario not in (args.scenario or ("none", "data-owner")):
+        if scenario not in scenarios:
             continue
         for pair in range(1, args.repeats + 1):
             samples = {}
@@ -197,9 +266,15 @@ def run_fixed_r_workload_comparison(args, directory, provenance):
                            "mode": mode, "restart_scope": "full", "timeout_s": args.timeout_s,
                            "workload": str(args.workload.resolve()), "workload_args": args.workload_arg,
                            "comparison": "fixed-r", "owner_placement": args.owner_placement}
+                if training_epochs is not None:
+                    options["training_epochs"] = training_epochs
                 print(f"{scenario}: pair {pair}/{args.repeats}, Fixed-R {mode.upper()} ({args.timeout_s:g}s)", flush=True)
                 sample = run_observation(options, pair, directory / f"{scenario}-{pair}-{mode}", provenance)
                 sample["restart_scope"] = "full"
+                if training_epochs is not None and sample.get("training_epochs") != training_epochs:
+                    sample.update(status="failed", error="Workload did not use the calibrated epoch count")
+                if target_s is not None and sample.get("workload_s") is not None:
+                    sample["workload_vs_target_pct"] = 100 * (sample["workload_s"] / target_s - 1)
                 if scenario == "data-owner":
                     sample["no_failure_control_passed"] = (
                         pair in validated_control_pairs
@@ -226,6 +301,9 @@ def run_fixed_r_workload_comparison(args, directory, provenance):
                 save()
             try:
                 values = compare_fixed_r_pair(samples["off"], samples["on"])
+                if training_epochs is not None:
+                    values["training_epochs"] = training_epochs
+                    values["target_workload_s"] = target_s
                 report["pairs"].append({"scenario": scenario, "pair": pair, **values})
                 if scenario == "none":
                     validated_control_pairs.add(pair)
@@ -281,7 +359,21 @@ def main():
                         help="Script argument; use --workload-arg=--flag for flags")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-s", type=float, default=120)
+    parser.add_argument("--target-workload-s", type=float,
+                        help="Calibrate a no-failure OFF regression workload to approximately this duration, then run identical epochs in both modes")
     args = parser.parse_args()
+    if args.target_workload_s is not None:
+        regression = ROOT / "python/ray/train/examples/pytorch/torch_regression_example.py"
+        if (args.comparison != "fixed-r" or args.workload is None
+                or args.workload.resolve() != regression.resolve() or args.workload_arg):
+            parser.error("--target-workload-s requires --comparison fixed-r and the regression example without custom workload arguments")
+        if not math.isfinite(args.target_workload_s) or args.target_workload_s <= 0:
+            parser.error("--target-workload-s must be finite and positive")
+        if args.scenario and any(s != "none" for s in args.scenario):
+            parser.error("--target-workload-s measures overhead with --scenario none only")
+        if not math.isfinite(args.timeout_s) or args.timeout_s < args.target_workload_s + 30:
+            parser.error("Set --timeout-s at least 30 seconds above the workload target; allow extra time for ON overhead")
+        args.scenario = ["none"]
     if args.owner_placement != "default" and args.comparison != "fixed-r":
         parser.error("--owner-placement head requires --comparison fixed-r")
     if args.comparison == "fixed-r":

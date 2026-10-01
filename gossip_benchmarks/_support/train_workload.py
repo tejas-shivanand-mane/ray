@@ -487,6 +487,11 @@ def run_case(options, directory, diagnostics):
     script = Path(options["workload"]).resolve()
     script_args = list(options["workload_args"])
     regression = script == Path(__file__).resolve().parents[2] / "python/ray/train/examples/pytorch/torch_regression_example.py"
+    training_epochs = options.get("training_epochs")
+    if training_epochs is not None and (
+        not regression or type(training_epochs) is not int or training_epochs < 3
+    ):
+        raise ValueError("Epoch override requires the regression example and at least three epochs")
     if regression and not script_args:
         script_args = ["--num-workers", "2", "--data-path", prepare_regression_input(directory)]
     selective = options["restart_scope"] == "selective"
@@ -522,6 +527,12 @@ def run_case(options, directory, diagnostics):
             self.record(executor)
 
     def configure(trainer, train_loop_per_worker, **kwargs):
+        if regression:
+            loop_config = dict(kwargs.get("train_loop_config") or {})
+            if training_epochs is not None:
+                loop_config["epochs"] = training_epochs
+            diagnostics["training_epochs"] = loop_config.get("epochs", 3)
+            kwargs["train_loop_config"] = loop_config
         config = kwargs.get("torch_config") or TorchConfig()
         if type(config) is not TorchConfig or config.backend not in (None, "gloo"):
             raise ValueError("Workload harness requires ordinary CPU Gloo TorchTrainer")
@@ -623,7 +634,9 @@ def run_case(options, directory, diagnostics):
                     raise ValueError("ON completed without replaying the blocked shuffle task")
             if regression:
                 reports = diagnostics["reports"]
-                if [r["metrics"][0]["epoch"] for r in reports] != [1, 2, 3]:
+                if [r["metrics"][0]["epoch"] for r in reports] != list(
+                    range(1, diagnostics["training_epochs"] + 1)
+                ):
                     raise ValueError("Regression did not complete each epoch exactly once")
                 if any(m["resumed_from_epoch"] != (1 if inject else 0)
                        for r in reports[1:] for m in r["metrics"]):
