@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
+from types import SimpleNamespace
 import uuid
 
 import pyarrow as pa
@@ -21,6 +23,64 @@ from ray.data.context import DataContext
 
 def _table(values):
     return pa.table({"id": values})
+
+
+def _wait_for_coordinator(actor, old, *, restarted, timeout_s=60):
+    """ray.kill submits a request; it is not a death/restart barrier.
+
+    Observe a new Ray worker identity (not just a reusable OS PID), or a
+    permanent actor error if the restart budget is zero/exhausted. Never accept
+    a response from the old process or transient unavailability as completion.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Coordinator did not reach the requested fault state")
+        try:
+            identity = ray.get(actor.identity.remote(), timeout=remaining)
+        except ray.exceptions.ActorUnavailableError:
+            pass
+        except ray.exceptions.RayActorError:
+            if restarted:
+                raise  # Do not hide failed reconstruction or an exhausted budget.
+            return None
+        else:
+            if identity["worker_id"] != old["worker_id"]:
+                if not restarted:
+                    raise AssertionError("Coordinator restarted after its budget was exhausted")
+                assert identity["node_id"] == old["node_id"]
+                return identity
+        time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+def test_fault_barrier_ignores_old_and_transient_responses(monkeypatch, restarted):
+    old = {"worker_id": "old", "pid": 10, "node_id": "same"}
+    # Even a reused PID must not obscure the change of Ray worker identity.
+    new = {"worker_id": "new", "pid": 10, "node_id": "same"}
+    replies = iter([old, ray.exceptions.ActorUnavailableError("restarting", None),
+                    old, new if restarted else ray.exceptions.ActorDiedError()])
+
+    def get(*args, **kwargs):
+        value = next(replies)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(ray, "get", get)
+    monkeypatch.setattr(sys.modules[__name__], "time",
+                        SimpleNamespace(monotonic=time.monotonic, sleep=lambda _: None))
+    actor = SimpleNamespace(identity=SimpleNamespace(remote=lambda: None))
+    assert _wait_for_coordinator(actor, old, restarted=restarted) == (new if restarted else None)
+
+
+def test_fault_barrier_is_bounded(monkeypatch):
+    clock = iter([0, 61])
+    monkeypatch.setattr(sys.modules[__name__], "time",
+                        SimpleNamespace(monotonic=lambda: next(clock)))
+    with pytest.raises(TimeoutError, match="requested fault state"):
+        _wait_for_coordinator(None, {}, restarted=True)
 
 
 def test_replayed_prefix_and_ambiguous_reply():
@@ -132,19 +192,19 @@ def test_restart_checks_prefix_and_exhausts_budget(local_ray):
     ray.get(actor.get.remote(0, 1, 1, first[1][1]))
     ray.get(pending, timeout=60)
     ray.kill(actor, no_restart=False)
-    new = ray.get(actor.identity.remote(), timeout=60)
-    assert new["pid"] != old["pid"]
+    new = _wait_for_coordinator(actor, old, restarted=True)
     # The completed first reply remains readable without the old owner.
     assert pa.ipc.open_stream(first[0][0]).read_all()["id"].to_pylist() == [0, 1]
     # Replayed prefix validation is also covered against changed persisted input
     # below, using a new coordinator so the old cache cannot mask the change.
     ray.kill(actor, no_restart=False)
-    with pytest.raises(ray.exceptions.RayActorError):
-        ray.get(actor.identity.remote(), timeout=60)
+    _wait_for_coordinator(actor, new, restarted=False)
     other = _dataset(local_ray).streaming_split(2, equal=True)[0]._coord_actor
+    old = ray.get(other.identity.remote())
     _, prefix = ray.get(other.get.remote(0, 0, 0, EMPTY_DIGEST))
     pq.write_table(_table([999] + list(range(1, 16))), path)
     ray.kill(other, no_restart=False)
+    _wait_for_coordinator(other, old, restarted=True)
     with pytest.raises(ray.exceptions.RayTaskError, match="prefix mismatch"):
         ray.get(other.get.remote(0, 0, 1, prefix), timeout=60)
     ray.kill(other, no_restart=True)
@@ -208,12 +268,7 @@ def _learning_loop(config):
                     actor = shard._coord_actor
                     old = ray.get(actor.identity.remote())
                     ray.kill(actor, no_restart=False)
-                    if config["restarts"]:
-                        new = ray.get(actor.identity.remote(), timeout=60)
-                        assert old["pid"] != new["pid"]
-                        assert old["node_id"] == new["node_id"]
-                    else:
-                        new = None
+                    new = _wait_for_coordinator(actor, old, restarted=bool(config["restarts"]))
                     (directory / "fault.json").write_text(json.dumps({"old": old, "new": new}))
                 dist.barrier()
                 assert _state_digest(base, optimizer) == before

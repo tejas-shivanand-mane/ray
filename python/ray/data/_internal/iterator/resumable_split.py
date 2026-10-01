@@ -218,7 +218,9 @@ class ReplayCoordinator:
             self.shutdown_executor()
 
     def identity(self):
-        return {"pid": os.getpid(), "node_id": ray.get_runtime_context().get_node_id()}
+        context = ray.get_runtime_context()
+        return {"pid": os.getpid(), "node_id": context.get_node_id(),
+                "worker_id": context.get_worker_id()}
 
 
 class ResumableSplitIterator(StreamSplitDataIterator):
