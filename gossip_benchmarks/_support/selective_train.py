@@ -66,6 +66,7 @@ def run_case(options, directory, diagnostics):
     if Version(xgb.__version__) < Version("2.1.0"):
         raise ValueError("Boundary prototype requires XGBoost >= 2.1.0")
     policy = options["restart_scope"]
+    active = options.get("failure_timing", "boundary") == "active"
     replacement_ranks(policy, 0, 2)  # Validate before starting a cluster.
     enabled = options["mode"] == "on"
     input_path = directory / "input"
@@ -77,6 +78,12 @@ def run_case(options, directory, diagnostics):
                        worker_node_failures=[], failure_rounds=[3, 6],
                        recovery_scope="checkpoint_boundary_with_finalized_collectives",
                        implementation="experimental_controller_not_Ray_Train_retry")
+    diagnostics["failure_timing"] = "active" if active else "boundary"
+    diagnostics["active_attempts"] = []
+    if active:
+        diagnostics["recovery_scope"] = "callback_allreduce_after_one_uncommitted_round"
+        diagnostics["failure_rounds"] = [4, 7]
+        diagnostics["checkpoint_rounds"] = [3, 6]
     args = argparse.Namespace(local_executor_nodes=4, local_object_store_mb=512,
                               owner_node_id=None, executor_node_ids=None,
                               producer_concurrency=None, recovery_timeout_s=30)
@@ -102,7 +109,12 @@ def run_case(options, directory, diagnostics):
         base_context.custom_execution_callback_classes = []
         if enabled:
             get_config(base_context)
-        worker_cls = ray.remote(num_cpus=1, max_restarts=0, max_task_retries=0)(BoundaryWorker)
+        implementation = BoundaryWorker
+        if active:
+            from ray.experimental.recovery._xgboost_active import ActiveWorker
+            from active_train import interrupt_collective
+            implementation = ActiveWorker
+        worker_cls = ray.remote(num_cpus=1, max_restarts=0, max_task_retries=0)(implementation)
         actors = [None, None]
         placements = list(case.executor_node_ids[:2])
         dead = set()
@@ -144,7 +156,8 @@ def run_case(options, directory, diagnostics):
             saved_models = []
             start = 0
             for generation, end in enumerate((3, 6, 10), 1):
-                results = collective_segment(actors, checkpoint, start, end, generation, remaining())
+                collective_generation = 2 * generation - 1 if active else generation
+                results = collective_segment(actors, checkpoint, start, end, collective_generation, remaining())
                 current = [r["identity"] for r in results]
                 if current != diagnostics["groups"][-1]:
                     raise ValueError("Worker identity or cached data changed inside a segment")
@@ -170,12 +183,19 @@ def run_case(options, directory, diagnostics):
                 saved_models.append((end, saved))
                 if end == 10:
                     break
-                # All worker RPCs and the tracker have finalized. Failures here
-                # cannot leave a healthy rank blocked in the previous collective.
                 target = current[0]
-                request_ns = time.monotonic_ns()
                 args.recovery_timeout_s = remaining()
-                failure = crash(target["node_id"], target["pid"])
+                if active:
+                    evidence = {}
+                    diagnostics["active_attempts"].append(evidence)
+                    request_ns, failure = interrupt_collective(
+                        actors, current, path.read_bytes(), end, collective_generation + 1,
+                        directory / f"interrupted-{end}", crash, policy, remaining(), evidence)
+                else:
+                    # Boundary mode injects only after every worker and tracker
+                    # has finalized. Active mode starts another real segment.
+                    request_ns = time.monotonic_ns()
+                    failure = crash(target["node_id"], target["pid"])
                 if (not failure["all_node_processes_exited"] or not failure["gcs_marked_dead"]
                         or target["pid"] not in failure["node_process_pids"]):
                     raise ValueError("Requested worker-node process loss was not established")
@@ -184,10 +204,12 @@ def run_case(options, directory, diagnostics):
                     raise ValueError("Unrequested node loss during replacement")
                 diagnostics["worker_node_failures"].append(failure)
                 recovery = {"request_ns": request_ns, "checkpoint_round": end, "failed_rank": 0,
-                            "failed_node_id": target["node_id"], "collective_finalized_before_failure": True}
+                            "failed_node_id": target["node_id"], "collective_finalized_before_failure": not active}
+                if active:
+                    recovery.update(interrupted_round=end + 1, rolled_back_rounds=1)
                 diagnostics["recoveries"].append(recovery)
                 replace = replacement_ranks(policy, 0, 2)
-                if policy == "full":
+                if policy == "full" and not active:
                     ray.kill(actors[1], no_restart=True)
                 placements[0] = next(n for n in case.executor_node_ids if n not in dead and n != placements[1])
                 after = list(current)

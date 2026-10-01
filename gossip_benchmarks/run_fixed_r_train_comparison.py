@@ -179,7 +179,8 @@ def run_observation(options, pair, directory, provenance):
             partial = json.loads((directory / "case.json").read_text())
             for key in ("observation", "provenance", "fault", "faults", "head_replacement",
                         "worker_node_failure", "worker_node_failures", "native_settings",
-                        "groups", "segments", "recoveries", "ingestion", "restart_scope", "implementation"):
+                        "groups", "segments", "recoveries", "ingestion", "restart_scope", "implementation",
+                        "active_attempts", "failure_timing", "recovery_scope"):
                 if key in partial:
                     sample[key] = partial[key]
     finally:
@@ -191,6 +192,16 @@ def run_observation(options, pair, directory, provenance):
             log.seek(0, os.SEEK_END)
             log.seek(max(0, log.tell() - 16384))
             sample["log_tail"] = log.read().decode(errors="replace")
+    if sample["status"] != "passed" and options.get("failure_timing") == "active":
+        # Recover worker evidence even if a blocked native cleanup required the
+        # parent to kill the child before it could write case.json.
+        sample["active_worker_events"] = []
+        for path in sorted(directory.glob("interrupted-*/*.json")):
+            try:
+                sample["active_worker_events"].append({"path": str(path.relative_to(directory)),
+                                                        "event": json.loads(path.read_text())})
+            except (OSError, ValueError) as exc:
+                sample["active_worker_events"].append({"path": str(path), "read_error": str(exc)})
     sample["observation_wall_s"] = time.monotonic() - started
     write_json(directory / "sample.json", sample)
     return sample

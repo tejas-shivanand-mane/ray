@@ -1,8 +1,9 @@
-"""Compare full and selective worker replacement at XGBoost checkpoint boundaries.
+"""Compare full and selective XGBoost worker replacement.
 
 This experimental controller is separate from Ray Train's ordinary retry path.
 Both policies use the same Fixed-R setting (ON by default), two fixed data
-partitions, three distributed segments, and node failures at rounds 3 and 6.
+partitions and three committed segments. Faults occur at checkpoint boundaries
+or in an extra callback allreduce after an uncommitted round (--failure-timing).
 """
 
 import argparse
@@ -26,6 +27,8 @@ def compare_pair(full, selective):
             raise ValueError(f"Cannot compare different {key}")
     if full["native_settings"] != selective["native_settings"]:
         raise ValueError("Cannot compare different protection settings")
+    if full.get("failure_timing", "boundary") != selective.get("failure_timing", "boundary"):
+        raise ValueError("Cannot compare different fault timing")
     a = np.load(Path(full["directory"]) / "predictions.npy", allow_pickle=False)
     b = np.load(Path(selective["directory"]) / "predictions.npy", allow_pickle=False)
     np.testing.assert_allclose(b, a, rtol=1e-6, atol=1e-7)
@@ -46,6 +49,8 @@ def main():
     parser.add_argument("--mode", choices=("off", "on"), default="on",
                         help="Same native/Data protection in both policies; not the comparison axis")
     parser.add_argument("--timeout-s", type=float, default=120)
+    parser.add_argument("--failure-timing", choices=("boundary", "active"), default="boundary",
+                        help="Active: interrupt a real callback allreduce after one uncommitted round")
     parser.add_argument("--repeats", type=int, default=1)
     args = parser.parse_args()
     if sys.platform != "linux" or args.repeats < 1 or not math.isfinite(args.timeout_s) or args.timeout_s <= 0:
@@ -53,7 +58,7 @@ def main():
     directory = args.result_directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
     options = {"scenario": "worker-node", "mode": args.mode, "timeout_s": args.timeout_s,
-               "training_strategy": "checkpoint-boundary"}
+               "training_strategy": "checkpoint-boundary", "failure_timing": args.failure_timing}
     provenance = source_provenance(ROOT)
     report = {"profile": "experimental-selective-xgboost-checkpoint-boundary", "status": "running",
               "source_provenance": provenance, "settings": options, "samples": [], "pairs": [],
@@ -67,6 +72,14 @@ def main():
               "measurement_scope": "instrumented segments, ingestion, checkpointing and recovery; excludes cluster startup",
               "prediction_scope": "both surviving worker models evaluate all rows; this is an integrity probe, not the original inference pipeline",
               "failure_rounds": [3, 6], "target_rounds": 10, "failed_observations": []}
+    if args.failure_timing == "active":
+        report.update(profile="experimental-selective-xgboost-active-collective",
+                      scope="two logical node losses during callback allreduces; shared local storage survives",
+                      failure_rounds=[4, 7], checkpoint_rounds=[3, 6])
+        report["limitations"][0] = (
+            "gated real CPU allreduce inside a training callback, not random failures in native tree building")
+        report["limitations"][-1] = (
+            "healthy input retained; speculative model discarded and committed checkpoint restored")
 
     def save():
         for path in {args.output.resolve(), directory / "comparison.json"}:
