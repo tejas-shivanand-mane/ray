@@ -3,6 +3,10 @@
 Replot a copied report without its original result directories:
   python gossip_benchmarks/plot_train_failure_progress.py report.json --output progress.png
 No training is run by this script. Curves are individual trials, not averages.
+Only the head experiment has measured Fixed-R OFF/ON arms. The worker
+experiment disables Fixed-R in both arms and is therefore excluded here.
+Both displayed arms use standard full-group Train retry; this is not a
+measurement of Fixed-R combined with selective worker retry.
 """
 
 import argparse
@@ -63,27 +67,25 @@ def plot_report(report, output):
     if report.get("profile") != "torch-failure-progress":
         raise ValueError("Expected a --comparison failures report")
     panels = [
-        ("worker", "none", "Worker comparison: no failure"),
-        ("worker", "worker", "Worker process killed after epoch 1"),
-        ("head", "none", "Head ownership comparison: no failure"),
+        ("head", "none", "No failure: integration overhead"),
         ("head", "data-owner", "Head/owner processes killed during preprocessing"),
     ]
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharex=True, sharey=True)
     try:
         for ax, (experiment, scenario, title) in zip(axes.flat, panels):
             samples = [s for s in report["experiments"][experiment]["samples"]
                        if s["scenario"] == scenario]
             if not samples:
                 raise ValueError(f"Missing samples for {experiment}/{scenario}")
+            if ({s["mode"] for s in samples} != {"off", "on"}
+                    or any(s["restart_scope"] != "full" for s in samples)):
+                raise ValueError("Expected measured Fixed-R OFF/ON with full retry in both arms")
             labels = set()
             for sample in samples:
-                enhanced = (sample["restart_scope"] == "selective" if experiment == "worker"
-                            else sample["mode"] == "on")
+                enhanced = sample["mode"] == "on"
                 color = "#0072B2" if enhanced else "#D55E00"
-                label = ("Selective retry (Fixed-R OFF)" if enhanced else "Ordinary Ray: full retry") if experiment == "worker" else (
-                    "Fixed-R ON: full retry" if enhanced else "Ordinary Ray: matched head owner")
-                arm_key = "restart_scope" if experiment == "worker" else "mode"
-                arm = [s for s in samples if s[arm_key] == sample[arm_key]]
+                label = "Our recovery (Fixed-R ON)" if enhanced else "Ordinary Ray (Fixed-R OFF)"
+                arm = [s for s in samples if s["mode"] == sample["mode"]]
                 completed = sum(s["status"] == "passed" for s in arm)
                 label += f" — {completed}/{len(arm)} completed"
                 if not sample.get("workload_started_ns") and sample.get("status") != "passed":
@@ -110,19 +112,20 @@ def plot_report(report, output):
             ax.grid(alpha=0.2)
             ax.legend(loc="upper left", fontsize=8)
         status = "validated" if report["status"] == "passed" else "VALIDATION FAILED — inspect report"
-        fig.suptitle(f"PyTorch workload progress through failures · {status}", fontsize=15)
+        fig.suptitle(f"Ordinary Ray versus Fixed-R recovery · {status}", fontsize=15)
         fig.legend(handles=[
             Line2D([], [], color="0.4", linestyle=":", label="Failure injection (per run)"),
             Line2D([], [], color="0.4", marker="o", linestyle="none", label="Completed workload"),
             Line2D([], [], color="0.4", marker="x", linestyle="none", label="Failed / censored"),
-        ], loc="lower center", bbox_to_anchor=(0.5, 0.075), ncol=3, frameon=False)
+        ], loc="lower center", bbox_to_anchor=(0.5, 0.13), ncol=3, frameon=False)
         fig.text(0.5, 0.025,
-                 "Each line is one trial; both worker policies allow checkpoint recovery. Head ownership is explicitly matched.\n"
+                 "Both arms use standard full-group Train retry and explicitly matched head ownership.\n"
                  "Head loss precedes training; external head replacement, GCS disk and driver survive on one physical machine.\n"
+                 "Fixed-R-ON worker-failure measurements are unavailable; the separate retry-only comparison is omitted.\n"
                  "Small regression workload; checkpoint/report costs included. "
                  + ("One pair per case: preliminary evidence." if report.get("preliminary") else "All repetitions shown; no averaged trajectory."),
                  ha="center", fontsize=9)
-        fig.tight_layout(rect=(0, 0.13, 1, 0.95))
+        fig.tight_layout(rect=(0, 0.23, 1, 0.93))
         output = Path(output).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         paths = [output.with_suffix(suffix) for suffix in (".png", ".pdf")]
