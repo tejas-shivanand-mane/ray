@@ -9,6 +9,11 @@ import sys
 
 
 SOURCE_PATHS = (
+    "gossip_benchmarks/run_fashion_training_comparison.py",
+    "gossip_benchmarks/plot_fashion_training.py",
+    "gossip_benchmarks/validate_fashion_training.sh",
+    "gossip_benchmarks/workloads/fashion_mnist.py",
+    "gossip_benchmarks/_support/fashion_comparison.py",
     "gossip_benchmarks/plot_train_failure_progress.py",
     "gossip_benchmarks/run_train_retry_comparison.py",
     "gossip_benchmarks/validate_train_retry.sh",
