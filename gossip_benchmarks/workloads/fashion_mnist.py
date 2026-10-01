@@ -25,9 +25,9 @@ from ray.train import Checkpoint, DataConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
 
 
-def make_model():
+def make_model(input_features=784):
     return nn.Sequential(
-        nn.Linear(784, 256), nn.ReLU(), nn.Linear(256, 128), nn.ReLU(),
+        nn.Linear(input_features, 256), nn.ReLU(), nn.Linear(256, 128), nn.ReLU(),
         nn.Linear(128, 10),
     )
 
@@ -66,7 +66,7 @@ def normalize(batch):
 def train_loop(config):
     torch.manual_seed(0)
     torch.set_num_threads(1)
-    model = make_model()
+    model = make_model(config.get("input_features", 784))
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     start_epoch = 0
     checkpoint = train.get_checkpoint()

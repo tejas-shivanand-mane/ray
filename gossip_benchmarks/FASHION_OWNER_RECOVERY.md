@@ -1,5 +1,9 @@
 # Fashion-MNIST: owner loss during preprocessing
 
+For an actual end-to-end restart baseline and optional substantial image feature
+extraction, see [FASHION_RESTART_COMPARISON.md](FASHION_RESTART_COMPARISON.md).
+The experiment below measures recovery coverage without whole-application retry.
+
 This experiment targets the ownership failure that ordinary checkpoint-based
 Train recovery does not address. Both arms process the official 60,000/10,000
 Fashion-MNIST split, then train the existing CPU MLP for the same fixed epochs.

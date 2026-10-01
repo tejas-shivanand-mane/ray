@@ -91,7 +91,9 @@ def child_case(path):
             if key.startswith("RAY_RECOVERY_") or key in ("RAY_EXPERIMENTAL_RECOVERY", "RAY_DATA_EXECUTION_CALLBACKS", "RAY_ADDRESS"):
                 os.environ.pop(key)
         import ray
-        if options.get("training_strategy") == "ray-train-workload":
+        if options.get("training_strategy") == "ray-train-workload-restart":
+            from train_restart import run_case
+        elif options.get("training_strategy") == "ray-train-workload":
             from train_workload import run_case
         elif options.get("training_strategy") == "ray-train-selective":
             from train_retry import run_case
@@ -159,6 +161,7 @@ def run_observation(options, pair, directory, provenance):
     }
     process = None
     started = time.monotonic()
+    sample["observation_started_ns"] = time.monotonic_ns()
     try:
         with (directory / "case.log").open("wb") as log:
             process = subprocess.Popen(
@@ -221,7 +224,27 @@ def run_observation(options, pair, directory, provenance):
                 (json.loads(p.read_text()) for p in directory.glob("map-computed-*.json")),
                 key=lambda event: event["index"],
             )
+    if options.get("training_strategy") == "ray-train-workload-restart":
+        snapshot = directory / "restart-attempts.json"
+        if snapshot.exists():
+            sample.update(json.loads(snapshot.read_text()))
+            for attempt in sample["attempts"]:
+                path = Path(attempt["directory"])
+                for filename in ("progress.json", "timeline.json"):
+                    if (path / filename).exists():
+                        attempt.update(json.loads((path / filename).read_text()))
+                if (path / "feature-progress.json").exists():
+                    attempt["feature_progress"] = json.loads((path / "feature-progress.json").read_text())
+                if (path / "data-owner-fault.json").exists():
+                    attempt["data_owner_fault"] = json.loads((path / "data-owner-fault.json").read_text())
+                attempt["map_progress"] = sorted(
+                    (json.loads(p.read_text()) for p in path.glob("map-computed-*.json")),
+                    key=lambda event: event["index"],
+                )
+                if attempt["status"] == "running":
+                    attempt.update(status="failed", timeout=bool(sample.get("timeout")))
     sample["observation_wall_s"] = time.monotonic() - started
+    sample["observation_finished_ns"] = time.monotonic_ns()
     write_json(directory / "sample.json", sample)
     return sample
 

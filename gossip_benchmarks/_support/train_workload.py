@@ -432,7 +432,7 @@ def matched_shuffle_ownership(directory, enabled, owner_node_id, executor_ids, d
 
 
 def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, workload,
-                     matched_owner=False):
+                     matched_owner=False, timeout_s=60):
     """Kill/replace head processes after a real shuffle task reaches its gate.
 
     The default OFF arm retains coordinator ownership. With matched_owner,
@@ -486,7 +486,7 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, 
         return stream
 
     def inject(future):
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + timeout_s
         try:
             while not (blocked.exists()
                        and (not enabled or (enrolled.exists() and batch_ready.exists()))
@@ -721,7 +721,7 @@ def validate(directory, selective, inject, node_scenario=None):
     return {**timeline, "starts": starts, "recoveries": recovery}
 
 
-def run_case(options, directory, diagnostics):
+def run_case(options, directory, diagnostics, existing_cluster=None):
     import torch
     from ray.data import DataContext
     from ray.data.context import ShuffleStrategy
@@ -736,7 +736,16 @@ def run_case(options, directory, diagnostics):
     script = Path(options["workload"]).resolve()
     script_args = list(options["workload_args"])
     regression = script == Path(__file__).resolve().parents[2] / "python/ray/train/examples/pytorch/torch_regression_example.py"
-    fashion = script == Path(__file__).resolve().parents[1] / "workloads/fashion_mnist.py"
+    workloads = Path(__file__).resolve().parents[1] / "workloads"
+    fashion = script in (workloads / "fashion_mnist.py", workloads / "fashion_features.py")
+    features = script == workloads / "fashion_features.py"
+    if features:
+        from fashion_comparison import feature_identity
+        observed = feature_identity(Path(options["feature_directory"]))
+        if observed != options["feature_identity"]:
+            raise ValueError("Feature weights changed before observation")
+        diagnostics["feature_identity"] = observed
+        script_args += ["--validation-output", str(directory / "validation-features.npz")]
     training_epochs = options.get("training_epochs")
     if training_epochs is not None and (
         not (regression or fashion) or type(training_epochs) is not int or training_epochs < 3
@@ -788,6 +797,7 @@ def run_case(options, directory, diagnostics):
     originals = TorchTrainer.__init__, TorchTrainer.fit, ray.init, sys.argv[:], sys.path[:]
     timings = []
     workload_started = None
+    context, original_callbacks = None, None
 
     class ExchangeObserver(ExecutionCallback):
         def record(self, executor):
@@ -842,9 +852,11 @@ def run_case(options, directory, diagnostics):
 
     try:
         ray.cloudpickle.register_pickle_by_value(sys.modules[__name__])
-        with local_head_failure_cluster(args, coordinator_cpus=0, recovery_enabled=enabled,
-                                        allow_head_failure=owner_failure or node_scenario == "head-node",
-                                        include_worker_failure=True) as (case_args, crash_head, crash_worker):
+        cluster_context = (nullcontext(existing_cluster) if existing_cluster is not None else
+                           local_head_failure_cluster(args, coordinator_cpus=0, recovery_enabled=enabled,
+                                                      allow_head_failure=owner_failure or node_scenario == "head-node",
+                                                      include_worker_failure=True))
+        with cluster_context as (case_args, crash_head, crash_worker):
             diagnostics["selected_owner_node_id"] = case_args.owner_node_id
             native = ray._private.state.state.get_system_config()
             diagnostics["native_settings"] = {key: native.get(key) for key in system_config()}
@@ -852,6 +864,7 @@ def run_case(options, directory, diagnostics):
                    for k, v in system_config().items()):
                 raise ValueError("Native Fixed-R settings do not match requested mode")
             context = DataContext.get_current()
+            original_callbacks = context.custom_execution_callback_classes
             clear_config(context)
             context.enable_fixed_r_task_recovery = enabled
             context.fixed_r_task_recovery_output_mode = "streaming"
@@ -890,7 +903,7 @@ def run_case(options, directory, diagnostics):
                 if owner_failure:
                     data_owner_fault(directory, enabled, crash_head,
                                      case_args.executor_node_ids, diagnostics, workload,
-                                     matched_owner=matched_owner)
+                                     matched_owner=matched_owner, timeout_s=options["timeout_s"])
                 elif node_scenario:
                     training_node_fault(directory, node_scenario, report_number,
                                         case_args.executor_node_ids, case_args.owner_node_id,
@@ -913,6 +926,8 @@ def run_case(options, directory, diagnostics):
                 ]
                 if ordered_plan is not None:
                     diagnostics["map_progress"] = map_progress(directory)
+                if features and (directory / "feature-progress.json").exists():
+                    diagnostics["feature_progress"] = json.loads((directory / "feature-progress.json").read_text())
             if ordered_plan is not None and [e["index"] for e in diagnostics["map_progress"]] != list(range(4)):
                 raise ValueError("Workload did not compute all four controlled shuffle maps")
             if len(timings) != 1:
@@ -957,5 +972,7 @@ def run_case(options, directory, diagnostics):
                 validate_fashion(directory, options, diagnostics)
             return {"validation_status": "passed", "training_s": timings[0]}
     finally:
+        if context is not None:
+            context.custom_execution_callback_classes = original_callbacks
         TorchTrainer.__init__, TorchTrainer.fit, ray.init, sys.argv, sys.path = originals
         ray.cloudpickle.unregister_pickle_by_value(sys.modules[__name__])

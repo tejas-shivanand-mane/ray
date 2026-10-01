@@ -30,6 +30,17 @@ def input_identity(directory):
     return manifest
 
 
+def feature_identity(directory):
+    manifest = json.loads((directory / "manifest.json").read_text())
+    path = directory / "mobilenet-v3-small.pt"
+    if (manifest.get("model") != "MobileNet_V3_Small_Weights.IMAGENET1K_V1"
+            or manifest.get("features") != 576
+            or manifest.get("bytes") != path.stat().st_size
+            or manifest.get("sha256") != hashlib.sha256(path.read_bytes()).hexdigest()):
+        raise ValueError("Prepare and verify MobileNet feature weights first")
+    return manifest
+
+
 def validate_fashion(directory, options, diagnostics):
     import pyarrow.parquet as pq
     import torch
@@ -64,13 +75,24 @@ def validate_fashion(directory, options, diagnostics):
     if state["epoch"] != epochs or not state["optimizer"]["state"]:
         raise ValueError("Final checkpoint lacks model progress or Adam state")
     application = runpy.run_path(options["workload"], run_name="fashion_probe")
-    model = application["make_model"]()
+    features = options.get("feature_directory") is not None
+    model = application["make_model"](576) if features else application["make_model"]()
     model.load_state_dict(state["model"])
     model.eval()
     torch.set_num_threads(1)
     table = pq.read_table(Path(options["data_directory"]) / "test.parquet")
-    pixels = np.asarray(table["image"].to_pylist(), dtype=np.float32) / 255.0
     labels = np.asarray(table["label"].to_pylist(), dtype=np.int64)
+    if features:
+        if feature_identity(Path(options["feature_directory"])) != diagnostics["feature_identity"]:
+            raise ValueError("Feature weights changed during observation")
+        with np.load(directory / "validation-features.npz", allow_pickle=False) as arrays:
+            pixels = arrays["x"]
+            if pixels.shape != (10000, 576) or not np.array_equal(arrays["y"], labels):
+                raise ValueError("Invalid exported full validation features or labels")
+        if not np.isfinite(pixels).all():
+            raise ValueError("Nonfinite validation features")
+    else:
+        pixels = np.asarray(table["image"].to_pylist(), dtype=np.float32) / 255.0
     with torch.no_grad():
         logits = np.concatenate([model(torch.from_numpy(pixels[start:start + 512])).numpy()
                                  for start in range(0, len(pixels), 512)])
