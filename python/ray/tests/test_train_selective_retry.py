@@ -336,7 +336,8 @@ def test_benchmark_payload_does_not_require_support_module(monkeypatch, tmp_path
             from ray.data._internal.planner.exchange.streaming_recovery import _map_outputs
 
             payload += (module.owner_gated_map(ShuffleTaskSpec.map, str(tmp_path), False),
-                        module.owner_gated_map(_map_outputs, str(tmp_path), True))
+                        module.owner_gated_map(_map_outputs, str(tmp_path), True),
+                        module.OrdinaryShuffleOwner)
         path.write_bytes(ray.cloudpickle.dumps(payload))
         subprocess.run([sys.executable, "-c", '''
 import importlib.abc, sys
@@ -348,7 +349,7 @@ class Block(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Block())
 with open(sys.argv[1], "rb") as f:
     payload = ray.cloudpickle.load(f)
-assert len(payload) in (4, 6)
+assert len(payload) in (4, 7)
 ''', str(path)], check=True, cwd=tmp_path, timeout=20)
     finally:
         ray.cloudpickle.unregister_pickle_by_value(module)
@@ -414,8 +415,9 @@ def fixed_r_workload_pair(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("replacement_fails", [False, True])
+@pytest.mark.parametrize("matched_owner", [False, True])
 def test_owner_fault_runs_replacement_on_main_thread(
-    monkeypatch, tmp_path, enabled, replacement_fails,
+    monkeypatch, tmp_path, enabled, replacement_fails, matched_owner,
 ):
     import importlib
     from threading import Event, current_thread, main_thread
@@ -449,13 +451,17 @@ def test_owner_fault_runs_replacement_on_main_thread(
         crashed.set()
         if replacement_fails:
             raise RuntimeError("replacement failed")
-        return {"original_head_processes_exited": True}
+        return {"original_head_processes_exited": True, "original_head_node_id": "head"}
 
     def workload():
         assert current_thread() is not main_thread()
         module.write_record(tmp_path / "data-owner-blocked.json", {
             "task_id": "target", "node_id": "executor", "blocked_ns": 1,
         })
+        if matched_owner:
+            module.write_record(tmp_path / "shuffle-owner.json", {
+                "task_id": "target", "owner_node_id": "head",
+            })
         if enabled:
             exchange.submit_stream(None, None, (NS(_map_args=[None, None, True]), 0, None, 4))
             assert not crashed.wait(.05), "Owner died while further submissions could be in flight"
@@ -463,21 +469,27 @@ def test_owner_fault_runs_replacement_on_main_thread(
             task.stream = stream
             task.on_data_ready()
         else:
+            if matched_owner:
+                assert not crashed.wait(.05), "Owner died before ordinary submissions settled"
+                (tmp_path / "data-owner-batch-ready").touch()
             module.wait_for_owner_fault(tmp_path, 0)
             calls.append("consume")
         return "finished"
 
     if replacement_fails:
         with pytest.raises(RuntimeError, match="replacement failed"):
-            module.data_owner_fault(tmp_path, enabled, crash, ("executor",), diagnostics, workload)
+            module.data_owner_fault(tmp_path, enabled, crash, ("executor",), diagnostics, workload,
+                                    matched_owner=matched_owner)
         assert diagnostics["data_owner_fault"]["error"] == "replacement failed"
     else:
         assert module.data_owner_fault(
             tmp_path, enabled, crash, ("executor",), diagnostics, workload,
+            matched_owner=matched_owner,
         ) == "finished"
     assert calls == ["crash", "consume"]
     assert diagnostics["data_owner_fault"]["completed"] is not replacement_fails
     assert diagnostics["data_owner_fault"]["fixed_r_submission_batch_settled"] is enabled
+    assert diagnostics["data_owner_fault"]["submission_batch_settled"] is (enabled or matched_owner)
     assert (ShuffleTaskSpec.map, exchange._map_outputs, exchange.submit_stream) == originals
     assert "on_data_ready" not in Task.__dict__
 
@@ -507,6 +519,91 @@ def test_owner_fault_preserves_early_workload_error(monkeypatch, tmp_path, fails
     assert (tmp_path / "release-data-owner").exists()
 
 
+@pytest.mark.parametrize("owner_lost", [False, True])
+def test_ordinary_shuffle_observes_actual_owner_and_loss(monkeypatch, tmp_path, owner_lost):
+    import importlib
+    from ray.core.generated.common_pb2 import Address
+    from ray.data._internal.planner.exchange import pull_based_shuffle_task_scheduler as pull
+    from ray.data._internal.planner.exchange.shuffle_task_spec import ShuffleTaskSpec
+    from ray.data._internal.progress.base_progress import BaseProgressBar
+
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.syspath_prepend(str(root / "gossip_benchmarks/_support"))
+    module = importlib.import_module("train_workload")
+    address = Address(node_id=b"head", worker_id=b"owner").SerializeToString()
+    ref = NS(hex=lambda: "metadata", task_id=lambda: NS(hex=lambda: "task"))
+    refs, calls, diagnostics = [object(), ref], [], {}
+    loss = module.ray.exceptions.OwnerDiedError("metadata", address, "test")
+
+    class Producer:
+        def options(self, **options):
+            calls.append(options)
+            return self
+
+        def remote(self, *args):
+            calls.append(args)
+            return refs
+
+    producer = Producer()
+    real_owner = module.OrdinaryShuffleOwner()
+    owner = NS(__ray_ready__=NS(remote=lambda: None),
+               submit=NS(remote=real_owner.submit))
+
+    def remote(**options):
+        assert options == {"num_cpus": 0, "max_restarts": 0, "max_task_retries": 0}
+        def wrap(cls):
+            assert cls is module.OrdinaryShuffleOwner
+            def placed(**options):
+                assert options["scheduling_strategy"].node_id == b"head".hex()
+                return NS(remote=lambda: owner)
+            return NS(options=placed)
+        return wrap
+
+    def get(value, **kwargs):
+        if value is ref:
+            assert owner_lost
+            raise loss
+        return value
+
+    def fetch(bar, values):
+        assert values == [ref]
+        if owner_lost:
+            raise loss
+        return ["metadata-value"]
+
+    monkeypatch.setattr(pull, "cached_remote_fn", lambda *a, **kw: producer)
+    monkeypatch.setattr(module.ray, "remote", remote)
+    monkeypatch.setattr(module.ray, "get", get)
+    monkeypatch.setattr(module.ray, "kill", lambda actor, **kw: calls.append("retired"))
+    monkeypatch.setattr(module.ray._private.worker, "global_worker", NS(core_worker=NS(
+        get_owner_address=lambda value: address if value is ref else pytest.fail("wrong ref"))))
+    monkeypatch.setattr(BaseProgressBar, "fetch_until_complete", fetch)
+    if owner_lost:
+        (tmp_path / "release-data-owner").touch()
+    with module.matched_shuffle_ownership(
+        tmp_path, False, b"head".hex(), ("executor",), diagnostics, owner_lost,
+    ):
+        mapper = pull.cached_remote_fn(ShuffleTaskSpec.map).options(num_returns=2)
+        args = (0, object(), 1, None, None, True, 0)
+        assert mapper.remote(*args) is refs
+        assert real_owner.refs is refs
+        assert calls[0]["scheduling_strategy"].node_id == "executor"
+        assert calls[0]["num_returns"] == 2 and calls[0]["max_retries"] == 1
+        assert calls[1] == args
+        if owner_lost:
+            with pytest.raises(module.ray.exceptions.OwnerDiedError):
+                BaseProgressBar.fetch_until_complete(None, [ref])
+            assert diagnostics["ordinary_owner_loss"]["object_ref_hex"] == "metadata"
+            assert diagnostics["ordinary_owner_loss"]["owner_node_id"] == b"head".hex()
+        else:
+            assert BaseProgressBar.fetch_until_complete(None, [ref]) == ["metadata-value"]
+            assert "ordinary_owner_loss" not in diagnostics
+    assert diagnostics["shuffle_owner"]["owner_node_id"] == b"head".hex()
+    assert diagnostics["shuffle_owner"]["task_id"] == "task"
+    assert calls[-1] == "retired"
+    assert BaseProgressBar.fetch_until_complete is fetch
+
+
 def test_fixed_r_comparison_records_surviving_baseline(fixed_r_workload_pair):
     module, (off, on) = fixed_r_workload_pair
     result = module.compare_fixed_r_pair(off, on)
@@ -534,3 +631,109 @@ def test_fixed_r_comparison_rejects_inadequate_evidence(fixed_r_workload_pair, i
         np.save(Path(on["directory"]) / "predictions.npy", np.array([99., 2.]))
     with pytest.raises((ValueError, AssertionError)):
         module.compare_fixed_r_pair(off, on)
+
+
+@pytest.fixture
+def matched_owner_pair(fixed_r_workload_pair):
+    module, (off, on) = fixed_r_workload_pair
+    for sample in (off, on):
+        owner = {"task_id": "target", "owner_node_id": "head-" + sample["mode"],
+                 "owner_worker_id": "worker", "recorded_ns": 1}
+        if sample is off:
+            owner["object_ref_hex"] = "target-metadata"
+        sample.update(owner_placement="head", selected_owner_node_id=owner["owner_node_id"],
+                      shuffle_owner=owner, no_failure_control_passed=True,
+                      matches_no_failure_predictions=True)
+        sample["data_owner_fault"].update(ownership=owner.copy(), submission_batch_settled=True,
+                                          replacement_ready_ns=3)
+        sample["data_owner_fault"]["head_replacement"]["original_head_node_id"] = owner["owner_node_id"]
+    off.update(status="failed", validation_status="failed", workload_completed=False,
+               ordinary_owner_loss={"error_type": "OwnerDiedError", "source": "shuffle_metadata_fetch",
+                                    "object_ref_hex": "target-metadata", "owner_node_id": "head-off",
+                                    "owner_worker_id": "worker", "observed_ns": 4})
+    return module, (off, on)
+
+
+def test_matched_owner_loss_reports_completion_not_speedup(matched_owner_pair):
+    module, (off, on) = matched_owner_pair
+    (Path(off["directory"]) / "predictions.npy").unlink()
+    result = module.compare_fixed_r_pair(off, on)
+    assert result["owner_loss_demonstrated"]
+    assert not result["off_completed"] and result["on_completed"]
+    assert result["off_s"] is result["on_vs_off_pct"] is result["predictions_match"] is None
+    assert result["off_failure_s"] == off["workload_s"]
+
+
+@pytest.mark.parametrize("invalid", [
+    "missing_owner", "wrong_task", "wrong_node", "wrong_object", "wrong_worker",
+    "timeout", "actor_error", "no_control", "no_prediction_match", "unfinished_batch",
+    "premature_error", "wrong_fault_owner", "wrong_placement", "workload_finished", "no_replay",
+])
+def test_matched_owner_loss_rejects_unrelated_failures(matched_owner_pair, invalid):
+    module, (off, on) = matched_owner_pair
+    if invalid == "missing_owner":
+        off.pop("shuffle_owner")
+    elif invalid == "wrong_task":
+        off["data_owner_fault"]["target"]["task_id"] = "other"
+    elif invalid == "wrong_node":
+        off["selected_owner_node_id"] = "survivor"
+    elif invalid == "wrong_object":
+        off["ordinary_owner_loss"]["object_ref_hex"] = "unrelated"
+    elif invalid == "wrong_worker":
+        off["ordinary_owner_loss"]["owner_worker_id"] = "unrelated"
+    elif invalid == "timeout":
+        off["timeout"] = True
+    elif invalid == "actor_error":
+        off["ordinary_owner_loss"]["error_type"] = "ActorDiedError"
+    elif invalid == "no_control":
+        off["no_failure_control_passed"] = False
+    elif invalid == "no_prediction_match":
+        on["matches_no_failure_predictions"] = False
+    elif invalid == "unfinished_batch":
+        off["data_owner_fault"]["submission_batch_settled"] = False
+    elif invalid == "premature_error":
+        off["ordinary_owner_loss"]["observed_ns"] = 1
+    elif invalid == "wrong_fault_owner":
+        off["data_owner_fault"]["head_replacement"]["original_head_node_id"] = "other"
+    elif invalid == "wrong_placement":
+        off["owner_placement"] = "default"
+    elif invalid == "workload_finished":
+        off["workload_completed"] = True
+    else:
+        on["data_exchanges"][0]["fixed_r_recovered_task_details"] = []
+    with pytest.raises(ValueError):
+        module.compare_fixed_r_pair(off, on)
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_matched_owner_report_preserves_failed_baseline(monkeypatch, tmp_path, matched_owner_pair, timeout):
+    import copy
+    import json
+
+    module, (off, on) = matched_owner_pair
+    off["timeout"] = timeout
+
+    def observe(options, *args):
+        sample = copy.deepcopy(off if options["mode"] == "off" else on)
+        sample["scenario"] = options["scenario"]
+        if options["scenario"] == "none":
+            sample.update(status="passed", validation_status="passed", workload_completed=True, timeout=False)
+            sample.pop("data_owner_fault")
+            sample.pop("ordinary_owner_loss", None)
+        return sample
+
+    monkeypatch.setattr(module, "run_observation", observe)
+    args = NS(owner_placement="head", repeats=1, scenario=None, workload=Path("example.py"),
+              workload_arg=[], timeout_s=120, output=tmp_path / "report.json")
+    assert module.run_fixed_r_workload_comparison(args, tmp_path, {}) == int(timeout)
+    report = json.loads(args.output.read_text())
+    failed_off = report["samples"][2]
+    assert failed_off["status"] == "failed"
+    assert failed_off.get("expected_owner_loss", False) is not timeout
+    if not timeout:
+        assert report["status"] == "passed"
+        assert report["summary"][1]["verified_owner_loss_pairs"] == 1
+        assert report["summary"][1]["off_s_mean"] is None
+        assert report["summary"][1]["on_vs_off_pct_mean"] is None
+    else:
+        assert report["status"] == "failed" and report["failed_observations"]

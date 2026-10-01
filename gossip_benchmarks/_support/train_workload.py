@@ -11,7 +11,7 @@ harness replaces head processes, then checks end-to-end completion and replay.
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 import hashlib
 import inspect
@@ -198,12 +198,139 @@ def owner_gated_map(original, directory, streaming):
     return produce
 
 
-def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, workload):
+class OrdinaryShuffleOwner:
+    """Benchmark-only owner: submit ordinary tasks and return their nested refs."""
+
+    def submit(self, producer, args, options):
+        self.refs = producer.options(**options).remote(*args)
+        return self.refs
+
+
+@contextmanager
+def matched_shuffle_ownership(directory, enabled, owner_node_id, executor_ids, diagnostics, inject):
+    """Place shuffle-map owners on the head in both arms, without changing the UDF.
+
+    OFF uses ordinary Ray submission through disposable actors. This is an
+    explicit ownership experiment, not the default Ray Data placement policy.
+    ON observes the existing recovery descriptor without changing submission.
+    """
+    from ray.core.generated.common_pb2 import Address, RecoveryStreamDescriptor
+    from ray.data._internal.planner.exchange import pull_based_shuffle_task_scheduler as pull
+    from ray.data._internal.planner.exchange import streaming_recovery as exchange
+    from ray.data._internal.planner.exchange.shuffle_task_spec import ShuffleTaskSpec
+    from ray.data._internal.progress.base_progress import BaseProgressBar
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    directory = Path(directory)
+    actors, target_refs = [], []
+    original_remote, original_submit = pull.cached_remote_fn, exchange.submit_stream
+    original_fetch = BaseProgressBar.fetch_until_complete
+
+    def record(task_id, address, **extra):
+        if address.node_id.hex() != owner_node_id:
+            raise ValueError("Shuffle output owner is not on the selected head")
+        evidence = {"task_id": task_id, "owner_node_id": address.node_id.hex(),
+                    "owner_worker_id": address.worker_id.hex(),
+                    "recorded_ns": time.monotonic_ns(), **extra}
+        diagnostics["shuffle_owner"] = evidence
+        write_record(directory / "shuffle-owner.json", evidence)
+
+    class RemoteMap:
+        def __init__(self, producer, options=None):
+            self.producer, self.remote_options = producer, options or {}
+
+        def options(self, **options):
+            return RemoteMap(self.producer, {**self.remote_options, **options})
+
+        def remote(self, *args):
+            if not args[5]:  # Keep non-random repartition on its ordinary path.
+                return self.producer.options(**self.remote_options).remote(*args)
+            owner = ray.remote(num_cpus=0, max_restarts=0, max_task_retries=0)(
+                OrdinaryShuffleOwner
+            ).options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+                owner_node_id, soft=False,
+            )).remote()
+            actors.append(owner)
+            ray.get(owner.__ray_ready__.remote(), timeout=30)
+            options = {**self.remote_options, "max_retries": 1, "retry_exceptions": False,
+                       "scheduling_strategy": NodeAffinitySchedulingStrategy(
+                           executor_ids[args[0] % len(executor_ids)], soft=False)}
+            refs = ray.get(owner.submit.remote(self.producer, args, options), timeout=30)
+            if args[0] == 0:
+                ref = refs[-1]  # Metadata is fetched by the original shuffle scheduler.
+                target_refs.append(ref)
+                address = Address.FromString(
+                    ray._private.worker.global_worker.core_worker.get_owner_address(ref)
+                )
+                record(ref.task_id().hex(), address, object_ref_hex=ref.hex())
+            return refs
+
+    def remote(function, *args, **kwargs):
+        producer = original_remote(function, *args, **kwargs)
+        return RemoteMap(producer) if function is ShuffleTaskSpec.map else producer
+
+    def submit(*args, **kwargs):
+        stream = original_submit(*args, **kwargs)
+        task_args = args[2]
+        if (len(task_args) == 4 and type(task_args[1]) is int
+                and task_args[1] == 0 and task_args[0]._map_args[2]):
+            if stream.reader is None:
+                raise ValueError("Target shuffle map was not enrolled before owner loss")
+            descriptor = RecoveryStreamDescriptor.FromString(stream.reader.descriptor)
+            record(stream.task_id.hex(), descriptor.manifest.succession[0].address)
+        return stream
+
+    def fetch(bar, refs):
+        targeted = target_refs and target_refs[0] in refs
+        if targeted and inject:
+            # All ordinary map submissions are complete before metadata fetch.
+            # Match ON's settled-batch gate and avoid an actor-RPC failure race.
+            (directory / "data-owner-batch-ready").touch()
+            deadline = time.monotonic() + 60
+            while not (directory / "release-data-owner").exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Owner-failure controller did not release ordinary shuffle")
+                time.sleep(.01)
+        try:
+            return original_fetch(bar, refs)
+        except ray.exceptions.OwnerDiedError:
+            if targeted and inject:
+                # Require Ray's real OwnerDiedError for the exact gated task,
+                # not a timeout, actor RPC failure, or arbitrary pipeline error.
+                try:
+                    ray.get(target_refs[0], timeout=5)
+                except ray.exceptions.OwnerDiedError as exc:
+                    address = Address.FromString(exc.owner_address)
+                    evidence = {"error_type": "OwnerDiedError",
+                                "object_ref_hex": exc.object_ref_hex,
+                                "owner_node_id": address.node_id.hex(),
+                                "owner_worker_id": address.worker_id.hex(),
+                                "observed_ns": time.monotonic_ns(),
+                                "source": "shuffle_metadata_fetch"}
+                    diagnostics["ordinary_owner_loss"] = evidence
+                    write_record(directory / "ordinary-owner-loss.json", evidence)
+            raise
+
+    if enabled:
+        exchange.submit_stream = submit
+    else:
+        pull.cached_remote_fn = remote
+        BaseProgressBar.fetch_until_complete = fetch
+    try:
+        yield
+    finally:
+        pull.cached_remote_fn, exchange.submit_stream = original_remote, original_submit
+        BaseProgressBar.fetch_until_complete = original_fetch
+        for actor in actors:
+            ray.kill(actor, no_restart=True)
+
+
+def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, workload,
+                     matched_owner=False):
     """Kill/replace head processes after a real shuffle task reaches its gate.
 
-    OFF retains ordinary coordinator-owned shuffle tasks. ON retains the normal
-    head-owned Fixed-R tasks. No artificial owner-loss exception is injected into
-    OFF; its surviving coordinator may allow it to finish too.
+    The default OFF arm retains coordinator ownership. With matched_owner,
+    both arms must prove the gated task's owner lives on the failed head.
 
     Run the workload in a background thread so head replacement can register
     Ray's process shutdown hooks on the main thread.
@@ -254,7 +381,10 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, 
     def inject(future):
         deadline = time.monotonic() + 60
         try:
-            while not (blocked.exists() and (not enabled or (enrolled.exists() and batch_ready.exists()))):
+            while not (blocked.exists()
+                       and (not enabled or (enrolled.exists() and batch_ready.exists()))
+                       and (not matched_owner or (
+                           (directory / "shuffle-owner.json").exists() and batch_ready.exists()))):
                 if future.done():
                     # Preserve the workload's original error if it failed
                     # before reaching the selected fault point.
@@ -268,10 +398,18 @@ def data_owner_fault(directory, enabled, crash_head, executor_ids, diagnostics, 
                 raise ValueError("Shuffle task must execute on a surviving executor")
             if enabled and json.loads(enrolled.read_text())["task_id"] != target["task_id"]:
                 raise ValueError("Blocked task differs from the enrolled recovery task")
+            if matched_owner:
+                ownership = json.loads((directory / "shuffle-owner.json").read_text())
+                if ownership["task_id"] != target["task_id"]:
+                    raise ValueError("Blocked task differs from the observed owner task")
+                fault["ownership"] = ownership
             fault.update(target=target, request_ns=time.monotonic_ns(),
+                         submission_batch_settled=batch_ready.exists(),
                          fixed_r_submission_batch_settled=enabled and batch_ready.exists())
             write_record(directory / "data-owner-fault.json", fault)
             fault["head_replacement"] = crash_head()
+            if matched_owner and ownership["owner_node_id"] != fault["head_replacement"]["original_head_node_id"]:
+                raise ValueError("Fault did not kill the observed shuffle owner node")
             fault.update(completed=True, replacement_ready_ns=time.monotonic_ns())
             write_record(directory / "data-owner-fault.json", fault)
         except Exception as exc:
@@ -355,9 +493,12 @@ def run_case(options, directory, diagnostics):
     inject = options["scenario"] == "worker"
     owner_failure = options["scenario"] == "data-owner"
     enabled = options["mode"] == "on"
+    matched_owner = options.get("owner_placement", "default") == "head"
     diagnostics.update(implementation="existing_TorchTrainer_script", restart_scope=options["restart_scope"],
                        workload=str(script), workload_sha256=file_sha256(script),
-                       numerical_probe=regression, torch_version=torch.__version__)
+                       numerical_probe=regression, torch_version=torch.__version__,
+                       owner_placement=options.get("owner_placement", "default"),
+                       workload_completed=False)
     args = argparse.Namespace(local_executor_nodes=4, local_object_store_mb=512,
                               owner_node_id=None, executor_node_ids=None,
                               producer_concurrency=None, recovery_timeout_s=30)
@@ -411,6 +552,7 @@ def run_case(options, directory, diagnostics):
         with local_head_failure_cluster(args, coordinator_cpus=0, recovery_enabled=enabled,
                                         allow_head_failure=owner_failure,
                                         include_worker_failure=True) as (case_args, crash_head, _):
+            diagnostics["selected_owner_node_id"] = case_args.owner_node_id
             native = ray._private.state.state.get_system_config()
             diagnostics["native_settings"] = {key: native.get(key) for key in system_config()}
             if any(native.get(k) != (enabled if k.startswith("enable_") else v)
@@ -438,14 +580,19 @@ def run_case(options, directory, diagnostics):
             sys.path.insert(0, str(script.parent))
 
             def workload():
-                with DataContext.current(context):
+                ownership = (matched_shuffle_ownership(
+                    directory, enabled, case_args.owner_node_id,
+                    tuple(sorted(case_args.executor_node_ids)), diagnostics, owner_failure,
+                ) if matched_owner else nullcontext())
+                with DataContext.current(context), ownership:
                     return runpy.run_path(str(script), run_name="__main__")
 
             workload_started = time.monotonic()
             try:
                 if owner_failure:
                     data_owner_fault(directory, enabled, crash_head,
-                                     case_args.executor_node_ids, diagnostics, workload)
+                                     case_args.executor_node_ids, diagnostics, workload,
+                                     matched_owner=matched_owner)
                 else:
                     workload()
                 diagnostics["workload_completed"] = True
