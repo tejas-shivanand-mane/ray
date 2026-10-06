@@ -4,7 +4,8 @@ Status: the user reports that the complete focused correctness suite passed
 locally at `25dab161` on 2026-10-01. The agent did not run the suite. This covers
 the small CPU/Gloo mechanism test described below. A subsequent uploaded
 CIFAR/ResNet report passed all four observations at `bf0806eb`; see the preliminary
-results below. Repeated timing measurements remain open.
+results below. Three repeated pairs subsequently passed at `fce4be58`; their
+results and limited measurement scope are recorded below.
 This extends Ray Data input delivery. It is **not Fixed-R**, selective Train
 retry, physical-machine recovery, or evidence of a general performance advantage.
 
@@ -313,5 +314,49 @@ pairs remain visible. The same-sharding comparison now explicitly requires
 matching checkpoint hashes and per-rank sample order across configurations,
 in addition to checking each faulted run against its own control.
 
-These runner/summary changes have been source-reviewed but are pending user
-validation. The recovery implementation and CIFAR workload are unchanged.
+The user subsequently validated these runner/summary changes at `fce4be58`.
+The recovery implementation and CIFAR workload are unchanged.
+
+## Three repeated pairs (report reviewed 2026-10-06)
+
+The uploaded `coordinator-training-repeats.json` records a clean checkout at
+`fce4be586d4424861fbdeca221e2702e65b6322d`. All 12 observations passed, with
+three valid pairs per scenario, no skipped observations and no comparison
+errors. Source and loaded native-extension fingerprints matched throughout.
+The agent inspected the report; no tests, benchmarks or rendering were run
+by the agent. The new repeated-run plot has not yet been inspected.
+
+Both configurations use the same deterministic splitter, with coordinator
+restart disabled for checkpoint retry and enabled for input resume. Fixed-R
+and selective Train retry are OFF. Both allow one full-group Train retry.
+The fault remains coordinator-process death after update 16 of epoch 2, on one
+physical machine with the nodes, input storage and training workers surviving.
+
+| Metric | Deterministic checkpoint retry | Input resume |
+| --- | ---: | ---: |
+| No-failure workload, mean +/- sample SD | 87.5164 +/- 1.4247 s | 88.5842 +/- 2.5451 s |
+| Faulted workload, mean +/- sample SD | 111.2151 +/- 2.2373 s | 89.3137 +/- 1.5818 s |
+| Observed repeated optimizer updates per rank, every fault run | 18 | 0 |
+| Restored checkpoint, every fault run | Epoch 1 | None |
+
+The mean paired faulted-workload change is -19.6757%, with sample SD 1.8699
+percentage points. Individual reductions are 18.1851%, 21.7738% and 19.0682%.
+The mean time saved is 21.9014 seconds (sample SD 2.4003 seconds). The benefit
+appears in all three pairs for this workload and failure point.
+
+The no-failure paired change averages +1.2333%, with sample SD 3.1133 percentage
+points; individual changes are +2.5187%, -2.3168% and +3.4981%. These are
+descriptive statistics, not confidence intervals. This comparison measures
+the incremental effect of enabling coordinator restarts within the prototype
+splitter. Both arms already pay its hashing, serialization, copying and
+deterministic-sharding costs; it does not measure total integration overhead
+against ordinary Ray. No ordinary-splitter arm was run in these repetitions.
+
+Each checkpoint baseline replaced both workers and executed 50 initial plus
+32 restored updates per rank. Each input-resume run kept both training
+invocations, executed exactly 64 updates per rank, and completed data execution
+in a replacement coordinator process on the same surviving node. Checkpoint
+hashes and per-rank sample order matched across configurations in every pair
+and between each faulted run and its control. This establishes repeated
+model-progress preservation for coordinator-process failure at the tested point;
+early/late faults, logical-node loss and larger workloads remain separate work.
