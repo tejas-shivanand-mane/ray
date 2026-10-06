@@ -297,3 +297,102 @@ def test_plot_caption_describes_actual_sharding(checks):
     plot = importlib.import_module("plot_coordinator_training")
     assert "Identical deterministic sharding" in plot.comparison_caption({"modes": ["deterministic", "resume"]})
     assert "sharding differ" in plot.comparison_caption({"modes": ["ordinary", "deterministic", "resume"]})
+
+
+def test_stage_points_are_within_the_unfinished_epoch(checks):
+    cases = checks.failure_cases(32, ["early", "late"])
+    assert [(c["failure_point"], c["fault_after_step"]) for c in cases] == [
+        ("none", 16), ("early", 4), ("late", 28)]
+    assert [c["failure_point"] for c in checks.failure_cases(32, ["all", "early"])] == [
+        "none", "early", "middle", "late"]
+    assert checks.failure_cases(32)[1]["fault_after_step"] == 16
+    assert checks.failure_cases(32, custom_step=7)[1]["failure_point"] == "custom"
+    assert len(checks.failure_cases(32, ["all"], controls_only=True)) == 1
+    with pytest.raises(ValueError):
+        checks.failure_cases(2, ["all"])
+    with pytest.raises(ValueError):
+        checks.failure_cases(32, custom_step=32)
+    with pytest.raises(ValueError):
+        checks.failure_cases(32, ["early"], custom_step=4)
+
+
+def test_stage_summaries_and_plots_do_not_mix_failure_points(checks):
+    report = {"scenarios": ["none", "coordinator-process"], "cases": checks.failure_cases(32, ["early", "late"]),
+              "repeats": 1, "fault_after_epoch": 1, "comparison_modes": [("deterministic", "resume")],
+              "comparisons": [], "samples": []}
+    for point, change in (("early", -5), ("late", -25)):
+        row = {"scenario": "coordinator-process", "failure_point": point, "pair": 1,
+               "left": "deterministic", "right": "resume", "left_workload_s": 100,
+               "right_workload_s": 100 + change, "workload_s_change_pct": change}
+        report["comparisons"].append(row)
+        report["samples"].append({"scenario": "coordinator-process", "failure_point": point})
+    control, early, late = checks.summarize_comparisons(report)
+    assert control["completed_pairs"] == 0
+    assert early["paired_change_pct"]["mean"] == -5
+    assert late["paired_change_pct"]["mean"] == -25
+    for case in report["cases"][1:]:
+        assert checks.case_samples(report, case) == [{"scenario": "coordinator-process",
+                                                     "failure_point": case["failure_point"]}]
+    plot = importlib.import_module("plot_coordinator_training")
+    assert "epoch 2, update 4" in plot.case_title(report, report["cases"][1])
+    assert "epoch 2, update 28" in plot.case_title(report, report["cases"][2])
+    legacy = {"scenarios": ["none", "coordinator-process"], "samples": [
+        {"scenario": "none"}, {"scenario": "coordinator-process"}]}
+    for case in checks.report_cases(legacy):
+        assert len(checks.case_samples(legacy, case)) == 1
+    assert plot.case_title(legacy, checks.report_cases(legacy)[1]) == "Coordinator-process failure during training"
+
+
+@pytest.mark.parametrize("failed_control", [False, True])
+def test_stage_runner_reuses_controls_and_keeps_fault_evidence_separate(checks, monkeypatch, tmp_path, failed_control):
+    import json
+    runner = importlib.import_module("run_coordinator_training_comparison")
+    monkeypatch.setattr(runner, "input_identity", lambda _: {"training_rows": 2048})
+    monkeypatch.setattr(runner, "source_provenance", lambda _: {})
+    calls, directories = [], []
+
+    def observe(options, pair, directory, provenance):
+        calls.append((options["failure_point"], options["mode"], options["fault_after_step"]))
+        directories.append(directory)
+        _, sample = paired_samples()
+        sample.update(mode=options["mode"], scenario=options["scenario"], pair=pair,
+                      coordinator_restart_budget=1 if options["mode"] == "resume" else 0)
+        if failed_control and calls[-1][:2] == ("none", "resume"):
+            sample.update(status="failed", workload_completed=False, timeout=True, error="timed out")
+        return sample
+
+    monkeypatch.setattr(runner, "run_observation", observe)
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    monkeypatch.setattr(runner.sys, "argv", ["comparison", "--same-sharding-only",
+                                            "--failure-point", "early", "--failure-point", "late",
+                                            "--data-directory", str(tmp_path), "--result-directory", str(tmp_path),
+                                            "--output", str(tmp_path / "report.json")])
+    assert runner.main() == (1 if failed_control else 0)
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["observations_per_repetition"] == 6
+    assert len(calls) == (4 if failed_control else 6)
+    assert len(directories) == len(set(directories))
+    assert sum(point == "none" for point, _, _ in calls) == 2
+    assert all(step == {"none": 16, "early": 4, "late": 28}[point] for point, _, step in calls)
+    assert len(report["skipped"]) == (2 if failed_control else 0)
+    assert [row["failure_point"] for row in report["summary"]] == ["none", "early", "late"]
+    assert all(row["completed_pairs"] == (0 if failed_control else 1) for row in report["summary"])
+    assert {row["failure_point"] for row in report["control_comparisons"]} == {"early", "late"}
+
+
+def test_named_stage_cannot_be_combined_with_custom_step(checks, monkeypatch, tmp_path):
+    runner = importlib.import_module("run_coordinator_training_comparison")
+    monkeypatch.setattr(runner.sys, "argv", ["comparison", "--failure-point", "early",
+                                            "--fault-after-step", "4", "--data-directory", str(tmp_path)])
+    with pytest.raises(SystemExit) as raised:
+        runner.main()
+    assert raised.value.code == 2
+
+
+def test_pairing_rejects_different_failure_points(checks):
+    _, right = paired_samples()
+    left = copy.deepcopy(right)
+    left.update(mode="deterministic", coordinator_restart_budget=0, failure_point="early")
+    right["failure_point"] = "late"
+    with pytest.raises(ValueError):
+        checks.compare_samples(left, right)

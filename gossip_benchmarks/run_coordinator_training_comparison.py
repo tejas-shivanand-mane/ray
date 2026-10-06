@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 from run_fixed_r_train_comparison import ROOT, run_observation, write_json
-from coordinator_comparison import compare_samples, summarize_comparisons
+from coordinator_comparison import compare_samples, failure_cases, summarize_comparisons
 from streaming_learning import input_identity
 from training_provenance import source_provenance
 
@@ -17,23 +17,22 @@ def run_comparison(args):
     if identity["training_rows"] % (2 * args.batch_size):
         raise ValueError("Training images must divide evenly into two worker batches")
     steps = identity["training_rows"] // (2 * args.batch_size)
-    step = args.fault_after_step if args.fault_after_step is not None else steps // 2
-    if not 0 < step < steps:
-        raise ValueError("Leave optimizer work before and after the fault within its epoch")
+    cases = failure_cases(steps, args.failure_point, args.fault_after_step, args.controls_only)
     modes = ["deterministic", "resume"] if args.same_sharding_only else ["ordinary", "resume"]
     if args.include_deterministic_baseline:
         modes.insert(1, "deterministic")
     pair_modes = [("ordinary", mode) for mode in modes if mode != "ordinary"] if "ordinary" in modes else []
     if "deterministic" in modes:
         pair_modes.append(("deterministic", "resume"))
-    cases = ["none"] if args.controls_only else ["none", "coordinator-process"]
     provenance = source_provenance(ROOT)
     report = {
         "profile": "cifar-coordinator-resume", "status": "running", "modes": modes,
-        "scenarios": cases, "repeats": args.repeats, "preliminary": args.repeats == 1,
+        "scenarios": list(dict.fromkeys(c["scenario"] for c in cases)), "cases": cases,
+        "repeats": args.repeats, "preliminary": args.repeats == 1,
         "comparison_modes": pair_modes,
         "training_epochs": args.epochs, "steps_per_epoch": steps, "batch_size": args.batch_size,
-        "fault_after_epoch": args.fault_after_epoch, "fault_after_step": step,
+        "fault_after_epoch": args.fault_after_epoch,
+        "fault_after_step": cases[-1]["fault_after_step"] if len(cases) <= 2 else None,
         "observations_per_repetition": len(cases) * len(modes), "timeout_s": args.timeout_s,
         "input_identity": identity, "source_provenance": provenance,
         "samples": [], "comparisons": [], "control_comparisons": [], "skipped": [], "comparison_errors": [],
@@ -43,6 +42,8 @@ def run_comparison(args):
             "two CPU/Gloo training workers on separate logical nodes on one physical machine; all nodes and shared storage survive",
             "existing CIFAR-10 subset/ResNet-18 workload unchanged; real learning and lazy PNG decode, not convergence or scale evidence",
             "failure after a real Adam update with both ranks gated in an unfinished epoch, not during an arbitrary collective/kernel",
+            "early/middle/late refer to progress within the epoch after the selected checkpoint, not fractions of total job time",
+            "one fresh control per mode and repetition is shared across requested fault points; comparisons to that control are correlated",
             "application model/Adam/epoch/RNG checkpoints every epoch and one full-group Train retry in all modes",
             "ordinary and resumable splitters can assign different batches to ranks; only deterministic arms demand exact checkpoint and sample-order agreement with their own controls",
             "optional deterministic baseline uses the prototype splitter with zero coordinator restarts; it is not ordinary Ray",
@@ -58,28 +59,29 @@ def run_comparison(args):
 
     save()
     controls = {}
-    for scenario in cases:
+    for case in cases:
+        scenario, point, step = case["scenario"], case["failure_point"], case["fault_after_step"]
         for pair in range(1, args.repeats + 1):
             samples = {}
             order = modes if pair % 2 else list(reversed(modes))
             for mode in order:
                 if scenario != "none" and (pair, mode) not in controls:
-                    report["skipped"].append({"scenario": scenario, "pair": pair, "mode": mode,
+                    report["skipped"].append({"scenario": scenario, "failure_point": point, "pair": pair, "mode": mode,
                                               "reason": "Matching control did not pass"})
                     save()
                     continue
                 options = {
                     "training_strategy": "coordinator-input-resume", "streaming_learning": True,
-                    "mode": mode, "scenario": scenario, "failure_timing": "active",
+                    "mode": mode, "scenario": scenario, "failure_point": point, "failure_timing": "active",
                     "training_epochs": args.epochs, "batch_size": args.batch_size, "steps_per_epoch": steps,
                     "fault_after_epoch": args.fault_after_epoch, "fault_after_step": step,
                     "timeout_s": args.timeout_s, "data_directory": str(args.data_directory),
                     "input_identity": identity,
                 }
-                print(f"{scenario}: pair {pair}/{args.repeats}, {mode}, full Train retry; "
+                print(f"{scenario}/{point}: pair {pair}/{args.repeats}, {mode}, full Train retry; "
                       f"timeout {args.timeout_s:g}s", flush=True)
-                sample = run_observation(options, pair, args.result_directory / scenario / f"pair-{pair}-{mode}", provenance)
-                sample.update(fault_after_epoch=args.fault_after_epoch, fault_after_step=step)
+                sample = run_observation(options, pair, args.result_directory / scenario / point / f"pair-{pair}-{mode}", provenance)
+                sample.update(failure_point=point, fault_after_epoch=args.fault_after_epoch, fault_after_step=step)
                 report["samples"].append(sample)
                 samples[mode] = sample
                 if sample["status"] == "passed":
@@ -88,7 +90,7 @@ def run_comparison(args):
                     else:
                         try:
                             comparison = compare_samples(controls[pair, mode], sample, control=True)
-                            report["control_comparisons"].append({"mode": mode, "pair": pair, **comparison})
+                            report["control_comparisons"].append({"mode": mode, "failure_point": point, "pair": pair, **comparison})
                         except ValueError as exc:
                             sample.update(status="failed", validation_status="failed", error=str(exc))
                             report["comparison_errors"].append(str(exc))
@@ -103,7 +105,7 @@ def run_comparison(args):
                 if not left or not right or any(s["status"] != "passed" for s in (left, right)):
                     continue
                 try:
-                    report["comparisons"].append({"scenario": scenario, "pair": pair,
+                    report["comparisons"].append({"scenario": scenario, "failure_point": point, "pair": pair,
                                                   "left": left_mode, "right": right_mode,
                                                   **compare_samples(left, right)})
                 except ValueError as exc:
@@ -114,13 +116,13 @@ def run_comparison(args):
     save()
     print(f"Report: {args.output}")
     for row in report["comparisons"]:
-        print(f"{row['scenario']}, pair {row['pair']}: {row['right']} versus {row['left']} workload time "
+        print(f"{row['scenario']}/{row['failure_point']}, pair {row['pair']}: {row['right']} versus {row['left']} workload time "
               f"{row['workload_s_change_pct']:+.2f}%")
     for row in report["summary"]:
         mean, stdev = row["paired_change_pct"]["mean"], row["paired_change_pct"]["stdev"]
         spread = f", sample SD {stdev:.2f} percentage points" if stdev is not None else ", SD unavailable"
         timing = f"mean paired change {mean:+.2f}%{spread}" if mean is not None else "no valid timing pairs"
-        print(f"{row['scenario']}: {row['right']} versus {row['left']}: {timing}; "
+        print(f"{row['scenario']}/{row['failure_point']}: {row['right']} versus {row['left']}: {timing}; "
               f"{row['completed_pairs']}/{row['requested_pairs']} valid pairs")
     return 0 if report["status"] == "passed" else 1
 
@@ -131,7 +133,10 @@ def main():
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--fault-after-epoch", type=int, default=1)
-    parser.add_argument("--fault-after-step", type=int)
+    points = parser.add_mutually_exclusive_group()
+    points.add_argument("--fault-after-step", type=int)
+    points.add_argument("--failure-point", action="append", choices=("early", "middle", "late", "all"),
+                        help="Repeat to select points within the next epoch; default: middle")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-s", type=float, default=300)
     parser.add_argument("--controls-only", action="store_true")

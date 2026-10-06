@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "_support"))
-from coordinator_comparison import progress_trace
+from coordinator_comparison import case_samples, progress_trace, report_cases
 
 
 LABELS = {"ordinary": "Ordinary Ray + checkpoint retry", "resume": "Coordinator input resume",
@@ -20,6 +20,16 @@ def comparison_caption(report):
     return "Ordinary and resume sharding differ; each fault is checked against its own control. "
 
 
+def case_title(report, case):
+    if case["scenario"] == "none":
+        return "No failure"
+    if case["failure_point"] is None:
+        return "Coordinator-process failure during training"
+    epoch = report["fault_after_epoch"] + 1
+    return (f"{case['failure_point'].capitalize()}: epoch {epoch}, update {case['fault_after_step']}\n"
+            "Coordinator-process failure")
+
+
 def plot(report, output):
     import matplotlib
     matplotlib.use("Agg")
@@ -27,11 +37,13 @@ def plot(report, output):
 
     if report.get("profile") != "cifar-coordinator-resume":
         raise ValueError("Expected a coordinator-training comparison report")
-    scenarios = report["scenarios"]
-    fig, axes = plt.subplots(1, len(scenarios), figsize=(7 * len(scenarios), 5.2), squeeze=False, sharey=True)
+    cases = report_cases(report)
+    columns = min(2, len(cases))
+    rows = (len(cases) + columns - 1) // columns
+    fig, axes = plt.subplots(rows, columns, figsize=(7 * columns, 5.2 * rows), squeeze=False, sharey=True)
     steps = report["steps_per_epoch"]
-    for ax, scenario in zip(axes[0], scenarios):
-        samples = [s for s in report["samples"] if s["scenario"] == scenario]
+    for index, (ax, case) in enumerate(zip(axes.flat, cases)):
+        samples = case_samples(report, case)
         for sample in samples:
             trace = progress_trace(sample, steps)
             mode = sample["mode"]
@@ -50,17 +62,20 @@ def plot(report, output):
                            color=COLORS[mode], alpha=.45, linestyle=":")
         if not samples:
             ax.text(.5, .5, "No observations", ha="center", transform=ax.transAxes)
-        ax.set_title("No failure" if scenario == "none" else "Coordinator-process failure during training")
+        ax.set_title(case_title(report, case))
         ax.set_xlabel("Workload elapsed time (s)")
         ax.set_ylim(bottom=0)
         ax.grid(alpha=.2)
         if samples:
             ax.legend(loc="lower right", fontsize=8)
-    axes[0][0].set_ylabel("Current optimizer progress\n(minimum completed updates across two ranks)")
+        if index % columns == 0:
+            ax.set_ylabel("Current optimizer progress\n(minimum completed updates across two ranks)")
+    for ax in list(axes.flat)[len(cases):]:
+        ax.set_visible(False)
     fig.suptitle("CIFAR-10 / ResNet-18: checkpoint retry versus coordinator input resume")
-    fig.text(.5, .02, "Fixed-R OFF; full Train retry enabled; one physical machine. Dotted lines: fault requests.\n"
+    fig.text(.5, .02, "Fixed-R OFF; full Train retry enabled; one physical machine.\nDotted lines: fault requests. "
              + comparison_caption(report)
-             + ("One repetition is preliminary." if report["preliminary"] else "Individual repetitions shown."),
+             + "\n" + ("One repetition is preliminary." if report["preliminary"] else "Individual repetitions shown."),
              ha="center", fontsize=8)
     fig.tight_layout(rect=(0, .1, 1, .94))
     output = Path(output)

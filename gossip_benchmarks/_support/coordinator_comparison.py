@@ -4,6 +4,46 @@ import math
 import statistics
 
 
+def failure_cases(steps, points=None, custom_step=None, controls_only=False):
+    """Named points are within the epoch following a committed checkpoint."""
+    if steps < 2:
+        raise ValueError("Use at least two optimizer updates per epoch")
+    cases = [{"scenario": "none", "failure_point": "none", "fault_after_step": steps // 2}]
+    if controls_only:
+        return cases
+    if custom_step is not None:
+        if points:
+            raise ValueError("Choose named failure points or a custom step")
+        selected = [("custom", custom_step)]
+    else:
+        requested = set(points or ["middle"])
+        if not requested <= {"early", "middle", "late", "all"}:
+            raise ValueError("Unknown failure point")
+        if "all" in requested:
+            requested = {"early", "middle", "late"}
+        positions = {"early": max(1, steps // 8), "middle": steps // 2,
+                     "late": min(steps - 1, 7 * steps // 8)}
+        selected = [(name, step) for name, step in positions.items() if name in requested]
+    if any(not 0 < step < steps for _, step in selected):
+        raise ValueError("Leave optimizer work before and after the fault within its epoch")
+    if len({step for _, step in selected}) != len(selected):
+        raise ValueError("Too few updates per epoch for distinct requested failure points")
+    return cases + [{"scenario": "coordinator-process", "failure_point": name,
+                     "fault_after_step": step} for name, step in selected]
+
+
+def report_cases(report):
+    # Reports written before the stage matrix have only one fault case.
+    return report.get("cases") or [{"scenario": s, "failure_point": None,
+                                    "fault_after_step": report.get("fault_after_step")}
+                                   for s in report["scenarios"]]
+
+
+def case_samples(report, case):
+    return [s for s in report["samples"] if s["scenario"] == case["scenario"]
+            and s.get("failure_point") == case["failure_point"]]
+
+
 def updates(sample):
     """Use the hook's timestamp for the real update completed before injection.
 
@@ -180,6 +220,7 @@ def compare_samples(left, right, *, control=False):
         if left["scenario"] != "none" or left["mode"] != right["mode"] or left["pair"] != right["pair"]:
             raise ValueError("Expected a matching no-failure control")
     elif (left["scenario"] != right["scenario"] or left["pair"] != right["pair"]
+          or left.get("failure_point") != right.get("failure_point")
           or left["fault_after_epoch"] != right["fault_after_epoch"]
           or left["fault_after_step"] != right["fault_after_step"]):
         raise ValueError("Mismatched fault configuration")
@@ -212,15 +253,17 @@ def summarize_comparisons(report):
                 "values": values}
 
     result = []
-    for scenario in report["scenarios"]:
+    for case in report_cases(report):
+        scenario, point = case["scenario"], case["failure_point"]
         for left, right in report["comparison_modes"]:
             rows = sorted((r for r in report["comparisons"] if r["scenario"] == scenario
+                           and r.get("failure_point") == point
                            and (r["left"], r["right"]) == (left, right)), key=lambda r: r["pair"])
             pairs = [r["pair"] for r in rows]
             if len(pairs) != len(set(pairs)) or any(not 1 <= p <= report["repeats"] for p in pairs):
                 raise ValueError("Duplicate or unexpected comparison repetition")
             result.append({
-                "scenario": scenario, "left": left, "right": right,
+                "scenario": scenario, "failure_point": point, "left": left, "right": right,
                 "requested_pairs": report["repeats"], "completed_pairs": len(rows),
                 "included_pairs": pairs,
                 "missing_pairs": [p for p in range(1, report["repeats"] + 1) if p not in pairs],

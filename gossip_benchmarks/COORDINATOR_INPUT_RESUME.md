@@ -360,3 +360,57 @@ hashes and per-rank sample order matched across configurations in every pair
 and between each faulted run and its control. This establishes repeated
 model-progress preservation for coordinator-process failure at the tested point;
 early/late faults, logical-node loss and larger workloads remain separate work.
+
+## Early and late training coverage
+
+The next coverage check selects different failure points within the unfinished
+training epoch. With the default two epochs and 32 updates per rank per epoch,
+`early`, `middle` and `late` mean updates 4, 16 and 28 of epoch 2, respectively.
+All follow the committed epoch-1 checkpoint; these names do not describe
+fractions of total wall time or a failure during initial preprocessing.
+For other epoch lengths, the points are at one eighth, one half and seven
+eighths of the updates, rounded down and bounded to leave work on both sides.
+If requested points collapse to the same update, the runner rejects the setup.
+
+The short new coverage run omits the already repeated middle point:
+
+```bash
+bash gossip_benchmarks/validate_coordinator_training.sh \
+  --data-directory ~/ray-coverage/cifar-streaming \
+  --same-sharding-only --failure-point early --failure-point late \
+  --repeats 1 --output ~/ray-coverage/coordinator-training-stages.json
+```
+
+This runs six observations: a fresh control for each configuration, followed by
+an early and a late fault for each. Each control is reused for comparison with
+both fault points, so those control-relative comparisons are correlated.
+Each observation still has a fresh local cluster. Based on the preceding runs,
+budget roughly 10-13 minutes; actual early/late recovery timings remain unknown.
+The per-observation cap remains 300 seconds, with cleanup additional.
+`--failure-point all` includes the middle point too, for eight observations in
+the two-arm mode. Repetitions remain available. Without a failure-point argument,
+the original middle-point behavior is preserved. `--fault-after-step` selects a
+custom point and cannot be combined with named failure points.
+
+```bash
+python gossip_benchmarks/plot_coordinator_training.py \
+  ~/ray-coverage/coordinator-training-stages.json \
+  --output ~/ray-coverage/coordinator-training-stages.png
+```
+
+Plotting remains separate and uses only the JSON. Each selected failure point
+gets its own panel, alongside the shared control panel. Titles show the epoch
+and update number. Timing summaries and sample directories distinguish points,
+so the same repetition number at early and late is never pooled or overwritten.
+Older two-panel JSON reports remain supported.
+
+The existing evidence requirements apply at every point: real pre-fault Adam
+updates, observed coordinator process death/replacement, completed post-fault
+data execution, retained training invocations for input resume, exact checkpoint
+and sample-order matching, and observed optimizer progress beyond injection.
+Checkpoint-retry baselines remain free to continue if buffered input permits it;
+the harness does not force rollback. A resume run that merely finishes from
+prefetched data without replacement-coordinator execution does not satisfy the
+recovery criterion. This coverage change does not add node/driver/storage recovery
+or change the runtime protocol, model, dataset or retry budgets. Agent review is
+source-only; early/late outcomes and the new plot layout await user validation.
