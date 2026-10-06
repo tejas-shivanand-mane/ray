@@ -27,6 +27,8 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 CONFIG_KEY = "experimental_resumable_split"
 EMPTY_DIGEST = hashlib.sha256(b"ray-resumable-split-v1").digest()
+# Scheduling reservation only, not a cap on the coordinator's actual memory.
+RELOCATION_MEMORY_RESERVATION = 1024**2
 
 
 @dataclass(frozen=True)
@@ -338,6 +340,10 @@ def create_resumable_split(dataset, n, equal, options):
     owner_node_id = ray.get_runtime_context().get_node_id()
     coordinator = ray.remote(ReplayCoordinator).options(
         num_cpus=0, max_concurrency=n + 2,
+        # Ray randomly places resource-free actors even with soft affinity.
+        # A nonempty request makes the scheduler honor the preferred node while
+        # retaining relocation after its loss, without consuming training CPUs.
+        **({"memory": RELOCATION_MEMORY_RESERVATION} if config.allow_node_relocation else {}),
         max_restarts=config.max_restarts, max_task_retries=config.max_restarts,
         scheduling_strategy=coordinator_placement(config, owner_node_id),
     ).remote(lineage, n, config, owner_node_id)

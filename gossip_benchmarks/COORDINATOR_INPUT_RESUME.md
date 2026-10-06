@@ -445,6 +445,16 @@ There is no replicated coordinator journal, new checkpoint format, C++ change,
 Fixed-R enrollment or selective Train retry. A future failure of the replacement
 node is covered only if the owner and consumers still survive and budget remains.
 
+Relocation-enabled coordinators reserve 1 MiB of schedulable memory in both
+arms. This is a scheduling reservation, not a process-memory limit or estimate.
+Ray's scheduler randomly places actors with empty resource requests, bypassing
+soft node affinity; the nonempty memory request avoids that path without taking
+training CPUs. The initial local test at `d327a5af` exposed this issue when the
+zero-restart coordinator started on the wrong node before injection. The
+placement assertion remains mandatory. Default hard-affinity process recovery
+retains its original resource request. The focused node test disables the
+dashboard frontend, which is not required for this experiment.
+
 The node benchmark uses seven logical nodes on the same physical machine: a
 head, a surviving driver/controller/DatasetManager node, four CPU executor nodes,
 and a dedicated zero-CPU coordinator node. Both arms use that same explicit

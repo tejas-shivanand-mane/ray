@@ -19,7 +19,8 @@ def test_node_loss_relocates_with_surviving_owner_or_exhausts_budget(tmp_path, r
     previous = DataContext.get_current()
     cluster = Cluster()
     try:
-        head = cluster.add_node(num_cpus=2, node_ip_address="127.0.0.2", object_store_memory=128 * 1024**2)
+        head = cluster.add_node(num_cpus=2, node_ip_address="127.0.0.2", include_dashboard=False,
+                                object_store_memory=128 * 1024**2)
         target = cluster.add_node(num_cpus=0, node_ip_address="127.0.0.3", object_store_memory=128 * 1024**2)
         cluster.wait_for_nodes()
         ray.init(address=cluster.address, _node_ip_address=head.node_ip_address)
