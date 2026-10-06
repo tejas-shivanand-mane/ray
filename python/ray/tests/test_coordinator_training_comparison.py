@@ -170,10 +170,11 @@ def test_wrong_checkpoint_delivery_is_rejected(checks):
 
 
 @pytest.mark.parametrize("resume", [False, True])
-def test_async_kill_is_observed_not_assumed(checks, monkeypatch, resume):
+@pytest.mark.parametrize("node_loss", [False, True])
+def test_async_kill_is_observed_not_assumed(checks, monkeypatch, resume, node_loss):
     harness = importlib.import_module("coordinator_training")
     old = {"worker_id": "old", "node_id": "node"}
-    new = {"worker_id": "new", "node_id": "node"}
+    new = {"worker_id": "new", "node_id": "other" if node_loss else "node"}
     calls = []
     def probe(actor, timeout):
         calls.append(actor)
@@ -184,7 +185,7 @@ def test_async_kill_is_observed_not_assumed(checks, monkeypatch, resume):
         raise harness.ray.exceptions.RayActorError()
     monkeypatch.setattr(harness, "probe", probe)
     monkeypatch.setattr(harness.time, "sleep", lambda _: None)
-    assert harness.await_fault("actor", old, resume) == (new if resume else None)
+    assert harness.await_fault("actor", old, resume, node_loss=node_loss) == (new if resume else None)
     assert len(calls) == 2
 
 
@@ -344,7 +345,8 @@ def test_stage_summaries_and_plots_do_not_mix_failure_points(checks):
 
 
 @pytest.mark.parametrize("failed_control", [False, True])
-def test_stage_runner_reuses_controls_and_keeps_fault_evidence_separate(checks, monkeypatch, tmp_path, failed_control):
+@pytest.mark.parametrize("scope", ["process", "node"])
+def test_stage_runner_reuses_controls_and_keeps_fault_evidence_separate(checks, monkeypatch, tmp_path, failed_control, scope):
     import json
     runner = importlib.import_module("run_coordinator_training_comparison")
     monkeypatch.setattr(runner, "input_identity", lambda _: {"training_rows": 2048})
@@ -357,6 +359,9 @@ def test_stage_runner_reuses_controls_and_keeps_fault_evidence_separate(checks, 
         _, sample = paired_samples()
         sample.update(mode=options["mode"], scenario=options["scenario"], pair=pair,
                       coordinator_restart_budget=1 if options["mode"] == "resume" else 0)
+        sample["coordinator_placement"] = ("separate_node_soft_affinity" if scope == "node"
+                                           else "owner_node_hard_affinity")
+        assert options["failure_scope"] == scope
         if failed_control and calls[-1][:2] == ("none", "resume"):
             sample.update(status="failed", workload_completed=False, timeout=True, error="timed out")
         return sample
@@ -364,12 +369,14 @@ def test_stage_runner_reuses_controls_and_keeps_fault_evidence_separate(checks, 
     monkeypatch.setattr(runner, "run_observation", observe)
     monkeypatch.setattr(runner.sys, "platform", "linux")
     monkeypatch.setattr(runner.sys, "argv", ["comparison", "--same-sharding-only",
+                                            "--failure-scope", scope,
                                             "--failure-point", "early", "--failure-point", "late",
                                             "--data-directory", str(tmp_path), "--result-directory", str(tmp_path),
                                             "--output", str(tmp_path / "report.json")])
     assert runner.main() == (1 if failed_control else 0)
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["observations_per_repetition"] == 6
+    assert report["scenarios"] == ["none", "coordinator-node" if scope == "node" else "coordinator-process"]
     assert len(calls) == (4 if failed_control else 6)
     assert len(directories) == len(set(directories))
     assert sum(point == "none" for point, _, _ in calls) == 2
@@ -396,3 +403,60 @@ def test_pairing_rejects_different_failure_points(checks):
     right["failure_point"] = "late"
     with pytest.raises(ValueError):
         checks.compare_samples(left, right)
+
+
+@pytest.mark.parametrize("mode,retry", [("resume", False), ("deterministic", True), ("deterministic", False)])
+@pytest.mark.parametrize("corruption", [None, "node_alive", "other_node_lost", "owner_lost", "driver_lost",
+                                        "process_alive", "unconfirmed_death", "same_node", "no_execution"])
+def test_node_loss_requires_relocation_and_surviving_dependencies(checks, mode, retry, corruption):
+    sample, options = evidence(mode, retry)
+    options["scenario"] = sample["scenario"] = "coordinator-node"
+    fault = sample["coordinator_fault"]
+    fault.update(scope="coordinator_node", driver_node_id="owner")
+    fault["old"].update(node_id="target", owner_node_id="owner", pid=42)
+    fault["alive_nodes_before"].append("target")
+    fault["node_failure"] = {"node_id": "target", "all_node_processes_exited": True,
+                             "gcs_marked_dead": True, "node_process_pids": [42],
+                             "surviving_node_ids": fault["alive_nodes_after"][:]}
+    if corruption == "node_alive":
+        fault["alive_nodes_after"].append("target")
+    elif corruption == "other_node_lost":
+        fault["alive_nodes_after"].remove("node-0")
+    elif corruption == "owner_lost":
+        fault["old"]["owner_node_id"] = "target"
+    elif corruption == "driver_lost":
+        fault["driver_node_id"] = "target"
+    elif corruption == "process_alive":
+        fault["node_failure"]["all_node_processes_exited"] = False
+    elif corruption == "unconfirmed_death":
+        fault["node_failure"]["gcs_marked_dead"] = False
+    elif corruption == "same_node":
+        fault["new"] = {"worker_id": "replacement", "node_id": "target"}
+    elif corruption == "no_execution":
+        sample["data_executions"] = []
+    if corruption and not (corruption == "no_execution" and mode != "resume"):
+        with pytest.raises(ValueError):
+            checks.validate_progress(sample, options)
+    else:
+        checks.validate_progress(sample, options)
+        assert sample["recovery"]["checkpoint_restored"] == retry
+
+
+def test_node_comparison_rejects_different_placement(checks):
+    _, right = paired_samples()
+    left = copy.deepcopy(right)
+    left.update(mode="deterministic", coordinator_restart_budget=0)
+    for s in (left, right):
+        s.update(scenario="coordinator-node", coordinator_placement="separate_node_soft_affinity")
+    assert checks.compare_samples(left, right)["exact_checkpoint_and_sample_order_match"]
+    right["coordinator_placement"] = "owner_node_hard_affinity"
+    with pytest.raises(ValueError, match="placement"):
+        checks.compare_samples(left, right)
+
+
+def test_node_plot_does_not_label_process_loss(checks):
+    plot = importlib.import_module("plot_coordinator_training")
+    report = {"fault_after_epoch": 1, "failure_scope": "node"}
+    case = {"scenario": "coordinator-node", "failure_point": "middle", "fault_after_step": 16}
+    assert "Logical coordinator-node failure" in plot.case_title(report, case)
+    assert "dedicated coordinator-node placement" in plot.comparison_caption(report)

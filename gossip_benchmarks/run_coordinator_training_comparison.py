@@ -18,6 +18,13 @@ def run_comparison(args):
         raise ValueError("Training images must divide evenly into two worker batches")
     steps = identity["training_rows"] // (2 * args.batch_size)
     cases = failure_cases(steps, args.failure_point, args.fault_after_step, args.controls_only)
+    failure_scope = getattr(args, "failure_scope", "process")
+    if failure_scope == "node":
+        if not args.same_sharding_only:
+            raise ValueError("--failure-scope node requires --same-sharding-only for matched placement")
+        for case in cases:
+            if case["scenario"] != "none":
+                case["scenario"] = "coordinator-node"
     modes = ["deterministic", "resume"] if args.same_sharding_only else ["ordinary", "resume"]
     if args.include_deterministic_baseline:
         modes.insert(1, "deterministic")
@@ -32,14 +39,16 @@ def run_comparison(args):
         "comparison_modes": pair_modes,
         "training_epochs": args.epochs, "steps_per_epoch": steps, "batch_size": args.batch_size,
         "fault_after_epoch": args.fault_after_epoch,
+        "failure_scope": failure_scope,
         "fault_after_step": cases[-1]["fault_after_step"] if len(cases) <= 2 else None,
         "observations_per_repetition": len(cases) * len(modes), "timeout_s": args.timeout_s,
         "input_identity": identity, "source_provenance": provenance,
         "samples": [], "comparisons": [], "control_comparisons": [], "skipped": [], "comparison_errors": [],
         "limitations": [
             "Fixed-R OFF and ordinary full-group Train retry enabled in every arm; input resume is an independent Ray Data prototype",
-            "only the original data-coordinator process is killed, at its natural placement; no head/node/driver/storage failure",
-            "two CPU/Gloo training workers on separate logical nodes on one physical machine; all nodes and shared storage survive",
+            ("one dedicated logical coordinator node is removed in both arms; controlled separate-owner placement, not default Ray placement"
+             if failure_scope == "node" else "only the original data-coordinator process is killed, at its natural placement; no node failure"),
+            "two CPU/Gloo training workers on separate logical nodes on one physical machine; driver, head, actor owner, training nodes and shared storage survive",
             "existing CIFAR-10 subset/ResNet-18 workload unchanged; real learning and lazy PNG decode, not convergence or scale evidence",
             "failure after a real Adam update with both ranks gated in an unfinished epoch, not during an arbitrary collective/kernel",
             "early/middle/late refer to progress within the epoch after the selected checkpoint, not fractions of total job time",
@@ -73,6 +82,7 @@ def run_comparison(args):
                 options = {
                     "training_strategy": "coordinator-input-resume", "streaming_learning": True,
                     "mode": mode, "scenario": scenario, "failure_point": point, "failure_timing": "active",
+                    "failure_scope": failure_scope,
                     "training_epochs": args.epochs, "batch_size": args.batch_size, "steps_per_epoch": steps,
                     "fault_after_epoch": args.fault_after_epoch, "fault_after_step": step,
                     "timeout_s": args.timeout_s, "data_directory": str(args.data_directory),
@@ -140,6 +150,8 @@ def main():
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-s", type=float, default=300)
     parser.add_argument("--controls-only", action="store_true")
+    parser.add_argument("--failure-scope", choices=("process", "node"), default="process",
+                        help="Node loss uses an explicit separate-coordinator topology in both arms")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--include-deterministic-baseline", action="store_true")
     modes.add_argument("--same-sharding-only", action="store_true",

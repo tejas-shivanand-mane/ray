@@ -1,4 +1,4 @@
-# Experimental coordinator-process recovery without model rollback
+# Experimental coordinator recovery without model rollback
 
 Status: the user reports that the complete focused correctness suite passed
 locally at `25dab161` on 2026-10-01. The agent did not run the suite. This covers
@@ -27,8 +27,8 @@ checkpointing code is required in the application.
 This trades recomputation after failure for avoiding a replicated coordinator
 journal. It still incurs steady-state hashing, serialization, consumer-owned
 copies and deterministic sharding overhead. Neither low overhead nor a net
-benefit has been measured. Recovery delay grows with the input prefix, and can
-exceed the iterator or distributed-communication timeout.
+benefit is guaranteed outside the measured configurations below. Recovery delay
+grows with the input prefix, and can exceed the iterator or distributed-communication timeout.
 
 ## Why a delivered batch survives
 
@@ -63,8 +63,10 @@ new data. Duplicate requests do not advance a worker's iterator twice.
   from the ordinary locality-aware splitter, whose assignment is not stable.
   `equal=True` is required; fewer than `world_size` trailing rows are dropped.
 - One active iterator per rank, fully consumed each epoch. All consumers, the
-  actor owner (normally the dataset manager), source storage and coordinator
-  node must survive. Worker, driver and node failure are outside this mechanism.
+  actor owner (normally the dataset manager) and source storage must survive.
+  Default placement requires the coordinator node to survive. The opt-in node
+  relocation extension below is pending local validation. Training-worker,
+  actor-owner and driver failure remain outside this mechanism.
 - One process restart by default, configurable from zero to three. Zero is a
   same-sharding ablation, not an unmodified ordinary-Ray baseline.
 - Mid-epoch recovery is the first validation target. An ambiguous failure
@@ -413,4 +415,75 @@ the harness does not force rollback. A resume run that merely finishes from
 prefetched data without replacement-coordinator execution does not satisfy the
 recovery criterion. This coverage change does not add node/driver/storage recovery
 or change the runtime protocol, model, dataset or retry budgets. Agent review is
-source-only; early/late outcomes and the new plot layout await user validation.
+source-only; the new plot layout awaits user validation.
+
+The user subsequently uploaded `coordinator-training-stages.json` from clean
+commit `59403d0e` on 2026-10-06. All six observations passed. Workload times
+(checkpoint retry / input resume) were 90.8743 / 93.3090 seconds without failure,
+103.0533 / 93.5343 early, and 131.0879 / 93.3761 late. Baseline retries repeated
+6 and 30 observed optimizer updates per rank respectively; input resume repeated
+zero and retained both training invocations. All epoch checkpoint hashes and
+per-rank sample orders matched across the six observations. Both replacement
+coordinators completed data execution. These are single-pair process-failure
+results, not node-failure measurements or total overhead versus ordinary Ray.
+
+## Opt-in logical coordinator-node relocation (validation pending)
+
+The default coordinator shares the DatasetManager owner's node and uses hard
+node affinity. Killing that node also kills the owner that Ray needs to restart
+the actor. The extension explicitly separates coordinator placement from actor
+ownership; it does not recover a dead DatasetManager or training controller.
+
+Add `preferred_node_id` (a live Ray node ID different from the actor owner's
+node) and `allow_node_relocation=True` to the configuration above. Ray uses soft
+node affinity and the existing bounded actor restart budget. After the preferred
+node dies, the actor can restart on a surviving node using its owner-retained
+creation arguments. The existing consumer cursors and prefix verification drive
+replay. A newly created actor can also fall back if its preferred node has already
+died, allowing standard Train checkpoint retry in the zero-restart baseline.
+There is no replicated coordinator journal, new checkpoint format, C++ change,
+Fixed-R enrollment or selective Train retry. A future failure of the replacement
+node is covered only if the owner and consumers still survive and budget remains.
+
+The node benchmark uses seven logical nodes on the same physical machine: a
+head, a surviving driver/controller/DatasetManager node, four CPU executor nodes,
+and a dedicated zero-CPU coordinator node. Both arms use that same explicit
+placement and deterministic sharding. This is a controlled topology, not normal
+Ray's default placement. The CIFAR workload remains unchanged. The driver,
+coordinator actor owner, training workers, input files and checkpoint storage
+must survive. Only the dedicated node's raylet, object store and child processes
+are removed; the node is not replaced. Task/training CPU capacity is unchanged.
+
+The report requires the old coordinator PID among terminated node processes,
+GCS confirmation of node death, exactly that node missing from the live set,
+and survival of driver/owner/training nodes. Input resume must additionally show
+a new coordinator worker on a different live node, completed data execution in
+that process, unchanged training invocations, no checkpoint restore, complete
+optimizer progress and matching checkpoint hashes/sample order. Baseline Train
+retry remains enabled; a baseline that completes from buffered data is accepted.
+
+Run the new runtime checks first (no agent execution):
+
+```bash
+python -m pytest -q python/ray/tests/test_resumable_split_node.py \
+  python/ray/tests/test_resumable_split.py::test_relocation_requires_separate_owner_and_explicit_valid_placement
+```
+
+Then run the short midpoint comparison (two controls and two faults):
+
+```bash
+bash gossip_benchmarks/validate_coordinator_training.sh \
+  --data-directory ~/ray-coverage/cifar-streaming \
+  --same-sharding-only --failure-scope node --failure-point middle --repeats 1 \
+  --output ~/ray-coverage/coordinator-node-training.json
+
+python gossip_benchmarks/plot_coordinator_training.py \
+  ~/ray-coverage/coordinator-node-training.json \
+  --output ~/ray-coverage/coordinator-node-training.png
+```
+
+Budget approximately 8-10 minutes for four observations based on earlier process
+runs, plus runtime checks; relocation timings are not yet measured. Plotting
+remains separate and labels logical-node failure. This does not demonstrate
+physical-machine, head-node, training-worker, actor-owner, driver or storage-loss
+recovery. All tests, benchmark execution and plot rendering remain for the user.

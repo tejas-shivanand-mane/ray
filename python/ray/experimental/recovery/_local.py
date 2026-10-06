@@ -30,6 +30,7 @@ def local_head_failure_cluster(
     args, *, coordinator_cpus=1, recovery_enabled=True, include_dashboard=False,
     allow_head_failure=None,
     include_worker_failure=False,
+    include_data_coordinator=False,
 ):
     # Existing callers retain their injection policy. Comparisons can explicitly
     # apply the same external replacement operation to an OFF cluster as well.
@@ -84,6 +85,12 @@ def local_head_failure_cluster(
                 )
                 for index in range(args.local_executor_nodes)
             ]
+            # Optional failure target with no training/task CPUs. Actor ownership
+            # stays with the surviving driver/controller node in this topology.
+            data_coordinator = (cluster.add_node(
+                num_cpus=0, node_ip_address=f"127.0.0.{args.local_executor_nodes + 4}",
+                **node_options,
+            ) if include_data_coordinator else None)
             cluster.wait_for_nodes()
             # Connecting through the head endpoint alone selects the head's
             # raylet on a local cluster. Explicitly bind this driver to a worker.
@@ -97,9 +104,13 @@ def local_head_failure_cluster(
             case_args = argparse.Namespace(**vars(args))
             case_args.owner_node_id = head.node_id
             case_args.executor_node_ids = tuple(node.node_id for node in executors)
+            case_args.data_coordinator_node_id = data_coordinator.node_id if data_coordinator else None
+            case_args.driver_node_id = driver_node_id
             if case_args.producer_concurrency is None:
                 case_args.producer_concurrency = len(executors)
             survivors = {coordinator.node_id, *case_args.executor_node_ids}
+            if data_coordinator:
+                survivors.add(data_coordinator.node_id)
             crashed = False
             failed_workers = set()
 
@@ -111,9 +122,11 @@ def local_head_failure_cluster(
                     raise RuntimeError("Worker-node failure injection is disabled")
                 if node_id in failed_workers:
                     raise ValueError("Target executor was already removed")
-                if len(executors) - len(failed_workers) <= 2:
+                if (node_id in case_args.executor_node_ids
+                        and len(set(case_args.executor_node_ids) - failed_workers) <= 2):
                     raise ValueError("Worker-node failure must leave two executors for recovery")
-                node = next((node for node in executors if node.node_id == node_id), None)
+                targets = executors + ([data_coordinator] if data_coordinator else [])
+                node = next((node for node in targets if node.node_id == node_id), None)
                 if node is None:
                     raise ValueError("Worker failure must target a known executor, not the head/coordinator")
                 before = {n["NodeID"] for n in ray.nodes() if n["Alive"]}
@@ -128,7 +141,7 @@ def local_head_failure_cluster(
                     except psutil.NoSuchProcess:
                         pass
                 if worker_pid not in children:
-                    raise ValueError("Selected training process is not a child of the target node")
+                    raise ValueError("Selected process is not a child of the target node")
                 failed_workers.add(node_id)
                 survivors.discard(node_id)
                 started = time.monotonic()
@@ -168,7 +181,9 @@ def local_head_failure_cluster(
                 if runtime.get_node_id() != driver_node_id or runtime.get_job_id() != driver_job_id:
                     raise RuntimeError("Worker failure changed the surviving driver/job")
                 return {
-                    "failure_scope": "logical_worker_node_processes_with_surviving_shared_storage",
+                    "failure_scope": ("logical_data_coordinator_node_processes_with_surviving_shared_storage"
+                                      if node is data_coordinator else
+                                      "logical_worker_node_processes_with_surviving_shared_storage"),
                     "node_id": node_id, "training_worker_pid": worker_pid,
                     "node_process_pids": sorted({p.pid for p in roots} | set(children)),
                     "all_node_processes_exited": True, "gcs_marked_dead": True,

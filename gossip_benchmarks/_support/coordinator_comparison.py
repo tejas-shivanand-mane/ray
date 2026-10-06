@@ -85,7 +85,8 @@ def restored_epoch(sample):
 
 def validate_progress(sample, options):
     groups, starts = sample["groups"], sample["starts"]
-    inject = options["scenario"] == "coordinator-process"
+    inject = options["scenario"] in ("coordinator-process", "coordinator-node")
+    node_loss = options["scenario"] == "coordinator-node"
     resume = options["mode"] == "resume"
     if len(groups) not in (1, 2) or (len(groups) == 2 and (not inject or resume)):
         raise ValueError("Input resume must retain its training invocation; fallback is not resume success")
@@ -104,12 +105,26 @@ def validate_progress(sample, options):
     fault = sample.get("coordinator_fault")
     if inject:
         if (not fault or not fault.get("completed") or fault.get("error")
-                or fault["scope"] != "coordinator_process_only"
+                or fault["scope"] != ("coordinator_node" if node_loss else "coordinator_process_only")
                 or fault["groups"] != [groups[0]]
-                or fault["alive_nodes_before"] != fault["alive_nodes_after"]
-                or fault["old"]["node_id"] not in fault["alive_nodes_after"]
                 or fault["operation_finished_ns"] < fault["request_ns"]):
             raise ValueError("Missing coordinator-only fault evidence")
+        before, after = set(fault["alive_nodes_before"]), set(fault["alive_nodes_after"])
+        target_node = fault["old"]["node_id"]
+        if node_loss:
+            loss = fault.get("node_failure", {})
+            protected = {fault.get("driver_node_id"), fault["old"].get("owner_node_id"),
+                         *(w["node_id"] for w in groups[0])}
+            if (target_node not in before or after != before - {target_node}
+                    or None in protected or not protected <= after
+                    or loss.get("node_id") != target_node
+                    or loss.get("all_node_processes_exited") is not True
+                    or loss.get("gcs_marked_dead") is not True
+                    or fault["old"].get("pid") not in loss.get("node_process_pids", [])
+                    or set(loss.get("surviving_node_ids", [])) != after):
+                raise ValueError("Missing isolated coordinator-node loss evidence")
+        elif before != after or target_node not in after:
+            raise ValueError("Process-only failure unexpectedly lost a node")
         committed = sample["reports"][epoch - 1]
         if (fault["report_number"] != epoch or not committed["checkpoint"]
                 or fault["checkpoint"] != committed["checkpoint"]
@@ -119,7 +134,8 @@ def validate_progress(sample, options):
         if resume:
             new = fault.get("new")
             if (not new or new["worker_id"] == fault["old"]["worker_id"]
-                    or new["node_id"] != fault["old"]["node_id"]):
+                    or new["node_id"] not in after
+                    or ((new["node_id"] == target_node) == node_loss)):
                 raise ValueError("No confirmed coordinator process replacement")
             if not any(e["worker_id"] == new["worker_id"] and e["state"] == "completed"
                        and e["time_ns"] > fault["request_ns"] for e in sample["data_executions"]):
@@ -209,6 +225,13 @@ def compare_samples(left, right, *, control=False):
                 "model_parameters", "batch_size", "checkpoint_policy", "native_settings"):
         if left[key] != right[key]:
             raise ValueError(f"Mismatched {key}")
+    placement = lambda s: s.get("coordinator_placement", "owner_node_hard_affinity")
+    if placement(left) != placement(right):
+        raise ValueError("Mismatched coordinator placement")
+    for sample in (left, right):
+        if sample["scenario"] == "coordinator-node" and (
+                placement(sample) != "separate_node_soft_affinity" or sample["mode"] == "ordinary"):
+            raise ValueError("Node loss requires the matched separate-coordinator topology")
     if not left["native_settings"] or any(v is not False for k, v in left["native_settings"].items()
                                                if k.startswith("enable_")):
         raise ValueError("Fixed-R native protection must be disabled")

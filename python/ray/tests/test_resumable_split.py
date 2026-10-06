@@ -16,7 +16,7 @@ import pytest
 
 import ray
 from ray.data._internal.iterator.resumable_split import (
-    CONFIG_KEY, EMPTY_DIGEST, ReplayRounds, ResumeConfig,
+    CONFIG_KEY, EMPTY_DIGEST, ReplayRounds, ResumeConfig, coordinator_placement,
 )
 from ray.data.context import DataContext
 
@@ -142,6 +142,22 @@ def test_round_byte_limit():
     rounds = ReplayRounds([_table(list(range(8)))], 2, 1)
     with pytest.raises(ValueError, match="max_round_bytes"):
         rounds.produce()
+
+
+def test_relocation_requires_separate_owner_and_explicit_valid_placement():
+    owner, target = "1" * 56, "2" * 56
+    default = coordinator_placement(ResumeConfig(deterministic=True), owner)
+    assert default.node_id == owner and not default.soft
+    relocated = coordinator_placement(ResumeConfig(
+        deterministic=True, preferred_node_id=target, allow_node_relocation=True), owner)
+    assert relocated.node_id == target and relocated.soft
+    with pytest.raises(ValueError, match="different from the actor owner"):
+        coordinator_placement(ResumeConfig(
+            deterministic=True, preferred_node_id=owner, allow_node_relocation=True), owner)
+    for options in ({"allow_node_relocation": True}, {"preferred_node_id": "worker"},
+                    {"preferred_node_id": ray.NodeID.nil().hex()}, {"allow_node_relocation": 1}):
+        with pytest.raises(ValueError):
+            ResumeConfig(deterministic=True, **options)
 
 
 @pytest.fixture

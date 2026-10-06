@@ -15,6 +15,8 @@ COLORS = {"ordinary": "#d97706", "resume": "#0072b2", "deterministic": "#7b3294"
 
 
 def comparison_caption(report):
+    if report.get("failure_scope") == "node":
+        return "Identical sharding and dedicated coordinator-node placement; driver, owner and training workers survive. "
     if set(report["modes"]) == {"deterministic", "resume"}:
         return "Identical deterministic sharding; coordinator restart disabled versus enabled. "
     return "Ordinary and resume sharding differ; each fault is checked against its own control. "
@@ -26,8 +28,9 @@ def case_title(report, case):
     if case["failure_point"] is None:
         return "Coordinator-process failure during training"
     epoch = report["fault_after_epoch"] + 1
+    scope = "Logical coordinator-node" if case["scenario"] == "coordinator-node" else "Coordinator-process"
     return (f"{case['failure_point'].capitalize()}: epoch {epoch}, update {case['fault_after_step']}\n"
-            "Coordinator-process failure")
+            f"{scope} failure")
 
 
 def plot(report, output):

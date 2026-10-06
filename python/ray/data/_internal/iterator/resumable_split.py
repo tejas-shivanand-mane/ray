@@ -1,8 +1,9 @@
 """Experimental deterministic input replay after split-coordinator process loss.
 
 This is NOT Fixed-R: it reconstructs input from serialized dataset lineage.
-Consumer processes, the actor owner, input storage and the coordinator node must
-survive. Delivered payloads and progress belong to consumers, never the coordinator.
+Consumer processes, the actor owner and input storage must survive. Node relocation
+is opt-in and requires initial placement away from the owner. Delivered payloads
+and progress belong to consumers, never the coordinator.
 """
 
 import hashlib
@@ -11,6 +12,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import pyarrow as pa
 
@@ -35,6 +37,8 @@ class ResumeConfig:
     max_restarts: int = 1
     timeout_s: float = 120.0
     max_round_bytes: int = 64 * 1024**2
+    preferred_node_id: Optional[str] = None
+    allow_node_relocation: bool = False
 
     def __post_init__(self):
         if self.deterministic is not True:
@@ -46,6 +50,25 @@ class ResumeConfig:
             raise ValueError("Use a bounded restart budget from 0 to 3")
         if not math.isfinite(self.timeout_s) or self.timeout_s <= 0:
             raise ValueError("timeout_s must be finite and positive")
+        if type(self.allow_node_relocation) is not bool:
+            raise ValueError("allow_node_relocation must be a boolean")
+        if self.preferred_node_id is not None:
+            node = self.preferred_node_id
+            if (not isinstance(node, str) or len(node) != 56
+                    or any(c not in "0123456789abcdef" for c in node)
+                    or ray.NodeID.from_hex(node).is_nil()):
+                raise ValueError("preferred_node_id must be a non-nil Ray node ID")
+        if self.allow_node_relocation and self.preferred_node_id is None:
+            raise ValueError("Node relocation requires explicit placement away from the actor owner")
+
+
+def coordinator_placement(config, owner_node_id):
+    target = config.preferred_node_id or owner_node_id
+    if config.allow_node_relocation and target == owner_node_id:
+        raise ValueError("Node relocation requires a preferred node different from the actor owner")
+    # Soft affinity lets Ray restart on an available node after the preferred
+    # node disappears. The surviving owner retains actor creation arguments.
+    return NodeAffinitySchedulingStrategy(target, soft=config.allow_node_relocation)
 
 
 def _encode(table):
@@ -111,12 +134,13 @@ class ReplayRounds:
 class ReplayCoordinator:
     """Recreated by Ray after process death; consumers carry epoch/cursor/digest."""
 
-    def __init__(self, lineage, n, config):
+    def __init__(self, lineage, n, config, owner_node_id=None):
         from ray.data import Dataset
 
         self.dataset = Dataset.deserialize_lineage(lineage)
         DataContext._set_current(self.dataset.context)
         self.n, self.config = n, config
+        self._owner_node_id = owner_node_id
         self.cv = threading.Condition(threading.RLock())
         self.epoch = None
         self.rounds = None
@@ -311,13 +335,12 @@ def create_resumable_split(dataset, n, equal, options):
         if type(op).__name__ not in allowed or isinstance(getattr(op, "compute", None), ActorPoolStrategy):
             raise ValueError("Resumable splitting supports only persistent reads and pure task maps/filters")
     lineage = dataset.serialize_lineage()
+    owner_node_id = ray.get_runtime_context().get_node_id()
     coordinator = ray.remote(ReplayCoordinator).options(
         num_cpus=0, max_concurrency=n + 2,
         max_restarts=config.max_restarts, max_task_retries=config.max_restarts,
-        scheduling_strategy=NodeAffinitySchedulingStrategy(
-            ray.get_runtime_context().get_node_id(), soft=False,
-        ),
-    ).remote(lineage, n, config)
+        scheduling_strategy=coordinator_placement(config, owner_node_id),
+    ).remote(lineage, n, config, owner_node_id)
     # Metadata access must not depend on a coordinator RPC during restart.
     schema = dataset.schema(fetch_if_missing=False)
     return [ResumableSplitIterator(coordinator, i, n, config, dataset.context,
