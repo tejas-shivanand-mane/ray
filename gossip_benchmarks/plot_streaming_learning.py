@@ -41,7 +41,7 @@ def plot_report(report, output):
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator
 
-    if report.get("profile") == "cifar-checkpoint-frequency":
+    if report.get("profile") in ("cifar-checkpoint-frequency", "cifar-input-resume"):
         return plot_checkpoint_report(report, output)
     if report.get("profile") != "cifar-streaming-learning":
         raise ValueError("Expected a CIFAR streaming learning report")
@@ -117,6 +117,10 @@ def plot_checkpoint_report(report, output):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    input_study = report.get("profile") == "cifar-input-resume"
+    policies = ("replay", "direct") if input_study else ("epoch", "mid_epoch")
+    labels = {"replay": "Prefix replay", "direct": "Direct input resume",
+              "epoch": "Epoch checkpoints", "mid_epoch": "Mid-epoch checkpoints"}
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     panels = [
         (axes[0, 0], "Workload seconds", lambda s: s["workload_s"], ("none", "worker-node")),
@@ -126,12 +130,12 @@ def plot_checkpoint_report(report, output):
     ]
     try:
         for ax, title, value, scenarios in panels:
-            for offset, policy, color in ((-.18, "epoch", "#D55E00"), (.18, "mid_epoch", "#0072B2")):
+            for offset, policy, color in ((-.18, policies[0], "#D55E00"), (.18, policies[1], "#0072B2")):
                 for index, scenario in enumerate(scenarios):
                     samples = [s for s in report["samples"] if s["scenario"] == scenario and s["policy"] == policy]
                     passing = [s for s in samples if s["status"] == "passed"]
                     x = index + offset
-                    label = ("Epoch checkpoints" if policy == "epoch" else "Mid-epoch checkpoints") if index == 0 else None
+                    label = labels[policy] if index == 0 else None
                     if passing:
                         values = [value(s) for s in passing]
                         ax.bar(x, statistics.mean(values), width=.32, color=color, alpha=.65, label=label)
@@ -147,7 +151,7 @@ def plot_checkpoint_report(report, output):
             ax.legend(fontsize=8)
             ax.grid(axis="y", alpha=.2)
         status = "passed" if report["status"] == "passed" else "INCOMPLETE / FAILED — inspect JSON"
-        fig.suptitle(f"CIFAR checkpoint frequency · {status}")
+        fig.suptitle(f"CIFAR {'input resume' if input_study else 'checkpoint frequency'} · {status}")
         fig.text(.5, .025,
                  "Ordinary full-group retry in both arms; Fixed-R and coordinator resume OFF. Same deterministic file stripes.\n"
                  "Dots: individual passing trials. Bars: means. Decodes include verified prefix replay and prefetch.\n"

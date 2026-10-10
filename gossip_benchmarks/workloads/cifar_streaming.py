@@ -3,7 +3,7 @@
 Preparation writes encoded images, not precomputed tensors/features. Each epoch
 reads and transforms them again through Ray Data. No failure/recovery policy is
 implemented here. The optional checkpoint study adds ordinary application
-mid-epoch checkpoints and verified input-prefix replay; an external harness
+mid-epoch checkpoints and verified input-prefix replay or direct resume; an external harness
 selects the policy and injects node failures.
 """
 
@@ -101,7 +101,7 @@ def prepare_data(directory, train_rows, validation_rows):
     print(directory / "manifest.json")
 
 
-def decode(batch, telemetry_directory=None, split="train"):
+def decode(batch, telemetry_directory=None, split="train", study_context=None):
     started = time.monotonic_ns()
     pixels = np.stack([np.asarray(Image.open(io.BytesIO(bytes(value))).convert("RGB"))
                        for value in batch["image"]])
@@ -112,7 +112,8 @@ def decode(batch, telemetry_directory=None, split="train"):
         runtime = ray.get_runtime_context()
         event(telemetry_directory, "decode", split=split, started_ns=started,
               finished_ns=time.monotonic_ns(), sample_ids=output["sample_id"].tolist(),
-              node_id=runtime.get_node_id(), worker_id=runtime.get_worker_id())
+              node_id=runtime.get_node_id(), worker_id=runtime.get_worker_id(),
+              **(study_context or {}))
     return output
 
 
@@ -224,7 +225,10 @@ def checkpoint_study_loop(config):
     start_epoch, start_step = (saved["epoch"], saved["step"]) if saved else (0, 0)
     event(telemetry, "study_start", **identity, invocation=invocation,
           epoch=start_epoch, step=start_step, checkpoint_sha256=checkpoint_sha, time_ns=time.monotonic_ns())
-    training = train.get_dataset_shard(f"train_{rank}")
+    input_study = config.get("input_study", False)
+    if input_study:
+        DataContext._set_current(config["data_context"].copy())
+    training = None if input_study else train.get_dataset_shard(f"train_{rank}")
     validation = train.get_dataset_shard("validation")
     loss_fn = nn.CrossEntropyLoss()
 
@@ -254,10 +258,28 @@ def checkpoint_study_loop(config):
         weighted_loss = saved["weighted_loss"] if skip else 0.0
         if len(ids) != skip * config["batch_size"] or len(hashes) != len(ids):
             raise ValueError("Checkpoint cursor and consumed prefix disagree")
+        if (ids != expected_ids[:skip * config["batch_size"]]
+                or hashes != [config["input_hashes"][str(i)] for i in ids]):
+            raise ValueError("Saved consumed prefix does not match input identity")
+        direct = input_study and config["input_resume"] == "direct"
+        bypass = skip if direct else 0
+        if input_study:
+            from ray.data.expressions import col
+            files, excluded = config["input_suffix"](config["rank_files"][rank], config["file_rows"],
+                                           expected_ids, bypass * config["batch_size"])
+            training = ray.data.read_parquet(
+                [str(Path(config["data_directory"]) / name) for name in files],
+                concurrency=2)
+            if excluded:
+                training = training.filter(expr=~col("sample_id").is_in(excluded))
+            training = training.map_batches(
+                    decode, batch_size=16, batch_format="numpy", concurrency=2,
+                    fn_kwargs={"telemetry_directory": telemetry, "split": "train",
+                               "study_context": {"rank": rank, "invocation": invocation, "epoch": epoch}})
         restored_rng = saved["rng"] if saved and epoch == start_epoch else None
         steps = 0
         for index, batch in enumerate(training.iter_torch_batches(
-                batch_size=config["batch_size"], prefetch_batches=1), 1):
+                batch_size=config["batch_size"], prefetch_batches=1), bypass + 1):
             batch_ids = batch["sample_id"].tolist()
             fingerprints = [input_fingerprint(x, y) for x, y in zip(batch["x"].numpy(), batch["y"].tolist())]
             offset = (index - 1) * config["batch_size"]
@@ -361,8 +383,12 @@ def main():
             [str(args.data_directory / name) for name in study["rank_files"][rank]], concurrency=2
         ).map_batches(decode, batch_size=16, batch_format="numpy", concurrency=2,
                       fn_kwargs={"telemetry_directory": args.telemetry_directory, "split": "train"})
-                    for rank in (0, 1)}
+                    for rank in (() if study.get("input_study") else (0, 1))}
         datasets["validation"] = dataset("validation")
+        study["data_context"] = context.copy()
+        if study.get("input_study"):
+            from checkpoint_study import input_suffix
+            study["input_suffix"] = input_suffix
         trainer = TorchTrainer(
             checkpoint_study_loop, train_loop_config={**study, "telemetry_directory": args.telemetry_directory},
             scaling_config=ScalingConfig(num_workers=2, use_gpu=False), datasets=datasets,

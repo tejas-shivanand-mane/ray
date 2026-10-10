@@ -272,3 +272,84 @@ def test_checkpoint_policy_comparison_requires_matching_final_state(checks, corr
             study.compare(sample, right)
     else:
         assert study.compare(sample, right)["final_model_optimizer_rng_match"]
+
+
+@pytest.mark.parametrize("consumed,remaining,excluded", [
+    (0, ["a", "b", "c"], []), (4, ["b", "c"], []),
+    (6, ["b", "c"], [90, 2]), (11, ["c"], [31, 7, 60]),
+])
+def test_input_seek_preserves_unsorted_ids_and_partial_file(checks, consumed, remaining, excluded):
+    study = importlib.import_module("checkpoint_study")
+    ids = [8, 1, 50, 3, 90, 2, 17, 4, 31, 7, 60, 5]
+    files, omitted = study.input_suffix(["a", "b", "c"], {"a": 4, "b": 4, "c": 4}, ids, consumed)
+    assert (files, omitted) == (remaining, excluded)
+    contents = {"a": ids[:4], "b": ids[4:8], "c": ids[8:]}
+    assert [i for f in files for i in contents[f] if i not in omitted] == ids[consumed:]
+
+
+@pytest.mark.parametrize("consumed", [-1, 12, 13])
+def test_input_seek_rejects_out_of_range_cursor(checks, consumed):
+    study = importlib.import_module("checkpoint_study")
+    with pytest.raises(ValueError):
+        study.input_suffix(["a"], {"a": 12}, list(range(12)), consumed)
+
+
+def test_direct_resume_requires_exact_updates_without_prefix_delivery(checks):
+    study = importlib.import_module("checkpoint_study")
+    events = [e for e in checkpoint_events(True, 2) if e["kind"] != "study_input"]
+    args = ([list(range(8)), list(range(8, 16))], 2, 1, 1, 5, 2, True)
+    recovery = study.validate_updates(events, *args, input_resume="direct")
+    assert recovery["repeated_updates_per_rank"] == 1
+    assert recovery["verified_skipped_batches_per_rank"] == 0
+    assert recovery["bypassed_batches_per_rank"] == 4
+    with pytest.raises(ValueError):
+        study.validate_updates(checkpoint_events(True, 2), *args, input_resume="direct")
+    events.remove(next(e for e in events if e["kind"] == "study_update" and e["invocation"] == "0-1"))
+    with pytest.raises(ValueError):
+        study.validate_updates(events, *args, input_resume="direct")
+
+
+@pytest.mark.parametrize("corruption", [None, "cadence", "policy", "state", "control"])
+def test_input_comparison_holds_checkpoint_policy_constant(checks, corruption):
+    study = importlib.import_module("checkpoint_study")
+    from fashion_comparison import PROVENANCE_KEYS
+    left = {k: "same" for k in ("input_identity", "workload_sha256", "torch_version", "torchvision_version",
+            "training_epochs", "batch_size", "steps_per_epoch", "fault_epoch", "fault_after_step", "sharding")}
+    left.update(status="passed", workload_completed=True, mode="off", restart_scope="full",
+                fixed_r_enabled=False, selective_retry=False, workload_s=10, scenario="none",
+                checkpoint_every_steps=8, final_state_sha256={"0": "s0", "1": "s1"},
+                native_settings={"enable_streaming_recovery": False},
+                provenance={k: "same" for k in PROVENANCE_KEYS}, input_study=True, input_resume="replay")
+    right = copy.deepcopy(left)
+    right["input_resume"] = "direct"
+    if corruption == "cadence":
+        right["checkpoint_every_steps"] = 4
+    elif corruption == "policy":
+        right["input_resume"] = "replay"
+    elif corruption == "state":
+        right["final_state_sha256"]["0"] = "changed"
+    if corruption:
+        with pytest.raises(ValueError):
+            study.compare(left, right, input_study=True, control=corruption == "control")
+    else:
+        assert study.compare(left, right, input_study=True)["final_model_optimizer_rng_match"]
+
+
+@pytest.mark.parametrize("policy,expected", [("replay", 8), ("direct", 4)])
+def test_resumed_decode_evidence_rejects_prefix_and_missing_suffix(checks, policy, expected):
+    study = importlib.import_module("checkpoint_study")
+    ids = [list(range(8)), list(range(8, 16))]
+    events = [e for e in checkpoint_events(True, 2) if e["kind"] == "study_start"]
+    for rank in (0, 1):
+        events.append(dict(kind="decode", split="train", rank=rank, invocation=f"{rank}-1",
+                           epoch=1, sample_ids=ids[rank][4 if policy == "direct" else 0:]))
+    assert study.validate_input_decodes(events, ids, 2, 1, policy, True) == {"0": expected, "1": expected}
+    corrupt = copy.deepcopy(events)
+    corrupt[-1]["sample_ids"].pop()
+    with pytest.raises(ValueError):
+        study.validate_input_decodes(corrupt, ids, 2, 1, policy, True)
+    if policy == "direct":
+        corrupt = copy.deepcopy(events)
+        corrupt[-1]["sample_ids"].append(8)
+        with pytest.raises(ValueError):
+            study.validate_input_decodes(corrupt, ids, 2, 1, policy, True)

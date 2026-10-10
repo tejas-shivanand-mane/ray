@@ -10,6 +10,7 @@ one focused suite; older exploratory entry points have been retired.
 | Does XGBoost selective retry survive two sequential worker-node losses? | `validate_train_retry.sh --mode off --scenario none --scenario worker-node` | Full-group vs selective, same application checkpoints |
 | Does Fixed-R recover controlled owner loss? | `validate_fashion_owner.sh` | `FASHION_OWNER_RECOVERY.md`; `plot_fashion_owner_recovery.py` |
 | What does model checkpointing leave to reconstruct after worker loss? | `validate_streaming_learning.sh --comparison checkpoints` | `STREAMING_LEARNING.md`; `plot_streaming_learning.py` |
+| Can a saved input cursor avoid repeated decoding at the same checkpoint cadence? | `validate_streaming_learning.sh --comparison input-resume` | `STREAMING_LEARNING.md`; `plot_streaming_learning.py` |
 | What is Fixed-R's streaming learning overhead? | `validate_streaming_learning.sh` | `STREAMING_LEARNING.md`; `plot_streaming_learning.py` |
 | Are runtime recovery invariants preserved? | `05_succession_correctness.py`, `06_fixed_r_correctness.py` | Keep both core correctness suites |
 

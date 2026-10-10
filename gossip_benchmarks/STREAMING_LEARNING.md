@@ -1,3 +1,59 @@
+# Input-cursor limitation study
+
+`--comparison input-resume` compares prefix replay against direct input resume
+with **the same mid-epoch checkpoint cadence**. Both use ordinary full-group
+retry, with Fixed-R, selective retry and coordinator resume disabled.
+
+Each rank creates its own ordinary Ray Data pipeline each epoch in both arms.
+This matches ownership and pipeline construction between policies, but differs
+from the driver-created iterators in the checkpoint-frequency study below.
+Do not compare the two studies as if only one setting changed.
+
+Direct resume uses the cursor loaded from the committed application checkpoint,
+not the injected fault position. It omits fully consumed Parquet files and
+filters consumed IDs inside a partial boundary file before PNG decoding.
+IDs are selected in shuffled order, so numeric ID thresholds are invalid.
+Parquet may still read the boundary row group: this measures avoided image
+decoding, not physical storage bytes. No prepared data format change is needed.
+
+Saved sample IDs/fingerprints are checked against the manifest; delivered suffix
+batches are checked against exact IDs/tensors. Both policies must execute the
+same optimizer updates and finish with identical model, Adam and RNG state.
+Decode telemetry records rank, invocation and epoch to reject any direct-resume
+prefix decoding and require complete suffix coverage. Healthy controls must
+match before the fault cases run. Checkpoint content/cadence is unchanged.
+
+```bash
+bash gossip_benchmarks/validate_streaming_learning.sh \
+  --comparison input-resume \
+  --data-directory ~/ray-coverage/cifar-streaming \
+  --epochs 2 --checkpoint-every-steps 8 --fault-after-step 18 \
+  --repeats 1 --timeout-s 420 \
+  --output ~/ray-coverage/worker-input-resume.json
+
+python gossip_benchmarks/plot_streaming_learning.py \
+  ~/ray-coverage/worker-input-resume.json \
+  --output ~/ray-coverage/worker-input-resume.png
+```
+
+Expected accounting for this configuration: both arms repeat two optimizer
+updates per rank. Replay decodes and skips 16 saved batches; direct resume
+bypasses those 16 batches (512 images per rank) on the replacement invocation.
+Prefetch and killed in-flight work affect aggregate decode counts. A passing
+run need not be faster: CIFAR decoding may be too cheap to dominate recovery.
+Use `--checkpoint-every-steps 5 --fault-after-step 18` in a separate report to
+exercise step 15, a cursor inside a 64-row file at batch size 32.
+
+This is an application-level strategy for immutable, indexed, deterministic
+input. It does not provide automatic cursors for arbitrary transforms,
+shuffles, stochastic augmentation, changed world sizes or non-seekable input.
+Whole logical worker-node processes fail on one machine; shared input and
+checkpoint storage, head, driver and spare capacity survive. No cloud
+provisioning delay or loss of node-local storage is tested. New tests and
+benchmarks are for local execution; no new measurements are claimed here.
+
+---
+
 # Checkpoint-frequency limitation study
 
 Use the existing streaming runner with `--comparison checkpoints` to investigate

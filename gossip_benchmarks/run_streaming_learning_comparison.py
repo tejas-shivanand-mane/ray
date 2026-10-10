@@ -137,9 +137,9 @@ def run_comparison(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--comparison", choices=("fixed-r", "checkpoints"), default="fixed-r")
+    parser.add_argument("--comparison", choices=("fixed-r", "checkpoints", "input-resume"), default="fixed-r")
     parser.add_argument("--checkpoint-every-steps", type=int, default=8,
-                        help="Mid-epoch checkpoint interval for --comparison checkpoints")
+                        help="Mid-epoch checkpoint interval for checkpoints and input-resume comparisons")
     parser.add_argument("--data-directory", type=Path, required=True)
     parser.add_argument("--result-directory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -156,11 +156,11 @@ def main():
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-s", type=float, default=300)
     args = parser.parse_args()
-    if (sys.platform != "linux" or args.epochs < (2 if args.controls_only or args.comparison == "checkpoints" else 4)
+    if (sys.platform != "linux" or args.epochs < (2 if args.controls_only or args.comparison in ("checkpoints", "input-resume") else 4)
             or args.repeats < 1 or args.batch_size < 2
             or not math.isfinite(args.timeout_s) or args.timeout_s <= 0):
         parser.error("Use Linux, >=4 epochs (>=2 for controls only), positive repeats, batch size >=2 and finite positive timeout")
-    if args.comparison == "checkpoints":
+    if args.comparison in ("checkpoints", "input-resume"):
         if args.failure_point or args.failure_kind or args.profile_fixed_r or args.fresh_owner_helpers:
             parser.error("Checkpoint study selects worker-node loss in epoch 2 and disables Fixed-R options")
         if args.checkpoint_every_steps < 1:

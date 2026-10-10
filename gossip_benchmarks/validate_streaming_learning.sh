@@ -19,7 +19,7 @@ for argument in "$@"; do
   case "$argument" in --comparison=*) comparison="${argument#--comparison=}" ;; esac
   previous="$argument"
 done
-if [[ "$comparison" == "checkpoints" ]]; then
+if [[ "$comparison" == "checkpoints" || "$comparison" == "input-resume" ]]; then
   python -m pytest -q python/ray/tests/test_streaming_learning_comparison.py
 else
 python -m pytest -q \

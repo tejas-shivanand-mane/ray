@@ -33,6 +33,26 @@ def rank_partition(manifest, batch_size):
     return rank_files, rank_ids
 
 
+def input_suffix(files, file_rows, sample_ids, consumed_rows):
+    """Select unread files and the excluded prefix inside the boundary file.
+
+    IDs are unique but deliberately not sorted. Never seek by numeric ID.
+    Parquet may still read a boundary row group; decoding sees only the suffix.
+    """
+    if (not 0 <= consumed_rows < len(sample_ids)
+            or len(set(sample_ids)) != len(sample_ids)
+            or any(file_rows[name] <= 0 for name in files)
+            or sum(file_rows[name] for name in files) != len(sample_ids)):
+        raise ValueError("Invalid input cursor or file manifest")
+    offset = 0
+    for index, name in enumerate(files):
+        end = offset + file_rows[name]
+        if consumed_rows < end:
+            return files[index:], sample_ids[offset:consumed_rows]
+        offset = end
+    raise ValueError("Input cursor exhausted its epoch")
+
+
 def restore_cursor(fault_epoch, fault_step, interval):
     if interval < 0 or fault_epoch < 1 or fault_step < 1:
         raise ValueError("Invalid fault/checkpoint configuration")
@@ -41,8 +61,10 @@ def restore_cursor(fault_epoch, fault_step, interval):
     return fault_epoch, (fault_step // interval * interval if interval else 0)
 
 
-def validate_updates(events, rank_ids, epochs, batch_size, fault_epoch, fault_step, interval, inject):
+def validate_updates(events, rank_ids, epochs, batch_size, fault_epoch, fault_step, interval, inject, input_resume="replay"):
     """Validate all executed updates, including exactly the allowed rollback."""
+    if input_resume not in ("replay", "direct"):
+        raise ValueError("Unknown input resume policy")
     steps = len(rank_ids[0]) // batch_size
     cursor_epoch, cursor_step = restore_cursor(fault_epoch, fault_step, interval)
     expected_keys = [(e, s) for e in range(epochs) for s in range(1, steps + 1)]
@@ -68,7 +90,7 @@ def validate_updates(events, rank_ids, epochs, batch_size, fault_epoch, fault_st
                 if event["sample_ids"] != rank_ids[rank][offset:offset + batch_size]:
                     raise ValueError("Optimizer update consumed the wrong samples")
         skipped = [e for e in events if e["kind"] == "study_input" and e["rank"] == rank and e["skipped"]]
-        if len(skipped) != (cursor_step if inject else 0):
+        if len(skipped) != (cursor_step if inject and input_resume == "replay" else 0):
             raise ValueError("Wrong number of reconstructed/skipped batches")
         for index, event in enumerate(sorted(skipped, key=lambda e: e["time_ns"]), 1):
             if (event["epoch"] != cursor_epoch or event["step"] != index
@@ -76,9 +98,41 @@ def validate_updates(events, rank_ids, epochs, batch_size, fault_epoch, fault_st
                     or event["invocation"] != starts[-1]["invocation"]):
                 raise ValueError("Skipped prefix does not match the restored cursor")
     return {"repeated_updates_per_rank": fault_step - cursor_step if inject else 0,
-            "verified_skipped_batches_per_rank": cursor_step if inject else 0,
+            "verified_skipped_batches_per_rank": cursor_step if inject and input_resume == "replay" else 0,
+            "bypassed_batches_per_rank": cursor_step if inject and input_resume == "direct" else 0,
             "restored_epoch": cursor_epoch if inject else None,
             "restored_step": cursor_step if inject else None}
+
+
+def validate_input_decodes(events, rank_ids, epochs, batch_size, policy, inject):
+    """Prove suffix coverage and no prefix decoding on replacement invocations."""
+    starts = [e for e in events if e["kind"] == "study_start"]
+    known = {e["invocation"]: e for e in starts}
+    decode_events = [e for e in events if e["kind"] == "decode" and e["split"] == "train"]
+    for event in decode_events:
+        start = known.get(event.get("invocation"))
+        if start is None or event.get("rank") != start["rank"]:
+            raise ValueError("Decode evidence lacks a valid input owner")
+        rank = start["rank"]
+        if not start["epoch"] <= event["epoch"] < epochs:
+            raise ValueError("Decode evidence has an invalid epoch")
+        consumed = (start["step"] * batch_size
+                    if policy == "direct" and event["epoch"] == start["epoch"] else 0)
+        if not set(event["sample_ids"]) <= set(rank_ids[rank][consumed:]):
+            raise ValueError("Direct resume decoded a bypassed prefix or wrong rank input")
+    for start in starts:
+        if start["epoch"] == 0 and inject:
+            continue  # Killed in-flight decoding may have no completion event.
+        for epoch in range(start["epoch"], epochs):
+            consumed = (start["step"] * batch_size
+                        if policy == "direct" and epoch == start["epoch"] else 0)
+            actual = {i for e in decode_events if e["invocation"] == start["invocation"]
+                      and e["epoch"] == epoch for i in e["sample_ids"]}
+            if actual != set(rank_ids[start["rank"]][consumed:]):
+                raise ValueError("Missing completed decode evidence for resumed input")
+    return {str(start["rank"]): sum(len(e["sample_ids"]) for e in decode_events
+                if e["invocation"] == start["invocation"])
+            for start in starts if start["epoch"] > 0}
 
 
 def state_digest(value):
@@ -133,12 +187,17 @@ def run_case(options, directory, diagnostics):
               "input_hashes": identity["input_sha256"]["train"], "rank_files": rank_files,
               "rank_sample_ids": rank_ids, "checkpoint_every_steps": interval,
               "fault_epoch": fault_epoch, "fault_step": fault_step,
-              "gate_directory": str(gate_dir), "inject": inject}
+              "gate_directory": str(gate_dir), "inject": inject,
+              "input_resume": options.get("input_resume", "replay"),
+              "input_study": options.get("input_study", False),
+              "data_directory": options["data_directory"],
+              "file_rows": {name: entry["rows"] for name, entry in identity["files"].items()}}
     write_record(directory / "study-config.json", config)
     diagnostics.update(input_identity=identity, workload_sha256=file_sha256(script),
                        torch_version=torch.__version__, torchvision_version=torchvision.__version__,
                        fixed_r_enabled=False, selective_retry=False, restart_scope="full",
                        checkpoint_every_steps=interval, training_epochs=config["epochs"],
+                       input_resume=config["input_resume"], input_study=config["input_study"],
                        fault_epoch=fault_epoch, fault_after_step=fault_step,
                        batch_size=config["batch_size"], steps_per_epoch=config["steps_per_epoch"],
                        sharding="ordinary Ray Data iterators over equal deterministic file stripes",
@@ -297,7 +356,7 @@ def validate_case(directory, options, diagnostics, rank_ids):
             raise ValueError("Workers must occupy distinct nodes")
     recovery = validate_updates(events, rank_ids, options["training_epochs"], options["batch_size"],
                                 options["fault_epoch"], options["fault_after_step"],
-                                options["checkpoint_every_steps"], inject)
+                                options["checkpoint_every_steps"], inject, options.get("input_resume", "replay"))
     if inject:
         fault = diagnostics["node_fault"]
         loss = fault["worker_node_failure"]
@@ -354,6 +413,10 @@ def validate_case(directory, options, diagnostics, rank_ids):
     expected = set(diagnostics["input_identity"]["selected_ids"]["train"])
     if set(decoded) != expected or any(decoded[i] < options["training_epochs"] for i in expected):
         raise ValueError("Missing decoded input evidence")
+    if options.get("input_study"):
+        diagnostics["resumed_decoded_rows_per_rank"] = validate_input_decodes(
+            events, rank_ids, options["training_epochs"], options["batch_size"],
+            options["input_resume"], inject)
     checkpoints = [e for e in events if e["kind"] == "study_checkpoint"]
     diagnostics.update(recovery=recovery, final_state_sha256=digests,
                        final_accuracy=next(m["accuracy"] for m in complete[-1]["metrics"] if m["rank"] == 0),
@@ -365,7 +428,7 @@ def validate_case(directory, options, diagnostics, rank_ids):
                            "report_call_rank_seconds": sum(e["report_call_s"] for e in checkpoints)})
 
 
-def compare(left, right, *, control=False):
+def compare(left, right, *, control=False, input_study=False):
     from fashion_comparison import PROVENANCE_KEYS
     for sample in (left, right):
         if (sample["status"] != "passed" or not sample.get("workload_completed") or sample.get("timeout")
@@ -385,9 +448,20 @@ def compare(left, right, *, control=False):
     for key in PROVENANCE_KEYS:
         if left["provenance"][key] != right["provenance"][key]:
             raise ValueError(f"Source/environment differs in {key}")
+    if left.get("input_study", False) != right.get("input_study", False):
+        raise ValueError("Different input construction modes")
     if control:
+        if left.get("input_resume", "replay") != right.get("input_resume", "replay"):
+            raise ValueError("Wrong input-policy control")
         if right["scenario"] != "none" or left["checkpoint_every_steps"] != right["checkpoint_every_steps"]:
             raise ValueError("Wrong checkpoint-policy control")
+    elif input_study:
+        if (not left.get("input_study") or left.get("input_resume") != "replay"
+                or right.get("input_resume") != "direct"
+                or left["checkpoint_every_steps"] <= 0
+                or left["checkpoint_every_steps"] != right["checkpoint_every_steps"]
+                or left["scenario"] != right["scenario"]):
+            raise ValueError("Expected replay versus direct input at the same checkpoint cadence")
     elif (left["checkpoint_every_steps"] != 0 or right["checkpoint_every_steps"] <= 0
           or left["scenario"] != right["scenario"]):
         raise ValueError("Expected epoch-only versus mid-epoch checkpoints in the same scenario")
@@ -400,9 +474,11 @@ def run_comparison(args):
     from run_fixed_r_train_comparison import ROOT, run_observation, write_json
     from training_provenance import source_provenance
     if not (args.data_directory / "manifest.json").is_file():
-        raise ValueError("CIFAR preparation manifest missing. Run workloads/cifar_streaming.py "
+        raise ValueError("CIFAR preparation manifest missing. Run python gossip_benchmarks/workloads/cifar_streaming.py "
                          "--prepare-data --data-directory DIR --train-rows 2048 --validation-rows 512, "
                          "or pass your existing prepared directory.")
+    input_study = args.comparison == "input-resume"
+    policies = ("replay", "direct") if input_study else ("epoch", "mid_epoch")
     identity = input_identity(args.data_directory)
     _, rank_ids = rank_partition(identity, args.batch_size)
     steps = len(rank_ids[0]) // args.batch_size
@@ -413,17 +489,20 @@ def run_comparison(args):
     restore_cursor(1, step, interval)
     provenance = source_provenance(ROOT)
     cases = ["none"] if args.controls_only else ["none", "worker-node"]
-    report = {"profile": "cifar-checkpoint-frequency", "status": "running", "samples": [], "pairs": [],
+    report = {"profile": "cifar-input-resume" if input_study else "cifar-checkpoint-frequency", "status": "running", "samples": [], "pairs": [],
               "failed_observations": [], "training_epochs": args.epochs, "steps_per_epoch": steps,
               "checkpoint_every_steps": interval, "fault_epoch": 1, "fault_after_step": step,
               "repeats": args.repeats, "preliminary": args.repeats == 1, "source_provenance": provenance,
-              "comparison_axis": "ordinary full-group retry: epoch versus mid-epoch application checkpoints",
+              "comparison_axis": ("ordinary full-group retry: prefix replay versus direct input resume" if input_study
+                                  else "ordinary full-group retry: epoch versus mid-epoch application checkpoints"),
               "limitations": [
                   "Fixed-R OFF, selective retry OFF, coordinator resume OFF in both arms",
                   "deterministic disjoint file stripes through ordinary Ray Data in both arms; not default streaming_split assignment",
                   "whole logical node process loss on one machine, at a synchronized optimizer boundary in epoch 2",
                   "shared data/checkpoints, head, driver and spare executor capacity survive; no cloud provisioning delay",
-                  "prefix reconstruction verifies and skips already consumed batches; it still reads/decodes them",
+                  ("input study uses worker-owned per-epoch Ray Data pipelines in both arms; direct resume bypasses files and filters the boundary prefix before PNG decode" if input_study
+                   else "prefix reconstruction verifies and skips already consumed batches; it still reads/decodes them"),
+                  "Parquet boundary row groups may still be read; avoided decodes are not avoided physical bytes",
                   "completed decode telemetry only; killed in-flight decoding is uncounted; storage reads/bytes not directly measured",
                   "rank-seconds for checkpoint calls include synchronization and upload; sums overlap across ranks",
                   "correctness telemetry and selected checkpoint hashing are included in workload timings",
@@ -437,11 +516,12 @@ def run_comparison(args):
     for scenario in cases:
         for pair in range(1, args.repeats + 1):
             samples = {}
-            for policy in (("epoch", "mid_epoch") if pair % 2 else ("mid_epoch", "epoch")):
+            for policy in (policies if pair % 2 else policies[::-1]):
                 frequency = 0 if policy == "epoch" else interval
                 options = {"training_strategy": "cifar-checkpoint-study", "streaming_learning": True,
                            "scenario": scenario, "mode": "off", "restart_scope": "full",
                            "checkpoint_every_steps": frequency, "fault_epoch": 1,
+                           "input_study": input_study, "input_resume": policy if input_study else "replay",
                            "fault_after_step": step, "training_epochs": args.epochs,
                            "batch_size": args.batch_size, "timeout_s": args.timeout_s,
                            "data_directory": str(args.data_directory),
@@ -471,7 +551,7 @@ def run_comparison(args):
                 print(f"  {sample['status']}: {sample.get('error', str(sample.get('workload_s'))+'s')}", flush=True)
                 save()
             try:
-                values = compare(samples["epoch"], samples["mid_epoch"])
+                values = compare(samples[policies[0]], samples[policies[1]], input_study=input_study)
                 report["pairs"].append({"scenario": scenario, "pair": pair, **values})
                 if scenario == "none":
                     valid_controls.add(pair)
