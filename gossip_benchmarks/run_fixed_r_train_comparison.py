@@ -93,8 +93,6 @@ def child_case(path):
         import ray
         if options.get("training_strategy") == "coordinator-input-resume":
             from coordinator_training import run_case
-        elif options.get("training_strategy") == "ray-train-workload-restart":
-            from train_restart import run_case
         elif options.get("training_strategy") == "ray-train-workload":
             from train_workload import run_case
         elif options.get("training_strategy") == "ray-train-selective":
@@ -237,25 +235,6 @@ def run_observation(options, pair, directory, provenance):
                 (json.loads(p.read_text()) for p in directory.glob("map-computed-*.json")),
                 key=lambda event: event["index"],
             )
-    if options.get("training_strategy") == "ray-train-workload-restart":
-        snapshot = directory / "restart-attempts.json"
-        if snapshot.exists():
-            sample.update(json.loads(snapshot.read_text()))
-            for attempt in sample["attempts"]:
-                path = Path(attempt["directory"])
-                for filename in ("progress.json", "timeline.json"):
-                    if (path / filename).exists():
-                        attempt.update(json.loads((path / filename).read_text()))
-                if (path / "feature-progress.json").exists():
-                    attempt["feature_progress"] = json.loads((path / "feature-progress.json").read_text())
-                if (path / "data-owner-fault.json").exists():
-                    attempt["data_owner_fault"] = json.loads((path / "data-owner-fault.json").read_text())
-                attempt["map_progress"] = sorted(
-                    (json.loads(p.read_text()) for p in path.glob("map-computed-*.json")),
-                    key=lambda event: event["index"],
-                )
-                if attempt["status"] == "running":
-                    attempt.update(status="failed", timeout=bool(sample.get("timeout")))
     sample["observation_wall_s"] = time.monotonic() - started
     sample["observation_finished_ns"] = time.monotonic_ns()
     write_json(directory / "sample.json", sample)

@@ -1,14 +1,12 @@
-"""Compare ordinary Ray (OFF/full retry) with Fixed-R + selective CPU retry.
+"""Compare CPU training recovery after abrupt logical worker-node loss.
 
-Uses all 60,000 Fashion-MNIST training and 10,000 test images, identical fixed
-epochs and application checkpoints. By default compare head-node process loss
-and worker-node process loss after early/middle/late committed training epochs.
-Use --failure-timing active to interrupt the next unfinished epoch after real
-optimizer updates, keeping the previous epoch as the latest checkpoint.
-One shared no-failure pair plus six fault pairs: 14 observations per repetition.
-Head replacement preserves GCS storage; the off-head driver survives. These
-are logical nodes on one physical machine, not physical-machine failures.
-Plot this JSON separately with plot_fashion_training.py; no plotting runs here.
+Default: four epochs, one middle-of-epoch node loss, one paired repetition,
+with healthy controls. Both arms use Fixed-R OFF and ordinary checkpoint retry;
+the selective arm retains healthy actors. Shared durable input/checkpoints and
+spare capacity survive. This is a single-machine simulation of spot-worker
+loss, not cloud instance termination or autoscaler provisioning.
+Use --comparison integrated for the historical OFF/full vs ON/selective study.
+Plot saved JSON separately with plot_fashion_training.py.
 """
 
 import argparse
@@ -44,6 +42,8 @@ def run_comparison(args, directory, provenance):
     kinds = list(dict.fromkeys(args.failure_kind))
     cases = comparison_cases(args.epochs, args.failure_point, kinds)
     identity = input_identity(args.data_directory)
+    comparison = getattr(args, "comparison", "integrated")
+    retry_only = comparison == "retry"
     timing = getattr(args, "failure_timing", "boundary")
     step = getattr(args, "fault_after_step", 59)
     report = {
@@ -54,7 +54,17 @@ def run_comparison(args, directory, provenance):
         "failure_timing": timing, "fault_after_step": step if timing == "active" else None,
         "observations_per_repetition": 2 * len(cases), "placement_strategy": "STRICT_SPREAD",
         "samples": [], "pairs": [], "failed_observations": [], "preliminary": args.repeats == 1,
-        "comparison_axis": "ordinary Ray OFF/full retry versus Fixed-R ON/selective retry",
+        "comparison": comparison,
+        "comparison_axis": ("Fixed-R OFF: full-group versus selective Train retry" if retry_only else
+                            "ordinary Ray OFF/full retry versus Fixed-R ON/selective retry"),
+        "failure_model": {
+            "worker_loss": "abrupt logical-node process loss without advance notice",
+            "storage": "shared input and checkpoints survive independently of failed workers",
+            "capacity": "replacement actors use already available surviving executors",
+            "physical_instance_termination_tested": False,
+        },
+        "arm_labels": {"ordinary": "Ordinary Ray: OFF/full retry",
+                       "integrated": "Fixed-R OFF/selective retry" if retry_only else "Fixed-R ON/selective retry"},
         "measurement_scope": "workload execution: data read/normalization/shuffle, training, validation, checkpoints and teardown; excludes download, cluster startup and final correctness probe",
         "limitations": [
             "two CPU Gloo workers, 235146-parameter MLP; one physical machine and shared surviving storage",
@@ -66,7 +76,8 @@ def run_comparison(args, directory, provenance):
             "failure-to-next-report includes the next training epoch, validation and checkpoint/report costs",
             "preprocessing is materialized before training; default ownership, no forced head-owner topology or guaranteed OFF failure",
             "head recovery may continue without restarting training workers; the actual retry and replay evidence is recorded",
-            "combined policy comparison; individual contributions require separate ablations",
+            ("isolates selective retry with Fixed-R OFF in both arms; surviving actors still restore the application checkpoint"
+             if retry_only else "combined policy comparison; individual contributions require separate ablations"),
             "real dataset but a modest CPU model; not evidence for large distributed training",
             "all repetitions retained; failed or timed-out observations are never completed timings",
         ],
@@ -83,9 +94,9 @@ def run_comparison(args, directory, provenance):
         for pair in range(1, args.repeats + 1):
             samples = {}
             for arm in (("ordinary", "integrated") if pair % 2 else ("integrated", "ordinary")):
-                mode, scope = ("off", "full") if arm == "ordinary" else ("on", "selective")
+                mode, scope = ("off", "full") if arm == "ordinary" else ("off" if retry_only else "on", "selective")
                 options = {
-                    "training_strategy": "ray-train-workload", "comparison": "integrated",
+                    "training_strategy": "ray-train-workload", "comparison": comparison,
                     "scenario": scenario, "placement_strategy": "STRICT_SPREAD",
                     "mode": mode, "restart_scope": scope, "owner_placement": "default",
                     "timeout_s": args.timeout_s, "training_epochs": args.epochs,
@@ -98,7 +109,7 @@ def run_comparison(args, directory, provenance):
                 print(f"{scenario}/{point}: pair {pair}/{args.repeats}, {arm} ({mode.upper()}/{scope}), "
                       f"{args.epochs} epochs, timeout {args.timeout_s:g}s", flush=True)
                 sample = run_observation(options, pair, directory / f"{scenario}-{point}-{pair}-{arm}", provenance)
-                sample.update(arm=arm, failure_point=point, fault_after_epoch=epoch,
+                sample.update(arm=arm, comparison=comparison, failure_point=point, fault_after_epoch=epoch,
                               restart_scope=scope)
                 if sample["status"] == "passed" and point != "none":
                     try:
@@ -117,7 +128,7 @@ def run_comparison(args, directory, provenance):
                 print(f"  {sample['status']}: {sample.get('error', str(sample.get('workload_s')) + 's workload')}", flush=True)
                 save()
             try:
-                values = compare_pair(samples["ordinary"], samples["integrated"])
+                values = compare_pair(samples["ordinary"], samples["integrated"], comparison=comparison)
                 report["pairs"].append({"scenario": scenario, "failure_point": point, "pair": pair, **values})
                 if point == "none":
                     valid_controls.add(pair)
@@ -158,13 +169,14 @@ def main():
     parser.add_argument("--data-directory", type=Path, required=True)
     parser.add_argument("--result-directory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--epochs", type=int, default=8)
+    parser.add_argument("--comparison", choices=("retry", "integrated"), default="retry")
+    parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--failure-point", action="append", choices=("early", "middle", "late"))
     parser.add_argument("--failure-kind", action="append", choices=("head-node", "worker-node", "worker"),
-                        help="Default: head-node and worker-node; worker retains the process-only experiment")
+                        help="Default: worker-node; explicit head-node and worker process experiments remain available")
     parser.add_argument("--repeats", type=int, default=1)
-    parser.add_argument("--timeout-s", type=float, default=180)
-    parser.add_argument("--failure-timing", choices=("boundary", "active"), default="boundary",
+    parser.add_argument("--timeout-s", type=float, default=420)
+    parser.add_argument("--failure-timing", choices=("boundary", "active"), default="active",
                         help="Active: fault inside an unfinished epoch, after real optimizer updates")
     parser.add_argument("--fault-after-step", type=int, default=59,
                         help="For active mode: completed updates per rank in the uncheckpointed epoch (1..117)")
@@ -173,8 +185,8 @@ def main():
         parser.error("Use Linux, positive repeats and at least four epochs")
     if not math.isfinite(args.timeout_s) or args.timeout_s <= 0:
         parser.error("Use a finite positive observation timeout")
-    args.failure_point = args.failure_point or ["early", "middle", "late"]
-    args.failure_kind = args.failure_kind or ["head-node", "worker-node"]
+    args.failure_point = args.failure_point or ["middle"]
+    args.failure_kind = args.failure_kind or ["worker-node"]
     if args.failure_timing == "active" and (
             "worker" in args.failure_kind or not 0 < args.fault_after_step < 118):
         parser.error("Active timing supports head-node/worker-node and steps 1..117")

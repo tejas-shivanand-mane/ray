@@ -117,14 +117,17 @@ def predictions_match(left, right):
     return float(np.max(np.abs(a - b)))
 
 
-def compare_pair(ordinary, integrated):
+def compare_pair(ordinary, integrated, comparison="integrated"):
+    if comparison not in ("retry", "integrated"):
+        raise ValueError("Unknown comparison policy")
+    protected = comparison == "integrated"
     if any(s["status"] != "passed" or not s.get("workload_completed")
            or s.get("timeout") for s in (ordinary, integrated)):
         raise ValueError("Both workloads must complete and pass correctness checks")
     if (ordinary["mode"], ordinary["restart_scope"], integrated["mode"], integrated["restart_scope"]) != (
-        "off", "full", "on", "selective"
+        "off", "full", "on" if protected else "off", "selective"
     ):
-        raise ValueError("Expected OFF/full versus ON/selective")
+        raise ValueError("Unexpected Fixed-R mode or retry policy for comparison")
     for key in ("scenario", "failure_point", "fault_after_epoch", "training_epochs", "input_identity",
                 "workload_sha256", "torch_version", "owner_placement", "model_parameters",
                 "training_rows_per_epoch", "validation_rows_per_epoch", "checkpoint_policy"):
@@ -144,7 +147,7 @@ def compare_pair(ordinary, integrated):
         raise ValueError("Missing matched native settings")
     for key, value in ordinary["native_settings"].items():
         other = integrated["native_settings"][key]
-        if ((key.startswith("enable_") and (value is not False or other is not True))
+        if ((key.startswith("enable_") and (value is not False or other is not protected))
                 or (not key.startswith("enable_") and value != other)):
             raise ValueError(f"Mismatched native setting: {key}")
     if ordinary["scenario"] != "none":

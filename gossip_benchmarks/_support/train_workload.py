@@ -805,7 +805,8 @@ def validate_node_evidence(fault, groups, reports):
                 or not (executors - {loss["node_id"]}) <= set(loss["surviving_node_ids"])
                 or fault["original_head_node_id"] not in loss["surviving_node_ids"]
                 or len(groups) != 2
-                or any(w["node_id"] == loss["node_id"] for w in groups[1])):
+                or any(w["node_id"] not in executors - {loss["node_id"]} for w in groups[1])
+                or len({w["node_id"] for w in groups[1]}) != 2):
             raise ValueError("Worker-node loss or replacement was not verified")
     elif fault["scenario"] == "head-node":
         head = fault["head_replacement"]
@@ -1080,6 +1081,9 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
                                                       allow_head_failure=owner_failure or node_scenario == "head-node",
                                                       include_worker_failure=True))
         with cluster_context as (case_args, crash_head, crash_worker):
+            original_live_nodes = {n["NodeID"] for n in ray.nodes() if n["Alive"]}
+            original_driver_node = ray.get_runtime_context().get_node_id()
+            original_job = ray.get_runtime_context().get_job_id()
             diagnostics["selected_owner_node_id"] = case_args.owner_node_id
             native = ray._private.state.state.get_system_config()
             diagnostics["native_settings"] = {key: native.get(key) for key in system_config()}
@@ -1096,7 +1100,7 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
             context.set_config("fixed_r_reuse_owner_helpers", options.get("reuse_owner_helpers", True))
             context.execution_options.preserve_order = True
             context.enable_progress_bars = False
-            if options.get("comparison") in ("fixed-r", "integrated"):
+            if options.get("comparison") in ("fixed-r", "integrated", "retry"):
                 context.shuffle_strategy = ShuffleStrategy.SORT_SHUFFLE_PULL_BASED
             if enabled:
                 get_config(context)
@@ -1165,6 +1169,18 @@ def run_case(options, directory, diagnostics, existing_cluster=None):
             if len(timings) != 1:
                 raise ValueError("The script did not execute exactly one TorchTrainer.fit")
             diagnostics.update(validate(directory, selective, inject, node_scenario))
+            if node_scenario == "worker-node":
+                dead_node = diagnostics["node_fault"]["worker_node_failure"]["node_id"]
+                live_nodes = {n["NodeID"] for n in ray.nodes() if n["Alive"]}
+                if (live_nodes != original_live_nodes - {dead_node}
+                        or ray.get_runtime_context().get_node_id() != original_driver_node
+                        or ray.get_runtime_context().get_job_id() != original_job):
+                    raise ValueError("Unexpected node or driver loss before workload completion")
+                diagnostics["completion_topology"] = {
+                    "original_node_ids": sorted(original_live_nodes),
+                    "surviving_node_ids": sorted(live_nodes), "failed_node_id": dead_node,
+                    "driver_and_job_survived": True,
+                }
             if active_plan is not None:
                 validate_active_training(directory, diagnostics, active_plan)
             exchanges = diagnostics["data_exchanges"]

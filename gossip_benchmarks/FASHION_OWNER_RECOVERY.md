@@ -1,7 +1,7 @@
 # Fashion-MNIST: owner loss during preprocessing
 
-For an actual end-to-end restart baseline and optional substantial image feature
-extraction, see [FASHION_RESTART_COMPARISON.md](FASHION_RESTART_COMPARISON.md).
+The historical whole-workload restart comparison is retained in Git at
+`f24a384e`. For current worker-node experiments, see [FASHION_TRAINING.md](FASHION_TRAINING.md).
 The experiment below measures recovery coverage without whole-application retry.
 
 This experiment targets the ownership failure that ordinary checkpoint-based

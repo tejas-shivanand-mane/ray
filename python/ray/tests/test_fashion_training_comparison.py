@@ -254,7 +254,7 @@ def test_worker_node_validation_requires_loss_and_checkpoint_retry(modules, node
     assert result["recoveries"][0]["node_operation_s"] == pytest.approx(0.3)
 
 
-@pytest.mark.parametrize("corruption", ["process_only", "wrong_victim", "same_node", "missing_checkpoint", "late_injection", "dead_destination"])
+@pytest.mark.parametrize("corruption", ["process_only", "wrong_victim", "same_node", "missing_checkpoint", "late_injection", "dead_destination", "head_destination", "same_destination", "gcs_alive"])
 def test_worker_node_evidence_rejects_wrong_scope(modules, node_checkpoint, corruption):
     directory, timeline, fault = node_checkpoint
     if corruption == "process_only":
@@ -267,6 +267,12 @@ def test_worker_node_evidence_rejects_wrong_scope(modules, node_checkpoint, corr
         fault["checkpoint"] = {}
     elif corruption == "late_injection":
         fault["operation_finished_ns"] = 4100000000
+    elif corruption == "head_destination":
+        timeline["groups"][1][0]["node_id"] = "head"
+    elif corruption == "same_destination":
+        timeline["groups"][1][0]["node_id"] = "b"
+    elif corruption == "gcs_alive":
+        fault["worker_node_failure"]["gcs_marked_dead"] = False
     else:
         timeline["groups"][1][0]["node_id"] = "a"
     (directory / "timeline.json").write_text(json.dumps(timeline))
@@ -486,3 +492,39 @@ def test_active_supervisor_waits_for_both_ranks_and_releases_on_error(modules, t
     fault = json.loads((tmp_path / "node-fault.json").read_text())["node_fault"]
     assert fault["completed"] is not fail_supervisor
     assert (tmp_path / "release-active.json").exists()
+
+
+@pytest.mark.parametrize("corruption", [None, "enabled_native", "enabled_mode", "full_fallback"])
+def test_retry_only_pair_rejects_fixed_r_and_fallback(modules, matched_pair, corruption):
+    ordinary, selective = matched_pair
+    selective["mode"] = "off"
+    selective["native_settings"]["enable_streaming_recovery"] = False
+    if corruption == "enabled_native":
+        selective["native_settings"]["enable_streaming_recovery"] = True
+    elif corruption == "enabled_mode":
+        selective["mode"] = "on"
+    elif corruption == "full_fallback":
+        selective["restart_scope"] = "full"
+    if corruption:
+        with pytest.raises(ValueError):
+            modules.checks.compare_pair(ordinary, selective, comparison="retry")
+    else:
+        assert modules.checks.compare_pair(ordinary, selective, comparison="retry")["workload_s_change_pct"] == 0
+
+
+def test_worker_retry_cli_defaults_to_small_node_experiment(modules, monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(modules.runner, "source_provenance", lambda _: {})
+    def capture(args, directory, provenance):
+        captured.update(vars(args))
+        return 0
+    monkeypatch.setattr(modules.runner, "run_comparison", capture)
+    monkeypatch.setattr("sys.argv", ["run_fashion_training_comparison.py",
+        "--data-directory", str(tmp_path), "--result-directory", str(tmp_path),
+        "--output", str(tmp_path / "report.json")])
+    assert modules.runner.main() == 0
+    assert captured["comparison"] == "retry"
+    assert captured["failure_kind"] == ["worker-node"]
+    assert captured["failure_point"] == ["middle"]
+    assert captured["failure_timing"] == "active"
+    assert captured["epochs"] == 4 and captured["repeats"] == 1

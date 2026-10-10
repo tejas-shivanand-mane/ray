@@ -40,6 +40,7 @@ def plot_report(report, output):
     rows, columns, panels = panel_layout(report)
     node_matrix = report["profile"] == "fashion-mnist-failure-matrix"
     active = report.get("failure_timing") == "active"
+    retry_only = report.get("comparison") == "retry"
     names = {"head-node": "Head-node processes", "worker-node": "Worker node", "worker": "Worker process"}
     fig, axes = plt.subplots(rows, columns, figsize=(max(10, 5 * columns), 4 * rows + 1.5),
                              squeeze=False, sharex=True, sharey=True)
@@ -47,7 +48,8 @@ def plot_report(report, output):
         for ax, (kind, point) in zip(axes.flat, panels):
             for arm, mode, scope, color, style, title in (
                 ("ordinary", "off", "full", "#D55E00", "--", "Ordinary Ray: OFF/full retry"),
-                ("integrated", "on", "selective", "#0072B2", "-", "Fixed-R ON/selective retry"),
+                ("integrated", "off" if retry_only else "on", "selective", "#0072B2", "-",
+                 "Fixed-R OFF/selective retry" if retry_only else "Fixed-R ON/selective retry"),
             ):
                 samples = panel_samples(report, kind, point, arm)
                 if any(s["mode"] != mode or s["restart_scope"] != scope for s in samples):
@@ -101,7 +103,8 @@ def plot_report(report, output):
         for ax in list(axes.flat)[len(panels):]:
             ax.set_visible(False)
         status = "validated" if report["status"] == "passed" else "VALIDATION FAILED — inspect report"
-        fig.suptitle(f"Fashion-MNIST: ordinary Ray versus integrated recovery · {status}")
+        comparison_title = "full versus selective retry (Fixed-R OFF)" if retry_only else "ordinary Ray versus integrated recovery"
+        fig.suptitle(f"Fashion-MNIST: {comparison_title} · {status}")
         if node_matrix:
             scopes = {
                 "head-node": "Head: processes replaced; GCS storage and driver survive.",
