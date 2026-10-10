@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import runpy
+import shlex
 
 import numpy as np
 
@@ -16,7 +17,16 @@ PROVENANCE_KEYS = (
 
 
 def input_identity(directory):
-    manifest = json.loads((directory / "manifest.json").read_text())
+    directory = Path(directory)
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(
+            f"Fashion-MNIST preparation manifest missing: {manifest_path}. "
+            "Use the prepared dataset directory, or run from the repository root: "
+            "python gossip_benchmarks/workloads/fashion_mnist.py --prepare-data "
+            f"--data-directory {shlex.quote(str(directory))}"
+        )
+    manifest = json.loads(manifest_path.read_text())
     if manifest.get("dataset") != "Fashion-MNIST" or manifest.get("split") != "official":
         raise ValueError("Prepare the official Fashion-MNIST split first")
     expected = {"train.parquet": 60000, "test.parquet": 10000}

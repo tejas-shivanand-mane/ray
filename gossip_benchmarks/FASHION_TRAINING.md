@@ -25,6 +25,17 @@ real deployment. The local shared directory models that surviving storage.
 
 ## First local run
 
+If the data directory does not contain `manifest.json`, prepare it once before
+running the validation command. This downloads the official dataset if needed
+and writes `train.parquet`, `test.parquet` and their identity manifest:
+
+```bash
+python gossip_benchmarks/workloads/fashion_mnist.py --prepare-data \
+  --data-directory ~/ray-coverage/fashion-mnist
+```
+
+If the prepared data already exists elsewhere, pass that directory instead.
+
 Use the existing prepared Fashion-MNIST data and compiled fork. No native
 changes or rebuild are required by this change. Run from the repository root:
 
