@@ -1,3 +1,97 @@
+# Checkpoint-frequency limitation study
+
+Use the existing streaming runner with `--comparison checkpoints` to investigate
+worker-node recovery using **ordinary Ray in both arms**. Fixed-R, selective
+retry and coordinator resume are disabled. This is a baseline limitation study,
+not a new fault-tolerance contribution.
+
+Both policies use the same ResNet-18, Adam, data, batches and deterministic
+per-rank file stripes via ordinary unsharded Ray Data iterators. This explicit
+application sharding differs from the default `streaming_split` assignment.
+It is needed to test exact input/model alignment without quietly changing batch
+assignment on restart. PNG decoding remains lazy and repeats each epoch.
+
+The epoch policy saves after each epoch. The mid-epoch policy additionally
+saves every eight updates. Each checkpoint stores **each rank's** model buffers,
+Adam state, CPU RNG and consumed sample IDs/fingerprints. Recovery reconstructs
+the iterator, verifies the consumed prefix and skips it before restoring the
+training RNG and executing the next update. The skipped prefix still incurs
+input reconstruction and decoding work. Only two checkpoints are retained.
+
+## Local validation
+
+From the repository root in `ray-dev`, use your existing 2,048/512 prepared CIFAR
+subset. If that directory has no manifest, prepare it once:
+
+```bash
+python gossip_benchmarks/workloads/cifar_streaming.py --prepare-data \
+  --data-directory ~/ray-coverage/cifar-streaming \
+  --train-rows 2048 --validation-rows 512
+```
+
+Run four observations (two healthy controls, two node failures):
+
+```bash
+bash gossip_benchmarks/validate_streaming_learning.sh \
+  --comparison checkpoints \
+  --data-directory ~/ray-coverage/cifar-streaming \
+  --epochs 2 --checkpoint-every-steps 8 --fault-after-step 18 \
+  --repeats 1 --timeout-s 420 \
+  --output ~/ray-coverage/worker-checkpoint-study.json
+```
+
+A different prepared subset must have two equal file stripes divisible by the
+batch size. Set the checkpoint interval and fault step accordingly. The fault
+must fall strictly between checkpoint boundaries. This study selects one
+worker-node loss in epoch 2; `--failure-kind` and `--failure-point` are not used.
+Each observation has its own timeout; startup/verification can extend the total
+suite beyond the measured workload time. Controls must match before faults run.
+
+Plot only after inspecting the saved report:
+
+```bash
+python gossip_benchmarks/plot_streaming_learning.py \
+  ~/ray-coverage/worker-checkpoint-study.json \
+  --output ~/ray-coverage/worker-checkpoint-study.png
+```
+
+## Interpretation
+
+For 2,048 rows and batch size 32, each rank has 32 steps per epoch. Failure after
+step 18 should repeat 18 updates with epoch checkpoints versus two with
+mid-epoch checkpoints. Mid-epoch recovery must also verify/skip 16 batches per
+rank. These are assertions to validate, not measured results yet.
+
+The report includes healthy/faulted workload times; time to restored model/optimizer
+state readiness and first optimizer updates; executed/repeated updates; verified
+skipped batches; completed decoded rows; checkpoint bytes; serialization time;
+and time inside `train.report`. Checkpoint times are summed rank-seconds and
+can overlap, so do not add them to wall time. They include synchronization and
+report/upload costs, not just disk throughput. Per-sample correctness telemetry
+and selected-checkpoint hashing add measurement overhead in both policies.
+
+Final loaded model, optimizer, rank-local buffers and RNG state must match
+exactly across controls and fault runs. A mismatch fails the observation rather
+than treating changed training as a speedup. Failed/time-limited samples remain
+in the JSON and do not become timing bars. Completed decode counts exclude
+killed in-flight calls and include prefetch; they do not measure exact physical
+storage reads or bytes. Compare them with the matched control, not just the
+minimum dataset size.
+
+The entire logical worker node (raylet, object store and descendants) is killed
+at a synchronized post-update boundary. Head, driver, shared storage and spare
+capacity survive. This does not test actual VM termination, node-local disk
+loss, provisioning delays, GPU/NCCL or arbitrary in-flight collective loss.
+
+No tests, benchmarks, builds, lint or rendering were run by the agent. Run the
+wrapper locally; send the resulting JSON before expanding the experiment.
+
+---
+
+## Existing Fixed-R study (unchanged default mode)
+
+The following older instructions apply to `--comparison fixed-r`, the default.
+
 # CPU learning with streaming input
 
 This workload trains a ResNet-18 classifier on actual CIFAR-10 images. Encoded

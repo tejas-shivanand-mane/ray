@@ -164,3 +164,111 @@ def test_two_epochs_are_only_allowed_for_controls(checks, monkeypatch, tmp_path,
             runner.main()
         assert raised.value.code == 2
         assert not observed
+
+
+def checkpoint_events(inject, interval):
+    """Two ranks, two epochs, eight steps; failure after step five in epoch two."""
+    events = []
+    sequence = [(epoch, step) for epoch in range(2) for step in range(1, 9)]
+    restored = (5 // interval * interval) if interval else 0
+    for rank in (0, 1):
+        for attempt in range(2 if inject else 1):
+            invocation = f"{rank}-{attempt}"
+            events.append(dict(kind="study_start", rank=rank, invocation=invocation,
+                               epoch=1 if attempt else 0, step=restored if attempt else 0,
+                               time_ns=attempt * 100))
+            wanted = sequence if not inject else ([k for k in sequence if k <= (1, 5)] if not attempt
+                                                   else [k for k in sequence if k > (1, restored)])
+            for time, (epoch, step) in enumerate(wanted, attempt*100+1):
+                events.append(dict(kind="study_update", rank=rank, invocation=invocation,
+                                   epoch=epoch, step=step, sample_ids=[rank*8+step-1], time_ns=time))
+            if attempt:
+                for step in range(1, restored+1):
+                    events.append(dict(kind="study_input", rank=rank, invocation=invocation,
+                                       epoch=1, step=step, skipped=True, sample_ids=[rank*8+step-1], time_ns=step))
+    return events
+
+
+@pytest.mark.parametrize("interval,inject,repeated,skipped", [(0, False, 0, 0), (2, False, 0, 0),
+                                                             (0, True, 5, 0), (2, True, 1, 4)])
+def test_checkpoint_study_accounts_for_updates_and_prefix(checks, interval, inject, repeated, skipped):
+    study = importlib.import_module("checkpoint_study")
+    result = study.validate_updates(checkpoint_events(inject, interval), [list(range(8)), list(range(8, 16))],
+                                    2, 1, 1, 5, interval, inject)
+    assert result["repeated_updates_per_rank"] == repeated
+    assert result["verified_skipped_batches_per_rank"] == skipped
+
+
+@pytest.mark.parametrize("corruption", ["duplicate_update", "wrong_input", "wrong_cursor", "lost_prefix", "wrong_skip"])
+def test_checkpoint_study_rejects_inconsistent_resume(checks, corruption):
+    study = importlib.import_module("checkpoint_study")
+    events = checkpoint_events(True, 2)
+    if corruption == "duplicate_update":
+        events.append(copy.deepcopy(next(e for e in events if e["kind"] == "study_update")))
+    elif corruption == "wrong_input":
+        next(e for e in events if e["kind"] == "study_update")["sample_ids"] = [999]
+    elif corruption == "wrong_cursor":
+        next(e for e in events if e["kind"] == "study_start" and e["epoch"] == 1)["step"] = 3
+    elif corruption == "lost_prefix":
+        events.remove(next(e for e in events if e["kind"] == "study_input"))
+    else:
+        next(e for e in events if e["kind"] == "study_input")["sample_ids"] = [999]
+    with pytest.raises(ValueError):
+        study.validate_updates(events, [list(range(8)), list(range(8, 16))], 2, 1, 1, 5, 2, True)
+
+
+def test_checkpoint_study_requires_equal_file_stripes_and_nonboundary_fault(checks):
+    study = importlib.import_module("checkpoint_study")
+    manifest = {"files": {f"train/{i}.parquet": {"rows": 4} for i in range(4)},
+                "selected_ids": {"train": list(range(16))}, "training_rows": 16}
+    files, ids = study.rank_partition(manifest, 2)
+    assert ids == [list(range(4))+list(range(8, 12)), list(range(4, 8))+list(range(12, 16))]
+    with pytest.raises(ValueError):
+        study.rank_partition(manifest, 3)
+    with pytest.raises(ValueError):
+        study.restore_cursor(1, 4, 2)
+
+
+def test_checkpoint_state_digest_checks_optimizer_rng_and_rank_buffers(checks):
+    import torch
+    study = importlib.import_module("checkpoint_study")
+    state = {"model": {"running_mean": torch.zeros(2)}, "optimizer": {"step": torch.tensor(4.)},
+             "rng": torch.tensor([1, 2], dtype=torch.uint8)}
+    assert study.state_digest(state) == study.state_digest(copy.deepcopy(state))
+    for field in ("model", "optimizer", "rng"):
+        changed = copy.deepcopy(state)
+        if field == "rng":
+            changed[field][0] += 1
+        else:
+            next(iter(changed[field].values()))[()] += 1
+        assert study.state_digest(state) != study.state_digest(changed)
+
+
+@pytest.mark.parametrize("corruption", [None, "state", "fixed_r", "failed", "frequency", "fault_step"])
+def test_checkpoint_policy_comparison_requires_matching_final_state(checks, corruption):
+    study = importlib.import_module("checkpoint_study")
+    from fashion_comparison import PROVENANCE_KEYS
+    sample = {key: "same" for key in ("input_identity", "workload_sha256", "torch_version", "torchvision_version",
+              "training_epochs", "batch_size", "steps_per_epoch", "fault_epoch", "fault_after_step", "sharding")}
+    sample.update(status="passed", workload_completed=True, mode="off", restart_scope="full",
+                  fixed_r_enabled=False, selective_retry=False, workload_s=10, scenario="none",
+                  checkpoint_every_steps=0, final_state_sha256={"0": "state-0", "1": "state-1"},
+                  native_settings={"enable_streaming_recovery": False},
+                  provenance={k: "same" for k in PROVENANCE_KEYS})
+    right = copy.deepcopy(sample)
+    right["checkpoint_every_steps"] = 2
+    if corruption == "state":
+        right["final_state_sha256"]["1"] = "changed"
+    elif corruption == "fixed_r":
+        right["native_settings"]["enable_streaming_recovery"] = True
+    elif corruption == "failed":
+        right["status"] = "failed"
+    elif corruption == "frequency":
+        right["checkpoint_every_steps"] = 0
+    elif corruption == "fault_step":
+        right["fault_after_step"] = "different"
+    if corruption:
+        with pytest.raises(ValueError):
+            study.compare(sample, right)
+    else:
+        assert study.compare(sample, right)["final_model_optimizer_rng_match"]

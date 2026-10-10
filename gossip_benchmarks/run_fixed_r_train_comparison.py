@@ -91,7 +91,9 @@ def child_case(path):
             if key.startswith("RAY_RECOVERY_") or key in ("RAY_EXPERIMENTAL_RECOVERY", "RAY_DATA_EXECUTION_CALLBACKS", "RAY_ADDRESS"):
                 os.environ.pop(key)
         import ray
-        if options.get("training_strategy") == "coordinator-input-resume":
+        if options.get("training_strategy") == "cifar-checkpoint-study":
+            from checkpoint_study import run_case
+        elif options.get("training_strategy") == "coordinator-input-resume":
             from coordinator_training import run_case
         elif options.get("training_strategy") == "ray-train-workload":
             from train_workload import run_case
@@ -213,7 +215,7 @@ def run_observation(options, pair, directory, provenance):
         # Keep the completed fault operation visible even when the child times
         # out during cleanup. Partial evidence never promotes a failed run.
         sample["data_owner_fault"] = json.loads((directory / "data-owner-fault.json").read_text())
-    if options.get("training_strategy") in ("ray-train-workload", "coordinator-input-resume"):
+    if options.get("training_strategy") in ("ray-train-workload", "coordinator-input-resume", "cifar-checkpoint-study"):
         # Preserve real progress even on exceptions/timeouts. Never change status.
         for filename in ("progress.json", "timeline.json", "node-fault.json", "coordinator-fault.json"):
             path = directory / filename

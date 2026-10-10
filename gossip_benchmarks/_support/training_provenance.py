@@ -9,6 +9,7 @@ import sys
 
 
 SOURCE_PATHS = (
+    "gossip_benchmarks/_support/checkpoint_study.py",
     "gossip_benchmarks/run_coordinator_training_comparison.py",
     "gossip_benchmarks/plot_coordinator_training.py",
     "gossip_benchmarks/validate_coordinator_training.sh",

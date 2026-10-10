@@ -41,6 +41,8 @@ def plot_report(report, output):
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator
 
+    if report.get("profile") == "cifar-checkpoint-frequency":
+        return plot_checkpoint_report(report, output)
     if report.get("profile") != "cifar-streaming-learning":
         raise ValueError("Expected a CIFAR streaming learning report")
     cases = report["cases"]
@@ -98,6 +100,60 @@ def plot_report(report, output):
                  + ("One pair is preliminary." if report.get("preliminary") else "All repetitions shown."),
                  ha="center", fontsize=9)
         fig.tight_layout(rect=(0, .13, 1, .95))
+        output = Path(output).resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        paths = [output.with_suffix(suffix) for suffix in (".png", ".pdf")]
+        for path in paths:
+            fig.savefig(path, dpi=180)
+        return paths
+    finally:
+        plt.close(fig)
+
+
+
+def plot_checkpoint_report(report, output):
+    """Embedded measured values only; failed runs never become timing bars."""
+    import statistics
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    panels = [
+        (axes[0, 0], "Workload seconds", lambda s: s["workload_s"], ("none", "worker-node")),
+        (axes[0, 1], "Repeated optimizer updates per rank", lambda s: s["recovery"]["repeated_updates_per_rank"], ("worker-node",)),
+        (axes[1, 0], "Completed training-image decodes", lambda s: s["decoded_training_rows"], ("none", "worker-node")),
+        (axes[1, 1], "Serialized checkpoint MiB, summed across ranks", lambda s: s["checkpoint_metrics"]["serialized_bytes"] / 1024**2, ("none",)),
+    ]
+    try:
+        for ax, title, value, scenarios in panels:
+            for offset, policy, color in ((-.18, "epoch", "#D55E00"), (.18, "mid_epoch", "#0072B2")):
+                for index, scenario in enumerate(scenarios):
+                    samples = [s for s in report["samples"] if s["scenario"] == scenario and s["policy"] == policy]
+                    passing = [s for s in samples if s["status"] == "passed"]
+                    x = index + offset
+                    label = ("Epoch checkpoints" if policy == "epoch" else "Mid-epoch checkpoints") if index == 0 else None
+                    if passing:
+                        values = [value(s) for s in passing]
+                        ax.bar(x, statistics.mean(values), width=.32, color=color, alpha=.65, label=label)
+                        ax.scatter([x]*len(values), values, color=color, s=18)
+                    else:
+                        ax.plot([], [], color=color, label=label)
+                    if len(passing) != len(samples) or not samples:
+                        ax.text(x, .04, f"{len(passing)}/{len(samples)} passed", rotation=90,
+                                transform=ax.get_xaxis_transform(), ha="center", fontsize=8)
+            ax.set_title(title, fontsize=10)
+            ax.set_xticks(range(len(scenarios)), ["Healthy" if s == "none" else "Worker-node loss" for s in scenarios])
+            ax.set_ylim(bottom=0)
+            ax.legend(fontsize=8)
+            ax.grid(axis="y", alpha=.2)
+        status = "passed" if report["status"] == "passed" else "INCOMPLETE / FAILED — inspect JSON"
+        fig.suptitle(f"CIFAR checkpoint frequency · {status}")
+        fig.text(.5, .025,
+                 "Ordinary full-group retry in both arms; Fixed-R and coordinator resume OFF. Same deterministic file stripes.\n"
+                 "Dots: individual passing trials. Bars: means. Decodes include verified prefix replay and prefetch.\n"
+                 "Single-machine logical-node loss; storage and spare capacity survive. Checkpoint times/bytes include per-rank state.",
+                 ha="center", fontsize=9)
+        fig.tight_layout(rect=(0, .11, 1, .94))
         output = Path(output).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         paths = [output.with_suffix(suffix) for suffix in (".png", ".pdf")]
