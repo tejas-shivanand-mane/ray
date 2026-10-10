@@ -61,10 +61,20 @@ actors. It does not rerun dataset factories or reset survivors' iterators.
 Run from the repository root in `ray-dev` (no native rebuild):
 
 ```bash
-RAY_TRAIN_V2_ENABLED=1 python -m pytest -q \
-  python/ray/train/v2/tests/test_data_integration.py \
-  python/ray/train/v2/tests/test_worker_group.py
+RAY_TRAIN_V2_ENABLED=1 timeout --signal=INT --kill-after=20s 300s \
+  python -m pytest -x -vv --tb=long \
+  python/ray/train/v2/tests/test_data_integration.py::test_dataset_provider_cache_is_rank_specific \
+  python/ray/train/v2/tests/test_data_integration.py::test_dataset_replacement_rejects_unrestored_streaming_cursor \
+  python/ray/train/v2/tests/test_data_integration.py::test_dataset_partial_replacement_after_node_loss
 ```
+
+Start with these focused tests, which stop at the first failure and have a
+five-minute process timeout. Keep the complete traceback; the final pytest
+summary omits the remote deserialization exception. Run the existing worker
+replacement tests separately after these pass, rather than the full worker
+suite (which includes deliberate zombie-process tests). The broader data
+integration suite also requires `freezegun==1.1.0`, as pinned in the repository's
+Python 3.10 test requirements; the focused tests above do not use it.
 
 The added node-loss test kills all processes of either rank's logical worker
 node, replaces that replica on surviving capacity, checks the survivor actor

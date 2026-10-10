@@ -794,19 +794,25 @@ def test_fixed_scaling_policy_coordinator_lifecycle(
         )
 
 
-class _IndependentRankDataConfig(ray.train.DataConfig):
-    """Independent replayable partitions, not coordinated streaming splits."""
+def _independent_rank_data_config():
+    # Local classes are serialized by value. A module-level class can make Ray
+    # workers import pytest's test_data_integration module, which is not on
+    # their import path and also pulls in driver-only test dependencies.
+    class _IndependentRankDataConfig(ray.train.DataConfig):
+        """Independent replayable partitions, not coordinated streaming splits."""
 
-    def __init__(self):
-        super().__init__(datasets_to_split=[])
+        def __init__(self):
+            super().__init__(datasets_to_split=[])
 
-    def configure(self, datasets, world_size, worker_handles, worker_node_ids, **kwargs):
-        assert len(worker_node_ids) == world_size
-        return [
-            {name: ds.filter(lambda row, r=rank: row["id"] % world_size == r).iterator()
-             for name, ds in datasets.items()}
-            for rank in range(world_size)
-        ]
+        def configure(self, datasets, world_size, worker_handles, worker_node_ids, **kwargs):
+            assert len(worker_node_ids) == world_size
+            return [
+                {name: ds.filter(lambda row, r=rank: row["id"] % world_size == r).iterator()
+                 for name, ds in datasets.items()}
+                for rank in range(world_size)
+            ]
+
+    return _IndependentRankDataConfig()
 
 
 @pytest.mark.parametrize("failed_rank", [0, 1])
@@ -830,7 +836,7 @@ def test_dataset_partial_replacement_after_node_loss(failed_rank, restore_data_c
         ctx = DataContext.get_current()
         ctx.set_config("replacement_test", "inherited")
         ctx.execution_options.preserve_order = True
-        data_config = _IndependentRankDataConfig()
+        data_config = _independent_rank_data_config()
         run_context = create_dummy_run_context(dataset_config=data_config)
         factory_calls = []
 
@@ -924,7 +930,7 @@ def test_dataset_provider_cache_is_rank_specific(ray_start_4_cpus):
 
     node_id = ray.get_runtime_context().get_node_id()
     provider = RayDatasetShardProvider(
-        {"train": ray.data.range(8, override_num_blocks=1)}, _IndependentRankDataConfig(),
+        {"train": ray.data.range(8, override_num_blocks=1)}, _independent_rank_data_config(),
         DataContext.get_current(), world_size=2, worker_node_ids=[node_id, node_id],
     )
     try:
