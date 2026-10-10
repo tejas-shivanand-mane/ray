@@ -49,6 +49,15 @@ class DatasetManager:
 
         DataContext._set_current(data_context)
 
+    def update_worker_locations(self, worker_node_ids: List["NodeIdStr"]) -> None:
+        """Update locality hints for future iterator creation after replacement.
+
+        Existing iterators and their execution state remain untouched.
+        """
+        if len(worker_node_ids) != self._world_size:
+            raise ValueError("Worker replacement cannot change dataset world size")
+        self._worker_node_ids = list(worker_node_ids)
+
     def _create_dataset_iterators(
         self, dataset_info: DatasetShardMetadata, base_dataset: "Dataset"
     ) -> List["DataIterator"]:
@@ -146,6 +155,8 @@ class DatasetManager:
         Rank 3 calls get_dataset_shard, returns the cached iterator.
         """
         dataset_name = dataset_info.dataset_name
+        if not 0 <= dataset_info.world_rank < self._world_size:
+            raise ValueError("Dataset shard rank is outside the training world")
 
         if dataset_name in self._datasets_to_split:
             return await self._get_sharded_dataset_iterator(dataset_info)

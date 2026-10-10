@@ -40,6 +40,17 @@ class ExecutionGroupCallback(RayTrainCallback):
         """
         return {}
 
+    def before_init_replacement_context(
+        self, workers: List["Worker"], worker_group: "WorkerGroup"
+    ) -> Dict[str, List[Any]]:
+        """Initialize replacement contexts without treating the subset as a new job.
+
+        ``worker_group`` contains the full topology, including the new workers.
+        Returned values correspond only to ``workers``. The default preserves
+        the behavior of callbacks that do not manage group-wide state.
+        """
+        return self.before_init_train_context(workers)
+
     def after_execution_group_start(self, execution_group: "ExecutionGroup"):
         """Called after an execution group is started or replaced.
         All workers in the execution group should be ready to execute tasks."""

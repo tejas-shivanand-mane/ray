@@ -1,6 +1,6 @@
 import copy
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import ray
 import ray.train
@@ -36,6 +36,12 @@ class RayDatasetShardProvider:
         worker_node_ids: List["NodeIdStr"],
     ):
         self._dataset_names = set(datasets)
+        self._world_size = world_size
+        self._datasets_to_split = (
+            set(datasets) if data_config._datasets_to_split == "all"
+            else set(data_config._datasets_to_split)
+        )
+        self._replacement = False
         self._dataset_manager = (
             ray.remote(DatasetManager)
             .options(
@@ -52,7 +58,7 @@ class RayDatasetShardProvider:
                 worker_node_ids=worker_node_ids,
             )
         )
-        self._cached_dataset_shards: Dict[str, "DataIterator"] = {}
+        self._cached_dataset_shards: Dict[Tuple[str, int], "DataIterator"] = {}
 
     def get_dataset_shard(self, dataset_info: DatasetShardMetadata) -> "DataIterator":
         dataset_name = dataset_info.dataset_name
@@ -63,12 +69,34 @@ class RayDatasetShardProvider:
                 "argument."
             )
 
-        if dataset_name not in self._cached_dataset_shards:
-            self._cached_dataset_shards[dataset_name] = ray.get(
+        if not 0 <= dataset_info.world_rank < self._world_size:
+            raise ValueError("Dataset shard rank is outside the training world")
+        if self._replacement and dataset_name in self._datasets_to_split:
+            raise ValueError(
+                "Partial worker replacement cannot resume coordinated Ray Data "
+                "streaming splits: the failed worker's input cursor is not restored. "
+                "Use full-group checkpoint recovery, or independently replayable "
+                "datasets with DataConfig(datasets_to_split=[]) and application "
+                "sharding/cursor recovery. Disabling splitting alone does not "
+                "restore input progress."
+            )
+        key = (dataset_name, dataset_info.world_rank)
+        if key not in self._cached_dataset_shards:
+            self._cached_dataset_shards[key] = ray.get(
                 self._dataset_manager.get_dataset_shard.remote(dataset_info)
             )
 
-        return self._cached_dataset_shards[dataset_name]
+        return self._cached_dataset_shards[key]
+
+    def for_replacement(self, worker_node_ids: List["NodeIdStr"]):
+        """Share the surviving manager, but never claim to restore split cursors."""
+        if len(worker_node_ids) != self._world_size:
+            raise ValueError("Partial replacement must preserve dataset world size")
+        ray.get(self._dataset_manager.update_worker_locations.remote(worker_node_ids))
+        provider = copy.copy(self)
+        provider._replacement = True
+        provider._cached_dataset_shards = {}
+        return provider
 
     def shutdown_data_executors(self) -> None:
         """
@@ -130,6 +158,32 @@ class DatasetsCallback(WorkerGroupCallback):
             worker_node_ids=worker_node_ids,
         )
         return {"dataset_shard_provider": [self._dataset_shard_provider] * world_size}
+
+    def before_init_replacement_context(
+        self, workers: List[Worker], worker_group: WorkerGroup
+    ) -> Dict[str, List[DatasetShardProvider]]:
+        if self._dataset_shard_provider is None:
+            raise ValueError("Partial replacement requires a surviving dataset provider")
+        all_workers = sorted(
+            worker_group.get_workers(), key=lambda w: w.distributed_context.world_rank
+        )
+        if [w.distributed_context.world_rank for w in all_workers] != list(range(len(all_workers))):
+            raise ValueError("Dataset replacement requires a complete global rank mapping")
+        for worker in workers:
+            rank = worker.distributed_context.world_rank
+            if (not 0 <= rank < len(all_workers) or all_workers[rank] is not worker
+                    or worker.distributed_context.world_size != len(all_workers)):
+                raise ValueError("Replacement worker does not match the full training group")
+        provider = self._dataset_shard_provider.for_replacement(
+            [w.metadata.node_id for w in all_workers]
+        )
+        # after_worker_group_start is not called for partial replacement. Only
+        # initialize the new actors; survivors can still be running user code.
+        def propagate_context(ctx):
+            DataContext._set_current(ctx)
+
+        ray.get([w.execute_async(propagate_context, self._data_context) for w in workers])
+        return {"dataset_shard_provider": [provider] * len(workers)}
 
     def after_worker_group_start(self, worker_group: WorkerGroup):
         # Propagate DataContext

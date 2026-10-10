@@ -508,6 +508,8 @@ class WorkerGroup(ExecutionGroup):
         self,
         workers: List[Worker],
         sync_actor: ActorHandle,
+        *,
+        replacement: bool = False,
     ) -> None:
         """Collect train context args from callbacks and initialize train context.
 
@@ -517,11 +519,16 @@ class WorkerGroup(ExecutionGroup):
         Args:
             workers: The workers to initialize.
             sync_actor: The synchronization actor.
+            replacement: Use replacement hooks with the surviving full topology.
         """
         before_init_train_context_cb_start = time_monotonic()
         train_context_args: Dict[str, List[Any]] = {}
         for cb in self._execution_group_callbacks:
-            args = cb.before_init_train_context(workers)
+            args = (
+                cb.before_init_replacement_context(workers, self)
+                if replacement
+                else cb.before_init_train_context(workers)
+            )
             for arg, arg_values in args.items():
                 assert len(arg_values) == len(workers), (
                     f"Callback {cb} returned {arg} with "
@@ -897,7 +904,7 @@ class WorkerGroup(ExecutionGroup):
         # Initialize train context on new workers.
         sync_actor = self._worker_group_state.sync_actor
         try:
-            self._init_train_context(new_workers, sync_actor)
+            self._init_train_context(new_workers, sync_actor, replacement=True)
         except RayActorError as actor_error:
             error_msg = (
                 "At least one replacement worker failed to initialize "

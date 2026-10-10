@@ -20,6 +20,20 @@ class TorchftConfig(TorchConfig):
 
     See https://github.com/meta-pytorch/torchft for more info.
 
+    Dataset recovery:
+        Partial replacement preserves the full training world's dataset manager
+        and initializes DataContext on replacement actors. Independently
+        replayable datasets (``DataConfig(datasets_to_split=[])``) may be used,
+        but application sharding and restoring the failed replica's input
+        position remain the training loop's responsibility. This setting alone
+        does not provide exact-once input consumption.
+
+        Coordinated streaming splits cannot currently restore a failed
+        replica's in-flight cursor. Replacement workers requesting such a
+        dataset receive an explicit error rather than a newly configured
+        stream with an incorrect world size. Use full-group checkpoint recovery
+        when the workload requires those streams.
+
     Args:
         lighthouse_kwargs: Keyword arguments to pass to the torchft.Lighthouse constructor.
         **kwargs: Additional keyword arguments to pass to the TorchConfig constructor.

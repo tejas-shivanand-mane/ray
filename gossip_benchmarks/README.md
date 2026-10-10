@@ -48,3 +48,37 @@ Existing local datasets, JSON results and untracked files are untouched.
 
 Agent source review does not replace local validation. No tests, benchmarks,
 builds, lint or rendering were run by the agent for this change.
+
+
+## Partial Train replacement: dataset lifecycle regression
+
+The `ml-partial-data-context` branch fixes a runtime integration issue rather
+than adding another performance benchmark. Partial replica replacement uses a
+replacement-specific callback, keeps the surviving dataset manager and global
+rank mapping, updates future locality hints, and propagates DataContext to new
+actors. It does not rerun dataset factories or reset survivors' iterators.
+
+Run from the repository root in `ray-dev` (no native rebuild):
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 python -m pytest -q \
+  python/ray/train/v2/tests/test_data_integration.py \
+  python/ray/train/v2/tests/test_worker_group.py
+```
+
+The added node-loss test kills all processes of either rank's logical worker
+node, replaces that replica on surviving capacity, checks the survivor actor
+and its next input row, and verifies the replacement's independent partition
+(including a dataset first requested after the failure). It exercises the same
+WorkerGroup replacement path used by TorchFT without importing TorchFT or
+claiming model-state recovery. Head, dataset manager and storage survive.
+
+The replacement can obtain an independently replayable partition with its
+original global rank. Restoring its consumed cursor is still application work.
+Coordinated streaming splits are explicitly rejected on replacement because
+this change does not restore their in-flight cursor or epoch. Full-group
+recovery behavior remains available. Supporting such streams and reporting
+with missing replicas remain separate runtime work; this patch makes no
+claim of complete end-to-end TorchFT + Ray Data recovery or speedup.
+
+Tests have been added for local validation, not executed by the agent.

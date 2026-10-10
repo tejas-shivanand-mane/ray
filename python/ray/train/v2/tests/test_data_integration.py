@@ -794,6 +794,147 @@ def test_fixed_scaling_policy_coordinator_lifecycle(
         )
 
 
+class _IndependentRankDataConfig(ray.train.DataConfig):
+    """Independent replayable partitions, not coordinated streaming splits."""
+
+    def __init__(self):
+        super().__init__(datasets_to_split=[])
+
+    def configure(self, datasets, world_size, worker_handles, worker_node_ids, **kwargs):
+        assert len(worker_node_ids) == world_size
+        return [
+            {name: ds.filter(lambda row, r=rank: row["id"] % world_size == r).iterator()
+             for name, ds in datasets.items()}
+            for rank in range(world_size)
+        ]
+
+
+@pytest.mark.parametrize("failed_rank", [0, 1])
+@pytest.mark.usefixtures("mock_runtime_context")
+def test_dataset_partial_replacement_after_node_loss(failed_rank, restore_data_context):  # noqa: F811
+    """Exercise the real replacement hook after losing a whole logical node.
+
+    No TorchFT dependency: isolate Train's dataset lifecycle. This does not
+    claim to recover a model or the failed worker's consumed input cursor.
+    """
+    from ray._private.test_utils import wait_for_condition
+    from ray.cluster_utils import Cluster
+    from ray.train.v2._internal.execution.worker_group import WorkerGroup
+
+    cluster = Cluster()
+    group = None
+    try:
+        cluster.add_node(num_cpus=2)
+        nodes = [cluster.add_node(num_cpus=1, resources={"train_slot": 1}) for _ in range(3)]
+        ray.init(address=cluster.address)
+        ctx = DataContext.get_current()
+        ctx.set_config("replacement_test", "inherited")
+        ctx.execution_options.preserve_order = True
+        data_config = _IndependentRankDataConfig()
+        run_context = create_dummy_run_context(dataset_config=data_config)
+        factory_calls = []
+
+        def dataset_factory():
+            factory_calls.append(True)
+            return ray.data.range(16, override_num_blocks=1)
+
+        callback = DatasetsCallback(run_context, {"train": dataset_factory, "late": dataset_factory})
+        group = WorkerGroup.create(
+            train_run_context=run_context,
+            worker_group_context=WorkerGroupContext(
+                run_attempt_id="partial-data-test",
+                train_fn_ref=DummyObjectRefWrapper(lambda: None),
+                num_workers=2, resources_per_worker={"CPU": 1, "train_slot": 1},
+                placement_strategy="STRICT_SPREAD",
+            ),
+            callbacks=[callback],
+        )
+        provider = callback._dataset_shard_provider
+        manager_id = provider._dataset_manager._actor_id
+        old_workers = list(group.get_workers())
+
+        def start_iterator():
+            from ray.train.v2._internal.execution.context import get_train_context
+            context = get_train_context()
+            context._replacement_test_iterator = iter(ray.train.get_dataset_shard("train").iter_rows())
+            return next(context._replacement_test_iterator)["id"]
+
+        assert group.execute(start_iterator) == [0, 1]
+        failed_node_id = old_workers[failed_rank].metadata.node_id
+        failed_node = next(node for node in nodes if node.node_id == failed_node_id)
+        cluster.remove_node(failed_node, allow_graceful=False)
+        wait_for_condition(lambda: any(n["NodeID"] == failed_node_id and not n["Alive"] for n in ray.nodes()), timeout=30)
+        group.replace_replica_group(failed_rank)
+        workers = group.get_workers()
+        survivor = 1 - failed_rank
+        assert workers[survivor].actor._actor_id == old_workers[survivor].actor._actor_id
+        assert workers[failed_rank].actor._actor_id != old_workers[failed_rank].actor._actor_id
+        assert workers[failed_rank].metadata.node_id != failed_node_id
+        assert callback._dataset_shard_provider is provider
+        assert provider._dataset_manager._actor_id == manager_id
+        assert len(factory_calls) == 2  # Replacement must not recreate datasets.
+
+        def next_survivor_row():
+            from ray.train.v2._internal.execution.context import get_train_context
+            return next(get_train_context()._replacement_test_iterator)["id"]
+
+        assert group.execute_single(survivor, next_survivor_row) == survivor + 2
+
+        def replacement_rows():
+            assert DataContext.get_current().get_config("replacement_test") == "inherited"
+            # 'late' was never requested before failure; rank 1 must not depend
+            # on rank 0 reinitializing input for it.
+            return {name: [row["id"] for row in ray.train.get_dataset_shard(name).iter_rows()]
+                    for name in ("train", "late")}
+
+        result = group.execute_single(failed_rank, replacement_rows)
+        assert result == {name: list(range(failed_rank, 16, 2)) for name in ("train", "late")}
+    finally:
+        try:
+            if group is not None:
+                group.shutdown()
+        finally:
+            ray.shutdown()
+            cluster.shutdown()
+
+
+def test_dataset_replacement_rejects_unrestored_streaming_cursor(ray_start_4_cpus):
+    from ray.train.v2._internal.callbacks.datasets import RayDatasetShardProvider
+
+    node_id = ray.get_runtime_context().get_node_id()
+    provider = RayDatasetShardProvider(
+        {"train": ray.data.range(8)}, ray.train.DataConfig(), DataContext.get_current(),
+        world_size=2, worker_node_ids=[node_id, node_id],
+    )
+    try:
+        replacement = provider.for_replacement([node_id, node_id])
+        # Reject before contacting the split coordinator (and its rank-0 wait).
+        with pytest.raises(ValueError, match="input cursor is not restored"):
+            replacement.get_dataset_shard(DatasetShardMetadata("train", 1))
+        with pytest.raises(ValueError, match="world size"):
+            provider.for_replacement([node_id])
+        with pytest.raises(ValueError, match="outside the training world"):
+            replacement.get_dataset_shard(DatasetShardMetadata("train", 2))
+    finally:
+        ray.kill(provider._dataset_manager, no_restart=True)
+
+
+def test_dataset_provider_cache_is_rank_specific(ray_start_4_cpus):
+    from ray.train.v2._internal.callbacks.datasets import RayDatasetShardProvider
+
+    node_id = ray.get_runtime_context().get_node_id()
+    provider = RayDatasetShardProvider(
+        {"train": ray.data.range(8, override_num_blocks=1)}, _IndependentRankDataConfig(),
+        DataContext.get_current(), world_size=2, worker_node_ids=[node_id, node_id],
+    )
+    try:
+        for rank in (0, 1, 0):
+            shard = provider.get_dataset_shard(DatasetShardMetadata("train", rank))
+            assert [row["id"] for row in shard.iter_rows()] == list(range(rank, 8, 2))
+    finally:
+        ray.kill(provider._dataset_manager, no_restart=True)
+
+
 if __name__ == "__main__":
     import sys
 
