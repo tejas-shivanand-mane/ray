@@ -49,13 +49,24 @@ class DatasetManager:
 
         DataContext._set_current(data_context)
 
-    def update_worker_locations(self, worker_node_ids: List["NodeIdStr"]) -> None:
+    def update_worker_locations(
+        self, worker_node_ids: List["NodeIdStr"], replacement_ranks=None
+    ) -> None:
         """Update locality hints for future iterator creation after replacement.
 
-        Existing iterators and their execution state remain untouched.
+        Existing execution state remains untouched. Step-aligned input fences
+        replaced consumers while retaining the current round.
         """
         if len(worker_node_ids) != self._world_size:
             raise ValueError("Worker replacement cannot change dataset world size")
+        ranks = [] if replacement_ranks is None else replacement_ranks
+        if len(set(ranks)) != len(ranks) or any(type(r) is not int or not 0 <= r < self._world_size for r in ranks):
+            raise ValueError("Invalid replacement ranks")
+        from ray.train.v2._internal.data_integration.step_aligned_input import StepAlignedIterator
+        for iterators in self._dataset_iterators.values():
+            for rank in ranks:
+                if isinstance(iterators[rank], StepAlignedIterator):
+                    iterators[rank] = iterators[rank].for_replacement()
         self._worker_node_ids = list(worker_node_ids)
 
     def _create_dataset_iterators(
@@ -72,7 +83,11 @@ class DatasetManager:
         assert len(iterators_per_rank) == self._world_size
         # Convert the List[Dict[str, DataIterator]] to a List[DataIterator],
         # since we only configured one dataset.
-        return [iterators_per_rank[i][dataset_name] for i in range(self._world_size)]
+        iterators = [iterators_per_rank[i][dataset_name] for i in range(self._world_size)]
+        from ray.train.v2._internal.data_integration.step_aligned_input import StepAlignedIterator
+        if iterators and isinstance(iterators[0], StepAlignedIterator):
+            self._coordinator_actors.append(iterators[0]._coord_actor)
+        return iterators
 
     def _get_unsharded_dataset_iterator(
         self, dataset_info: DatasetShardMetadata

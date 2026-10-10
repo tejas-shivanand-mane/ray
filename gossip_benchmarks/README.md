@@ -92,3 +92,66 @@ with missing replicas remain separate runtime work; this patch makes no
 claim of complete end-to-end TorchFT + Ray Data recovery or speedup.
 
 Tests have been added for local validation, not executed by the agent.
+
+
+## Experimental step-aligned streaming input
+
+Branch `ml-step-aligned-input` adds an opt-in internal `StepAlignedDataConfig`.
+The coordinator retains one full round of Arrow batches. A worker requests its
+rank's batch using the committed model step **after synchronous peer healing**.
+Repeating an uncommitted step returns the same bytes; advancing the healed step
+retires that round. Replacement fences the old consumer generation without
+resetting surviving iterators or reexecuting the source. There are no durable
+input or model checkpoint writes in this opt-in path.
+
+This is a prototype with a strict contract: fixed membership, full synchronous
+quorum, one batch per rank per optimizer update, and a surviving input coordinator,
+Train controller, head and source storage. A supplied step is trusted as the
+application's committed model step; delivery counts do not prove model commit.
+It rejects stale/skipped steps, partial final rounds, and rounds over its byte
+limit. Coordinator loss, whole-group checkpoint resume, epoch reset, reduced
+quorum, gradient accumulation and arbitrary stochastic model state are outside
+its scope. The ordinary `streaming_split` replacement guard remains in place.
+
+The default 64 MiB limit bounds retained serialized input per dataset, not total
+process memory. Arrow conversion, worker/RPC copies and the source pipeline add
+memory. Central serialization and a synchronous quorum can cost throughput;
+there is no measured performance result yet. This mechanism should be evaluated
+before proposing it for industrial workloads.
+
+The existing TorchFT linear example supports `--step-aligned-input`. It selects
+input after synchronous quorum/healing, uses `Manager.current_step()`, and ends
+with a final quorum and a single metrics report, with no model checkpoint.
+Intermediate reporting across worker generations remains unresolved. See the
+[TorchFT Manager contract](https://meta-pytorch.org/torchft/manager.html) for
+quorum, healing and committed-step semantics.
+
+Run the lightweight input protocol and real WorkerGroup node-loss tests first:
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 timeout --signal=INT --kill-after=20s 600s \
+  python -m pytest -x -vv --tb=long \
+  python/ray/train/v2/tests/test_data_integration.py -k step_aligned
+```
+
+These kill either rank's entire logical node and check batch replay/advance,
+survivor identity, and old-generation fencing. They supply the healed model
+step explicitly; they do not establish model recovery.
+
+Then, in an environment with the checkout's TorchFT dependencies installed:
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 timeout --signal=INT --kill-after=20s 600s \
+  python -m pytest -x -vv --tb=long \
+  python/ray/train/v2/tests/test_torch_trainer.py::test_torchft_step_aligned_node_loss
+```
+
+The second test compares a seeded uninterrupted run with a run that loses a
+whole worker node after batch delivery and before forward. It checks final
+weights/bias against the reference, six committed updates, exactly one worker
+restart, and no durable model checkpoints. Both failure ranks are covered.
+It is a single-machine CPU/Gloo logical-node test, not a GPU/NCCL or cloud
+spot-instance experiment. No native rebuild or prepared CIFAR manifest is needed.
+
+All new tests are **unexecuted by the agent**. Passing them would establish the
+specified recovery behavior, not low overhead or general production readiness.

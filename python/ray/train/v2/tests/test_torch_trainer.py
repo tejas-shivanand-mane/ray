@@ -234,6 +234,123 @@ def test_torchft_linear_replica_failure(
     assert ray.get(counter.get_count.remote()) == expected_train_fn_calls
 
 
+@pytest.mark.parametrize("failed_rank", [0, 1])
+def test_torchft_step_aligned_node_loss(failed_rank, tmp_path):
+    """Compare peer-healed training with an uninterrupted reference.
+
+    Kill an entire logical worker node after batch delivery and before forward.
+    This is CPU/Gloo coverage, not a cloud spot-termination performance test.
+    """
+    import concurrent.futures
+    import time
+
+    import ray.data
+    from ray._private.test_utils import wait_for_condition
+    from ray.cluster_utils import Cluster
+    from ray.train.v2._internal.data_integration.step_aligned_input import StepAlignedDataConfig
+    from ray.train.v2.examples.pytorch.torchft_linear_example import train_func
+
+    @ray.remote(num_cpus=0)
+    class Observer:
+        def __init__(self):
+            self.failure_node = None
+            self.calls = {}
+            self.results = {}
+
+        def started(self, run, rank):
+            key = (run, rank)
+            self.calls[key] = self.calls.get(key, 0) + 1
+
+        def claim_failure(self, node):
+            if self.failure_node is not None:
+                return False
+            self.failure_node = node
+            return True
+
+        def get_failure_node(self):
+            return self.failure_node
+
+        def finish(self, run, rank, result):
+            self.results[(run, rank)] = result
+
+        def snapshot(self):
+            return self.calls, self.results
+
+    cluster = Cluster()
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = None
+    try:
+        cluster.add_node(num_cpus=2)
+        nodes = [cluster.add_node(num_cpus=1, resources={"train_slot": 1}) for _ in range(3)]
+        ray.init(address=cluster.address)
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+        observer = Observer.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+            ray.get_runtime_context().get_node_id(), soft=False)).remote()
+
+        def training(config):
+            import torch
+            torch.manual_seed(1234)
+            rank = ray.train.get_context().get_world_rank()
+            run = config["run"]
+            ray.get(observer.started.remote(run, rank))
+            shard = ray.train.get_dataset_shard("train")
+            original = shard.batch_for_step
+
+            def read(step):
+                batch = original(step)
+                if run == "failure" and rank == failed_rank and step == 2:
+                    if ray.get(observer.claim_failure.remote(ray.get_runtime_context().get_node_id())):
+                        # The driver kills this node; no cooperative exception.
+                        while True:
+                            time.sleep(0.1)
+                return batch
+
+            shard.batch_for_step = read
+            results = train_func(config)
+            ray.get(observer.finish.remote(run, rank, results[-1]))
+
+        def make_trainer(run):
+            ds = ray.data.range(48, override_num_blocks=1).map(
+                lambda row: {"x": (row["id"] % 8) / 10, "y": 2 * (row["id"] % 8) / 10 + 5}
+            )
+            return TorchTrainer(
+                training,
+                train_loop_config={"run": run, "num_steps": 6, "num_replicas": 2,
+                                   "batch_size": 4, "step_aligned_input": True},
+                datasets={"train": ds},
+                dataset_config=StepAlignedDataConfig(4, synchronous_full_membership=True),
+                scaling_config=ScalingConfig(num_workers=2, resources_per_worker={"CPU": 1, "train_slot": 1},
+                                             placement_strategy="STRICT_SPREAD"),
+                torch_config=TorchftConfig(backend="gloo", lighthouse_kwargs={"min_replicas": 2}),
+                run_config=RunConfig(name=run, storage_path=str(tmp_path),
+                                     failure_config=FailureConfig(max_failures=1)),
+            )
+
+        reference = make_trainer("reference").fit()
+        assert reference.error is None
+        trainer = make_trainer("failure")
+        future = pool.submit(trainer.fit)
+        wait_for_condition(lambda: ray.get(observer.get_failure_node.remote()) is not None,
+                           timeout=90)
+        node_id = ray.get(observer.get_failure_node.remote())
+        cluster.remove_node(next(n for n in nodes if n.node_id == node_id), allow_graceful=False)
+        result = future.result(timeout=180)
+        assert result.error is None
+        assert not reference.best_checkpoints and not result.best_checkpoints
+        calls, results = ray.get(observer.snapshot.remote())
+        assert calls[("failure", failed_rank)] == 2
+        assert calls[("failure", 1 - failed_rank)] == 1
+        for rank in (0, 1):
+            assert results[("failure", rank)]["step"] == 6
+            for key in ("weight", "bias"):
+                assert results[("failure", rank)][key] == pytest.approx(
+                    results[("reference", rank)][key], abs=1e-5)
+    finally:
+        ray.shutdown()
+        cluster.shutdown()
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def test_is_backend_nccl():
     assert _is_backend_nccl("nccl")
     assert _is_backend_nccl("cuda:nccl")

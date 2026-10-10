@@ -88,11 +88,11 @@ class RayDatasetShardProvider:
 
         return self._cached_dataset_shards[key]
 
-    def for_replacement(self, worker_node_ids: List["NodeIdStr"]):
+    def for_replacement(self, worker_node_ids: List["NodeIdStr"], replacement_ranks=None):
         """Share the surviving manager, but never claim to restore split cursors."""
         if len(worker_node_ids) != self._world_size:
             raise ValueError("Partial replacement must preserve dataset world size")
-        ray.get(self._dataset_manager.update_worker_locations.remote(worker_node_ids))
+        ray.get(self._dataset_manager.update_worker_locations.remote(worker_node_ids, replacement_ranks))
         provider = copy.copy(self)
         provider._replacement = True
         provider._cached_dataset_shards = {}
@@ -175,7 +175,8 @@ class DatasetsCallback(WorkerGroupCallback):
                     or worker.distributed_context.world_size != len(all_workers)):
                 raise ValueError("Replacement worker does not match the full training group")
         provider = self._dataset_shard_provider.for_replacement(
-            [w.metadata.node_id for w in all_workers]
+            [w.metadata.node_id for w in all_workers],
+            [w.distributed_context.world_rank for w in workers],
         )
         # after_worker_group_start is not called for partial replacement. Only
         # initialize the new actors; survivors can still be running user code.

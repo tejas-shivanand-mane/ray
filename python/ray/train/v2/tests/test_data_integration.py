@@ -816,12 +816,14 @@ def _independent_rank_data_config():
 
 
 @pytest.mark.parametrize("failed_rank", [0, 1])
+@pytest.mark.parametrize("input_mode", ["independent", "step_aligned_retry", "step_aligned_advance"])
 @pytest.mark.usefixtures("mock_runtime_context")
-def test_dataset_partial_replacement_after_node_loss(failed_rank, restore_data_context):  # noqa: F811
+def test_dataset_partial_replacement_after_node_loss(failed_rank, input_mode, restore_data_context):  # noqa: F811
     """Exercise the real replacement hook after losing a whole logical node.
 
     No TorchFT dependency: isolate Train's dataset lifecycle. This does not
-    claim to recover a model or the failed worker's consumed input cursor.
+    claim to recover a model. Step-aligned cases supply a simulated healed
+    committed step, checking both retry and advance after node replacement.
     """
     from ray._private.test_utils import wait_for_condition
     from ray.cluster_utils import Cluster
@@ -836,7 +838,12 @@ def test_dataset_partial_replacement_after_node_loss(failed_rank, restore_data_c
         ctx = DataContext.get_current()
         ctx.set_config("replacement_test", "inherited")
         ctx.execution_options.preserve_order = True
-        data_config = _independent_rank_data_config()
+        step_aligned = input_mode.startswith("step_aligned")
+        if step_aligned:
+            from ray.train.v2._internal.data_integration.step_aligned_input import StepAlignedDataConfig
+            data_config = StepAlignedDataConfig(batch_size=2, synchronous_full_membership=True)
+        else:
+            data_config = _independent_rank_data_config()
         run_context = create_dummy_run_context(dataset_config=data_config)
         factory_calls = []
 
@@ -865,7 +872,16 @@ def test_dataset_partial_replacement_after_node_loss(failed_rank, restore_data_c
             context._replacement_test_iterator = iter(ray.train.get_dataset_shard("train").iter_rows())
             return next(context._replacement_test_iterator)["id"]
 
-        assert group.execute(start_iterator) == [0, 1]
+        def read_step(step):
+            shard = ray.train.get_dataset_shard("train")
+            return shard.batch_for_step(step)["id"].tolist()
+
+        if step_aligned:
+            assert group.execute(lambda: read_step(0)) == [[0, 1], [2, 3]]
+            # Keep a driver copy to verify fencing independently of process death.
+            old_shard = provider.get_dataset_shard(DatasetShardMetadata("train", failed_rank))
+        else:
+            assert group.execute(start_iterator) == [0, 1]
         failed_node_id = old_workers[failed_rank].metadata.node_id
         failed_node = next(node for node in nodes if node.node_id == failed_node_id)
         cluster.remove_node(failed_node, allow_graceful=False)
@@ -879,6 +895,24 @@ def test_dataset_partial_replacement_after_node_loss(failed_rank, restore_data_c
         assert callback._dataset_shard_provider is provider
         assert provider._dataset_manager._actor_id == manager_id
         assert len(factory_calls) == 2  # Replacement must not recreate datasets.
+
+        if step_aligned:
+            with pytest.raises(ray.exceptions.RayTaskError, match="Stale input consumer"):
+                old_shard.batch_for_step(0)
+            resumed_step = 0 if input_mode == "step_aligned_retry" else 1
+            expected = [[4 * resumed_step, 4 * resumed_step + 1],
+                        [4 * resumed_step + 2, 4 * resumed_step + 3]]
+            # Survivor keeps its original cached shard, replacement gets a new
+            # generation. Both must follow the healed model step supplied here.
+            assert group.execute(lambda: read_step(resumed_step)) == expected
+            assert group.execute(lambda: read_step(resumed_step)) == expected
+            if resumed_step == 1:
+                with pytest.raises(ray.exceptions.RayTaskError, match="stale or skipped"):
+                    group.execute_single(failed_rank, lambda: read_step(0))
+            expected_next = [[4 * (resumed_step + 1), 4 * (resumed_step + 1) + 1],
+                             [4 * (resumed_step + 1) + 2, 4 * (resumed_step + 1) + 3]]
+            assert group.execute(lambda: read_step(resumed_step + 1)) == expected_next
+            return
 
         def next_survivor_row():
             from ray.train.v2._internal.execution.context import get_train_context
@@ -939,6 +973,63 @@ def test_dataset_provider_cache_is_rank_specific(ray_start_4_cpus):
             assert [row["id"] for row in shard.iter_rows()] == list(range(rank, 8, 2))
     finally:
         ray.kill(provider._dataset_manager, no_restart=True)
+
+
+def test_step_aligned_round_replay_and_fencing():
+    from ray.train.v2._internal.data_integration.step_aligned_input import StepInputRounds
+
+    produced = []
+
+    def source():
+        for start in (0, 4, 8):
+            produced.append(start)
+            yield pa.table({"id": list(range(start, start + 4))})
+
+    rounds = StepInputRounds(source(), 2, 2, 65536)
+    first = rounds.get(1, 0, 0)  # Nonzero rank may initialize the stream.
+    assert rounds.get(1, 0, 0) == first  # Lost response, no new source read.
+    with pytest.raises(ValueError, match="all fixed-membership"):
+        rounds.get(1, 0, 1)
+    rounds.get(0, 0, 0)
+    generation = rounds.fence(1)
+    with pytest.raises(ValueError, match="Stale input consumer"):
+        rounds.get(1, 0, 0)
+    assert rounds.get(1, generation, 0) == first
+    assert produced == [0]
+    second = rounds.get(0, 0, 1)
+    assert pa.ipc.open_stream(second).read_all()["id"].to_pylist() == [4, 5]
+    with pytest.raises(ValueError, match="stale or skipped"):
+        rounds.get(1, generation, 0)
+    with pytest.raises(ValueError, match="stale or skipped"):
+        rounds.get(1, generation, 3)
+    assert rounds.get(0, 0, 1) == second
+    assert produced == [0, 4]
+
+
+@pytest.mark.parametrize("failure", ["partial", "bytes", "serialized_bytes", "exhausted"])
+def test_step_aligned_source_error_is_terminal(failure):
+    from ray.train.v2._internal.data_integration.step_aligned_input import StepInputRounds
+
+    table = pa.table({"id": [0, 1, 2, 3]})
+    if failure == "partial":
+        table = table.slice(0, 3)
+    batches = [] if failure == "exhausted" else [table, table]
+    limit = {"bytes": 1, "serialized_bytes": table.nbytes}.get(failure, 65536)
+    rounds = StepInputRounds(batches, 2, 2, limit)
+    with pytest.raises(ValueError):
+        rounds.get(0, 0, 0)
+    # A failed source read must not silently consume a different round on retry.
+    with pytest.raises(RuntimeError, match="Step-aligned input failed"):
+        rounds.get(0, 0, 0)
+
+
+def test_step_aligned_requires_explicit_contract():
+    from ray.train.v2._internal.data_integration.step_aligned_input import StepAlignedDataConfig
+
+    with pytest.raises(ValueError, match="contract required"):
+        StepAlignedDataConfig(batch_size=2)
+    with pytest.raises(ValueError, match="positive integers"):
+        StepAlignedDataConfig(batch_size=0, synchronous_full_membership=True)
 
 
 if __name__ == "__main__":
