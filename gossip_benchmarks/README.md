@@ -155,3 +155,33 @@ spot-instance experiment. No native rebuild or prepared CIFAR manifest is needed
 
 All new tests are **unexecuted by the agent**. Passing them would establish the
 specified recovery behavior, not low overhead or general production readiness.
+
+
+### Node-loss follow-up: communication hook and cleanup failures
+
+The first local TorchFT node-loss run reached the injected fault, then failed
+in the surviving replica at `torchft/ddp.py: assert fut._fut`. Managed Work.wait()
+records a Gloo failure and can return False without initializing that private
+future. The CPU step-aligned example now returns a completed public Future after
+waiting on managed work, allowing the wrapped optimizer to reject failed updates.
+This is an example-local compatibility hook, not an upstream TorchFT fix or a
+GPU/NCCL result. The default example path is unchanged.
+
+A second failure occurred when Ray replaced the replica whose backward raised
+and attempted to clear the result queue of the already-dead peer. Queue-clear
+actor errors now feed the next worker health poll rather than becoming controller
+errors. This preserves failure handling and does not silently accept an ambiguous
+queue clear. The test also disables the dashboard, avoiding an unrelated missing
+frontend startup delay in source checkouts.
+
+Focused regression commands (followed by the end-to-end node test above):
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 timeout --signal=INT --kill-after=20s 180s \
+  python -m pytest -x -vv --tb=long \
+  python/ray/train/v2/tests/test_worker_group.py::test_replace_replica_group_with_another_dead_worker \
+  python/ray/train/v2/tests/test_torch_trainer.py::test_torchft_step_aligned_hook_failed_work
+```
+
+These follow-up changes have not been executed by the agent. Successful input
+protocol tests (10 passed locally) do not establish end-to-end model recovery.

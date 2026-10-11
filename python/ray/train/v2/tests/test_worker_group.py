@@ -144,6 +144,25 @@ def test_replace_replica_group():
     wg.shutdown()
 
 
+def test_replace_replica_group_with_another_dead_worker():
+    """A second dead replica must surface as worker failure, not controller failure."""
+    wg = _default_inactive_worker_group()
+    wg._start()
+    try:
+        other = wg.get_workers()[1]
+        ray.kill(other.actor, no_restart=True)
+        wg.replace_replica_group(0)
+        # Cleanup observed the dead actor and queued that error for health
+        # polling, so stale result queues cannot be treated as successful clears.
+        assert 1 in wg._world_rank_to_ongoing_poll
+        status = wg.poll_status(timeout=10)
+        assert 1 in status.failing_replica_group_indices
+        wg.replace_replica_group(1)
+        assert wg.get_workers()[1].actor._actor_id != other.actor._actor_id
+    finally:
+        wg.shutdown()
+
+
 def test_replace_replica_group_succeed_on_retry():
     """Test that replace_replica_group raises WorkerGroupStartupFailedError
     when a replacement worker fails to initialize."""

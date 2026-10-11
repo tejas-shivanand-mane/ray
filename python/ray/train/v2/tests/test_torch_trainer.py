@@ -234,6 +234,29 @@ def test_torchft_linear_replica_failure(
     assert ray.get(counter.get_count.remote()) == expected_train_fn_calls
 
 
+@pytest.mark.parametrize("communication_ok", [True, False])
+def test_torchft_step_aligned_hook_failed_work(communication_ok):
+    from unittest.mock import MagicMock
+    from ray.train.v2.examples.pytorch.torchft_linear_example import (
+        _FailureAwareDistributedDataParallel,
+    )
+
+    buffer = torch.tensor([1.0, 2.0])
+    bucket = MagicMock()
+    bucket.buffer.return_value = buffer
+    manager = MagicMock()
+    work = manager.allreduce.return_value
+    work.wait.return_value = communication_ok
+    # Failed managed work need not have an underlying Future. The hook must
+    # let backward finish so the wrapped optimizer can reject the update.
+    work.get_future.side_effect = AssertionError("uninitialized underlying future")
+    future = _FailureAwareDistributedDataParallel._comm_hook(manager, bucket)
+    assert future.wait() is buffer
+    manager.allreduce.assert_called_once_with(buffer)
+    work.wait.assert_called_once_with()
+    work.get_future.assert_not_called()
+
+
 @pytest.mark.parametrize("failed_rank", [0, 1])
 def test_torchft_step_aligned_node_loss(failed_rank, tmp_path):
     """Compare peer-healed training with an uninterrupted reference.
@@ -280,7 +303,7 @@ def test_torchft_step_aligned_node_loss(failed_rank, tmp_path):
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = None
     try:
-        cluster.add_node(num_cpus=2)
+        cluster.add_node(num_cpus=2, include_dashboard=False)
         nodes = [cluster.add_node(num_cpus=1, resources={"train_slot": 1}) for _ in range(3)]
         ray.init(address=cluster.address)
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy

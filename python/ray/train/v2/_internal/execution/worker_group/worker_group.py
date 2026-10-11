@@ -867,9 +867,24 @@ class WorkerGroup(ExecutionGroup):
         for i, rg in enumerate(self._replica_groups):
             if i != replica_group_index and rg.is_active():
                 for w in rg.get_workers():
-                    clear_tasks.append(w.actor.clear_result_queue.remote())
-        if clear_tasks:
-            ray.get(clear_tasks)
+                    clear_tasks.append((w, w.actor.clear_result_queue.remote()))
+        for worker, task in clear_tasks:
+            try:
+                ray.get(task)
+            except RayActorError:
+                # Another replica can become unreachable while this replica is
+                # being replaced. Preserve the failed RPC as its next health
+                # check, rather than treating it as a controller failure or
+                # accepting possibly stale reports after an ambiguous clear.
+                rank = worker.distributed_context.world_rank
+                self._world_rank_to_ongoing_poll[rank] = PollTask(
+                    start_time=time_monotonic(), task=task
+                )
+                logger.warning(
+                    "Worker rank %s became unavailable during result queue cleanup; "
+                    "deferring its failure to the next worker health poll.", rank,
+                    exc_info=True,
+                )
 
         # Reset the sync actor to unblock surviving workers that may be stuck
         # at the synchronization barrier. This is a no-op if no workers are

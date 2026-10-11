@@ -22,6 +22,24 @@ from ray.train.torch import TorchTrainer
 from ray.train.v2.torch.torchft_config import TorchftConfig
 
 
+class _FailureAwareDistributedDataParallel(DistributedDataParallel):
+    """CPU demo hook that preserves TorchFT's failed-update handling.
+
+    Managed Work.wait() records communication failures in Manager and returns
+    False. In that case the underlying Future may never have been initialized.
+    Since this hook already waits synchronously, return a completed public
+    Future; Optimizer/Manager still decides whether the update can commit.
+    """
+
+    @staticmethod
+    def _comm_hook(state, bucket):
+        buffer = bucket.buffer()
+        state.allreduce(buffer).wait()
+        future = torch.futures.Future()
+        future.set_result(buffer)
+        return future
+
+
 class LinearDataset(torch.utils.data.Dataset):
     """y = a * x + b"""
 
@@ -101,7 +119,8 @@ def train_func(config):
     )
 
     # Wrap model and optimizer with torchft primitives
-    model = DistributedDataParallel(manager, model)
+    ddp_cls = _FailureAwareDistributedDataParallel if step_aligned else DistributedDataParallel
+    model = ddp_cls(manager, model)
     optimizer = Optimizer(manager, optimizer)
 
     # Data
