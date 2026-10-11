@@ -31,6 +31,7 @@ def run(args, write_json):
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
     aligned = args.mode == "aligned"
+    peer_recovery = args.mode != "ordinary"
     folder = Path(args.sample).parent
 
     @ray.remote(num_cpus=0)
@@ -122,7 +123,7 @@ def run(args, write_json):
                     restored_step = state["step"]
             ray.get(recorder.add.remote({"kind": "initialized", "rank": rank, "restored_step": restored_step}))
             manager = None
-            if aligned:
+            if peer_recovery:
                 from torchft import Manager, Optimizer, ProcessGroupGloo
                 from torchft.checkpointing.pg_transport import PGTransport
                 pg = ProcessGroupGloo(timeout=timedelta(seconds=30))
@@ -140,7 +141,7 @@ def run(args, write_json):
                     checkpoint_transport=PGTransport(pg, timeout=timedelta(seconds=30), device=torch.device("cpu")))
                 model = _FailureAwareDistributedDataParallel(manager, base)
                 optimizer = Optimizer(manager, raw_optimizer)
-                shard = train.get_dataset_shard("train")
+                shard = train.get_dataset_shard("train") if aligned else None
             else:
                 model = train.torch.prepare_model(base)
                 optimizer = raw_optimizer
@@ -170,7 +171,7 @@ def run(args, write_json):
             try:
                 while True:
                     optimizer.zero_grad()
-                    if aligned:
+                    if peer_recovery:
                         manager.wait_quorum()
                         step = manager.current_step()
                         if manager.num_participants() != 2:
@@ -195,7 +196,7 @@ def run(args, write_json):
                     loss = nn.functional.cross_entropy(model(torch.tensor(batch["x"])), torch.tensor(batch["y"]))
                     loss.backward()
                     optimizer.step()
-                    next_step = manager.current_step() if aligned else step + 1
+                    next_step = manager.current_step() if peer_recovery else step + 1
                     # An aborted update is not a committed step and is not counted
                     # as successful recomputation. Its elapsed work remains timed.
                     if next_step > step:
@@ -220,7 +221,7 @@ def run(args, write_json):
                 args.batch_size, synchronous_full_membership=True)}
         trainer = TorchTrainer(training, scaling_config=ScalingConfig(num_workers=2,
             placement_strategy="STRICT_SPREAD", resources_per_worker={"CPU": 1, "train_slot": 1}),
-            torch_config=(TorchftConfig(backend="gloo", lighthouse_kwargs={"min_replicas": 2}) if aligned
+            torch_config=(TorchftConfig(backend="gloo", lighthouse_kwargs={"min_replicas": 2}) if peer_recovery
                           else TorchConfig(backend="gloo", timeout_s=60)),
             run_config=RunConfig(storage_path=str(folder / "storage"),
                 failure_config=FailureConfig(max_failures=1),
@@ -248,7 +249,7 @@ def run(args, write_json):
             raise RuntimeError("Training did not finish correctly")
         starts = [e for e in events if e["kind"] == "start"]
         counts = {r: sum(e["rank"] == r for e in starts) for r in (0, 1)}
-        expected = {r: 1 + int(args.fault and (not aligned or r == args.failed_rank)) for r in (0, 1)}
+        expected = {r: 1 + int(args.fault and (not peer_recovery or r == args.failed_rank)) for r in (0, 1)}
         if counts != expected:
             raise RuntimeError(f"Unexpected restart counts: {counts}, expected {expected}")
         arrays = [np.load(finals[r]["model_path"]) for r in (0, 1)]
@@ -311,15 +312,16 @@ def recovery_errors(sample, parameters):
 
 def validate(report):
     import numpy as np
+    baseline_mode = report.get("baseline_mode", "ordinary")
     for sample in report["samples"]:
         sample["recovery_errors"] = recovery_errors(sample, report["parameters"])
         sample["recovery_contract_valid"] = not sample["recovery_errors"]
         if sample["status"] != "completed":
             continue
         reference = next(s for s in report["samples"] if s["repeat"] == sample["repeat"]
-                         and s["mode"] == "ordinary" and not s["fault"])
+                         and s["mode"] == baseline_mode and not s["fault"])
         if reference["status"] != "completed":
-            sample["validation"] = "missing healthy ordinary Ray reference"
+            sample["validation"] = "missing healthy baseline reference"
             continue
         reference_array = np.load(reference["final"]["0"]["model_path"])
         error = max(float(np.max(np.abs(np.load(v["model_path"]) - reference_array)))
@@ -332,8 +334,8 @@ def validate(report):
         if len(samples) != 4 or not all(s.get("matches_reference") and s.get("recovery_contract_valid") for s in samples.values()):
             report["pairs"].append({"repeat": repeat, "valid": False})
             continue
-        ordinary, ours = samples[("ordinary", True)], samples[("aligned", True)]
-        baseline, healthy = samples[("ordinary", False)], samples[("aligned", False)]
+        ordinary, ours = samples[(baseline_mode, True)], samples[("aligned", True)]
+        baseline, healthy = samples[(baseline_mode, False)], samples[("aligned", False)]
         report["pairs"].append({"repeat": repeat, "valid": True,
             "fault_runtime_reduction_pct": 100 * (ordinary["fit_s"] - ours["fit_s"]) / ordinary["fit_s"],
             "healthy_fit_overhead_pct": 100 * (healthy["fit_s"] / baseline["fit_s"] - 1),

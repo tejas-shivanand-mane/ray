@@ -187,12 +187,12 @@ def main():
     parser.add_argument("--fault-step", type=int, default=20)
     parser.add_argument("--failed-rank", type=int, choices=[0, 1], default=0)
     parser.add_argument("--timeout-s", type=int, default=300)
-    parser.add_argument("--comparison", choices=["input-ablation", "ordinary-ray"], default="input-ablation")
+    parser.add_argument("--comparison", choices=["input-ablation", "ordinary-ray", "torchft-input"], default="input-ablation")
     parser.add_argument("--checkpoint-every", type=int, default=16)
     parser.add_argument("--model-width", type=int, default=512)
     parser.add_argument("--startup-delay-s", type=float, default=0)
     parser.add_argument("--sample", type=Path)
-    parser.add_argument("--mode", choices=["independent", "aligned", "ordinary"])
+    parser.add_argument("--mode", choices=["independent", "aligned", "ordinary", "indexed"])
     parser.add_argument("--repeat", type=int, default=0)
     parser.add_argument("--fault", action="store_true")
     args = parser.parse_args()
@@ -200,13 +200,13 @@ def main():
         parser.error("Require 0 < fault-step < steps and positive sizes/repeats/timeout")
     if args.checkpoint_every <= 0 or args.model_width <= 0 or args.startup_delay_s < 0:
         parser.error("Checkpoint interval/model width must be positive; startup delay nonnegative")
-    if args.comparison == "ordinary-ray" and args.fault_step % args.checkpoint_every == 0:
+    if args.comparison in ("ordinary-ray", "torchft-input") and args.fault_step % args.checkpoint_every == 0:
         parser.error("Choose a failure strictly between scheduled checkpoints")
-    if args.comparison != "ordinary-ray" and args.startup_delay_s:
+    if args.comparison not in ("ordinary-ray", "torchft-input") and args.startup_delay_s:
         parser.error("Simulated startup delay is supported by --comparison ordinary-ray")
     os.environ["RAY_TRAIN_V2_ENABLED"] = "1"
     if args.sample:
-        if args.comparison == "ordinary-ray":
+        if args.comparison in ("ordinary-ray", "torchft-input"):
             from _support.ordinary_ray_comparison import run
             run(args, write_json)
         else:
@@ -225,22 +225,27 @@ def main():
         "python/ray/train/v2/_internal/data_integration/step_aligned_input.py",
         "python/ray/train/v2/_internal/callbacks/datasets.py",
         "python/ray/train/v2/_internal/execution/worker_group/worker_group.py"]
-    if args.comparison == "ordinary-ray":
+    if args.comparison in ("ordinary-ray", "torchft-input"):
         source_paths.append("gossip_benchmarks/_support/ordinary_ray_comparison.py")
     source_hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in source_paths}
     report = {"source_sha256": source_hashes, "source_commit": revision.stdout.strip() if revision.returncode == 0 else None,
-        "profile": "ordinary-ray-peer" if args.comparison == "ordinary-ray" else "step-input-ablation", "parameters": {
+        "profile": "ordinary-ray-peer" if args.comparison in ("ordinary-ray", "torchft-input") else "step-input-ablation", "parameters": {
         "steps": args.steps, "batch_size": args.batch_size, "fault_step": args.fault_step,
         "failed_rank": args.failed_rank, "repeats": args.repeats,
         "checkpoint_every": args.checkpoint_every, "model_width": args.model_width,
         "startup_delay_s": args.startup_delay_s}, "samples": [],
         "scope": "CPU linear model; two logical worker nodes; surviving head/coordinator; no durable checkpoints; Fixed-R not enabled by harness",
         "comparison": "Same TorchFT and failure-aware hook; independent input vs commit-aligned input"}
-    if args.comparison == "ordinary-ray":
+    if args.comparison in ("ordinary-ray", "torchft-input"):
         report.update(scope="CPU MLP synthetic classification; two logical worker nodes; surviving head/storage; identical scheduled checkpoints; Fixed-R not enabled by harness",
                       comparison="Ordinary Ray DDP full-group checkpoint retry vs TorchFT with commit-aligned input and partial peer recovery",
                       startup_simulation="Each worker invocation sleeps startup_delay_s, including initial startup and restarts in both arms")
-    baseline_mode = "ordinary" if args.comparison == "ordinary-ray" else "independent"
+    if args.comparison == "torchft-input":
+        report.update(profile="torchft-input-comparison",
+                      comparison="Same TorchFT peer recovery: deterministic indexed input vs retained aligned Ray Data input",
+                      baseline_mode="indexed")
+    baseline_mode = {"ordinary-ray": "ordinary", "torchft-input": "indexed",
+                     "input-ablation": "independent"}[args.comparison]
     for repeat in range(args.repeats):
         for fault in (False, True):
             for mode in ([baseline_mode, "aligned"] if repeat % 2 == 0 else ["aligned", baseline_mode]):
@@ -278,7 +283,7 @@ def main():
                 report["samples"].append(entry)
                 write_json(args.output, report)
                 print(f"  {entry['status']}", flush=True)
-    if args.comparison == "ordinary-ray":
+    if args.comparison in ("ordinary-ray", "torchft-input"):
         from _support.ordinary_ray_comparison import validate
         validate(report)
         report["status"] = "finished"

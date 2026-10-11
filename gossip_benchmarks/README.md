@@ -358,3 +358,44 @@ negative result. A positive result establishes a useful compute/checkpoint regim
 for this synthetic workload; real-data training and multi-machine/GPU validation
 would still be needed before claiming industrial performance. Source reviewed
 only; the agent has not executed this sweep or rendered its plot.
+
+### Isolate input retention from TorchFT model recovery
+
+`--comparison torchft-input` compares two correct input strategies using the same
+TorchFT Manager, failure-aware gradient hook, optimizer, model, scheduled durable
+checkpoints, and partial worker replacement. The `indexed` baseline deterministically
+reconstructs each batch from the healed committed model step and worker rank.
+The `aligned` arm uses retained batches delivered through the Ray Data coordinator.
+Both must match the healthy indexed reference and repeat zero committed updates
+after node loss. Both must restart only the failed worker and acknowledge the
+scheduled checkpoints before the fault. This replaces the earlier intentionally
+non-resumable input ablation with a correctness-preserving alternative.
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 python gossip_benchmarks/run_step_input_experiment.py \
+  --comparison torchft-input --repeats 1 --steps 300 --batch-size 256 \
+  --model-width 2048 --checkpoint-every 120 --fault-step 239 \
+  --startup-delay-s 0 --timeout-s 1800 \
+  --output ~/ray-coverage/torchft-input-comparison.json
+python gossip_benchmarks/plot_step_input_experiment.py \
+  ~/ray-coverage/torchft-input-comparison.json \
+  --output ~/ray-coverage/torchft-input-comparison.png
+```
+
+This is four observations. Use a fresh output name and `--repeats 3` for repeated
+measurements once the new mode passes. The plot includes both healthy and failure
+times and labels the baseline as TorchFT with indexed input. Positive fault-runtime
+reduction means retained input is faster than indexed input; a negative value is
+an overhead result, not a failure to hide. Model arrays are required during
+validation, but the finished JSON is sufficient for plotting.
+
+For this synthetic source, indexed reconstruction is cheap local NumPy work.
+The retained arm additionally pays for Ray Data processing, serialization and
+coordinator delivery. This measures the complete input strategy, not just the
+cost of keeping bytes in memory. No S3 reads, tokenization, augmentation, or
+production input costs are simulated. A slower retained arm establishes that
+retention is not beneficial for this cheaply reproducible source; it would not
+negate its correctness utility for non-resumable streaming inputs. Conversely,
+a gain over ordinary Ray cannot by itself establish an advantage over this
+correct TorchFT baseline. Source review only; this new mode has not been executed
+by the agent.
