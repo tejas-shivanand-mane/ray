@@ -191,6 +191,7 @@ def main():
     parser.add_argument("--checkpoint-every", type=int, default=16)
     parser.add_argument("--model-width", type=int, default=512)
     parser.add_argument("--startup-delay-s", type=float, default=0)
+    parser.add_argument("--profile-recovery", action="store_true")
     parser.add_argument("--text-manifest", type=Path)
     parser.add_argument("--sample", type=Path)
     parser.add_argument("--mode", choices=["independent", "aligned", "ordinary", "indexed"])
@@ -205,6 +206,8 @@ def main():
         parser.error("Choose a failure strictly between scheduled checkpoints")
     if args.comparison not in ("ordinary-ray", "torchft-input") and args.startup_delay_s:
         parser.error("Simulated startup delay is supported by --comparison ordinary-ray")
+    if args.profile_recovery and args.comparison == "input-ablation":
+        parser.error("Recovery profiling requires ordinary-ray or torchft-input comparison")
     if args.text_manifest:
         if args.comparison != "torchft-input":
             parser.error("--text-manifest requires --comparison torchft-input")
@@ -237,13 +240,15 @@ def main():
         source_paths.append("gossip_benchmarks/_support/ordinary_ray_comparison.py")
     if args.text_manifest:
         source_paths.extend(["gossip_benchmarks/_support/text_stream.py", "gossip_benchmarks/prepare_text_input.py"])
+    if args.profile_recovery:
+        source_paths.append("gossip_benchmarks/_support/recovery_trace.py")
     source_hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in source_paths}
     report = {"source_sha256": source_hashes, "source_commit": revision.stdout.strip() if revision.returncode == 0 else None,
         "profile": "ordinary-ray-peer" if args.comparison in ("ordinary-ray", "torchft-input") else "step-input-ablation", "parameters": {
         "steps": args.steps, "batch_size": args.batch_size, "fault_step": args.fault_step,
         "failed_rank": args.failed_rank, "repeats": args.repeats,
         "checkpoint_every": args.checkpoint_every, "model_width": args.model_width,
-        "startup_delay_s": args.startup_delay_s}, "samples": [],
+        "startup_delay_s": args.startup_delay_s, "profile_recovery": args.profile_recovery}, "samples": [],
         "scope": "CPU linear model; two logical worker nodes; surviving head/coordinator; no durable checkpoints; Fixed-R not enabled by harness",
         "comparison": "Same TorchFT and failure-aware hook; independent input vs commit-aligned input"}
     if args.comparison in ("ordinary-ray", "torchft-input"):
@@ -277,6 +282,8 @@ def main():
                     "--comparison", args.comparison, "--checkpoint-every", str(args.checkpoint_every),
                     "--model-width", str(args.model_width), "--startup-delay-s", str(args.startup_delay_s),
                     "--timeout-s", str(args.timeout_s)]
+                if args.profile_recovery:
+                    command.append("--profile-recovery")
                 if args.text_manifest:
                     command += ["--text-manifest", str(args.text_manifest)]
                 if fault:

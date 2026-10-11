@@ -39,6 +39,9 @@ def run(args, write_json):
         # Ray workers do not need this benchmark directory installed as a package.
         ray.cloudpickle.register_pickle_by_value(text_stream)
         text_manifest, text_root = text_stream.load_manifest(args.text_manifest, args.steps, args.batch_size)
+    if args.profile_recovery:
+        from _support import recovery_trace
+        ray.cloudpickle.register_pickle_by_value(recovery_trace)
     num_classes = text_manifest["num_classes"] if text_manifest else 10
 
     @ray.remote(num_cpus=0)
@@ -50,7 +53,9 @@ def run(args, write_json):
             self.checkpoints = {}
 
         def add(self, event):
-            self.events.append(dict(event, time=time.monotonic()))
+            event = dict(event)
+            event.setdefault("time", time.monotonic())
+            self.events.append(event)
 
         def acknowledge(self, step, path):
             self.checkpoints[step] = path
@@ -101,7 +106,15 @@ def run(args, write_json):
             ray.get_runtime_context().get_node_id(), soft=False)).remote()
 
         class CheckpointAcknowledgement(UserCallback):
+            def after_exception(self, run_context, worker_exceptions):
+                if args.profile_recovery:
+                    ray.get(recorder.add.remote({"kind": "controller_observed_failure",
+                        "time": time.monotonic(), "ranks": sorted(worker_exceptions),
+                        "errors": {rank: type(error).__name__ for rank, error in worker_exceptions.items()}}))
+
             def after_report(self, run_context, metrics, checkpoint):
+                if args.profile_recovery:
+                    recovery_trace.install(recorder)
                 if checkpoint is None:
                     return
                 steps = {m["step"] for m in metrics}
@@ -150,9 +163,15 @@ def run(args, write_json):
                     return {"model": base.state_dict(), "optim": raw_optimizer.state_dict()}
 
                 def load_state_dict(state):
+                    if args.profile_recovery:
+                        recorder.add.remote({"kind": "peer_state_load_begin", "rank": rank, "time": time.monotonic()})
                     base.load_state_dict(state["model"])
                     raw_optimizer.load_state_dict(state["optim"])
+                    if args.profile_recovery:
+                        recorder.add.remote({"kind": "peer_state_load_end", "rank": rank, "time": time.monotonic()})
 
+                if args.profile_recovery:
+                    recorder.add.remote({"kind": "torchft_setup_begin", "rank": rank, "time": time.monotonic()})
                 manager = Manager(pg=pg, min_replica_size=2, world_size=1, rank=0,
                     replica_id=f"compare_{rank}", use_async_quorum=False,
                     timeout=timedelta(seconds=60), state_dict=state_dict, load_state_dict=load_state_dict,
@@ -160,6 +179,8 @@ def run(args, write_json):
                 model = _FailureAwareDistributedDataParallel(manager, base)
                 optimizer = Optimizer(manager, raw_optimizer)
                 shard = train.get_dataset_shard("train") if aligned else None
+                if args.profile_recovery:
+                    recorder.add.remote({"kind": "torchft_setup_end", "rank": rank, "time": time.monotonic()})
             else:
                 model = train.torch.prepare_model(base)
                 optimizer = raw_optimizer
@@ -188,12 +209,16 @@ def run(args, write_json):
 
             try:
                 while True:
+                    sync_started = time.monotonic()
                     optimizer.zero_grad()
                     if peer_recovery:
                         manager.wait_quorum()
                         step = manager.current_step()
                         if manager.num_participants() != 2:
                             raise RuntimeError("Full membership required")
+                    if args.profile_recovery and time.monotonic() - sync_started >= .05:
+                        recorder.add.remote({"kind": "step_synchronization", "rank": rank, "step": step,
+                            "time": sync_started, "end_time": time.monotonic()})
                     if step >= args.steps:
                         break
                     # Scheduled durable checkpoints in BOTH arms. On replacement
@@ -256,7 +281,18 @@ def run(args, write_json):
                 node, _, _ = ray.get(recorder.snapshot.remote())
                 if node is not None:
                     fault_time = time.monotonic()
+                    if args.profile_recovery:
+                        ray.get(recorder.add.remote({"kind": "node_kill_requested", "time": fault_time, "node": node}))
                     cluster.remove_node(next(n for n in nodes if n.node_id == node), allow_graceful=False)
+                    if args.profile_recovery:
+                        ray.get(recorder.add.remote({"kind": "node_kill_returned", "time": time.monotonic()}))
+                        # This observes the driver's node table, not the exact GCS
+                        # detection timestamp. Bound observation and retain failures.
+                        while not future.done() and time.monotonic() - fault_time < 60:
+                            if any(n["NodeID"] == node and not n["Alive"] for n in ray.nodes()):
+                                ray.get(recorder.add.remote({"kind": "driver_observed_node_dead", "time": time.monotonic()}))
+                                break
+                            time.sleep(.1)
                     break
                 if time.monotonic() - started > args.timeout_s - 30:
                     raise TimeoutError("Fault gate was not reached")
@@ -288,7 +324,7 @@ def run(args, write_json):
         output = {"status": "completed", "mode": args.mode, "fault": args.fault,
             "repeat": args.repeat, "fit_s": ended - started,
             "loop_span_s": max(e["time"] for e in events if e["kind"] == "finish") - min(e["time"] for e in starts),
-            "startup_delay_s": args.startup_delay_s,
+            "startup_delay_s": args.startup_delay_s, "profile_recovery": args.profile_recovery,
             "recovery_to_new_progress_s": recovery, "repeated_updates_per_rank": repeated,
             "fault_time": fault_time, "events": events, "final": finals, "starts": counts,
             "checkpoint_bytes": sum(e["bytes"] for e in events if e["kind"] == "checkpoint"),

@@ -456,3 +456,52 @@ work to beat coordination overhead. Do not add dummy processing or disable curso
 seeking to force a win. A negative result limits the case for retention on this
 seekable corpus; a positive result still needs repetition and broader workload
 validation. This code was source reviewed but not executed or plotted by the agent.
+
+### Profile worker replacement before changing recovery policy
+
+`--profile-recovery` adds diagnostic instrumentation to either MLP comparison.
+The controller callback installs benchmark-local method wrappers at the first
+checkpoint report, before failure injection. The wrappers preserve call arguments,
+return values and exceptions; they emit timestamped begin/end events to the
+recorder. They do not change timeouts, scheduling policy or library source files.
+Controller-process patches disappear when that process exits. Initial startup
+before the first checkpoint is not covered by these method traces.
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 python gossip_benchmarks/run_step_input_experiment.py \
+  --comparison ordinary-ray --profile-recovery \
+  --repeats 1 --steps 120 --batch-size 32 --model-width 512 \
+  --checkpoint-every 60 --fault-step 89 --startup-delay-s 0 --timeout-s 900 \
+  --output ~/ray-coverage/recovery-profile.json
+python gossip_benchmarks/plot_recovery_profile.py \
+  ~/ray-coverage/recovery-profile.json \
+  --output ~/ray-coverage/recovery-profile.png
+```
+
+No dataset preparation is required. Four observations compare ordinary full-group
+retry and the integrated partial-replacement path, including healthy controls.
+Use `--comparison torchft-input` to profile indexed versus retained input instead.
+Existing correctness/recovery validation remains mandatory. Raw events retain
+controller poll spans, failure callbacks, recovery decisions, group shutdown,
+placement-group waiting where applicable, worker creation/metadata readiness,
+context setup, training dispatch, TorchFT setup, peer-state application, and
+zero_grad/quorum waits lasting at least 50 ms. The driver also records node-kill
+request/return and polls the node table for observed death for at most 60 seconds.
+This is a local logical-node kill, not a cloud preemption/heartbeat-loss test.
+
+The timeline stops when both ranks advance beyond the pre-fault model step. Nested
+spans overlap and must not be added. Partial replacement reuses placement slots:
+its `_create_workers` duration combines resource rescheduling, process/actor
+startup and metadata RPC readiness; the initial profile cannot separate those
+internals. A separate placement wait appears for full-group startup when invoked.
+Peer-state application timestamps exclude preceding transfer; quorum waits may
+include transfer and other synchronization. Do not label either as network-only
+time. Origin timestamps share a physical-host monotonic clock; this must change
+before using the plot across physical machines.
+
+The source has a default 2-second controller health-poll interval and a 5-second
+graceful worker-shutdown patience. Those are hypotheses to measure, not reasons
+to shorten failure timeouts blindly. Profile first, then target an observed
+avoidable wait while retaining slow-worker and node-failure correctness. Tracing
+adds recorder traffic, so instrument both arms and treat times as diagnostic.
+Source reviewed only; the agent has not executed or rendered this profile.
