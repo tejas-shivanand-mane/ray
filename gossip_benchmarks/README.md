@@ -305,3 +305,17 @@ the baseline's rollback; always state the interval alongside any speedup.
 Source review only: this new comparison and its plots have not been run by the
 agent. It may reveal overhead or a recovery/reporting limitation instead of an
 improvement. Do not suppress those results.
+
+
+Checkpoint publication is explicitly synchronized in both comparison arms:
+workers wait for a controller callback that runs after checkpoint registration,
+reads the persisted state, and verifies its step. The checkpoint duration includes
+this acknowledgement. This avoids injecting a failure while a reported checkpoint
+is still pending controller processing. Every scheduled checkpoint must have an
+acknowledgement event, including the latest one before node loss. Replacement
+workers must load that checkpoint (TorchFT then heals newer state from its peer).
+The benchmark also verifies exact repeated-update counts: 60 per ordinary worker
+for the example above and zero for aligned input. Reports violating this contract,
+including older reports without acknowledgements, are excluded from plots and
+paired speedup claims even when their final model is correct. Use a fresh output
+name when rerunning; do not compare timings across these benchmark revisions.

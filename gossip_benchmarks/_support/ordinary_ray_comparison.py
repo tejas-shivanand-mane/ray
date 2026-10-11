@@ -22,7 +22,7 @@ def run(args, write_json):
     from torch import nn
     from datetime import timedelta
     from ray.cluster_utils import Cluster
-    from ray.train import Checkpoint, RunConfig, ScalingConfig
+    from ray.train import Checkpoint, RunConfig, ScalingConfig, UserCallback
     from ray.train.torch import TorchConfig, TorchTrainer
     from ray.train.v2.api.config import FailureConfig
     from ray.train.v2._internal.data_integration.step_aligned_input import StepAlignedDataConfig
@@ -39,9 +39,18 @@ def run(args, write_json):
             self.events = []
             self.node = None
             self.finals = {}
+            self.checkpoints = {}
 
         def add(self, event):
             self.events.append(dict(event, time=time.monotonic()))
+
+        def acknowledge(self, step, path):
+            self.checkpoints[step] = path
+            self.events.append({"kind": "checkpoint_ack", "step": step,
+                                "path": path, "time": time.monotonic()})
+
+        def acknowledged(self, step):
+            return step in self.checkpoints
 
         def claim(self, node):
             if self.node is not None:
@@ -71,6 +80,23 @@ def run(args, write_json):
         ray.init(address=cluster.address)
         recorder = Recorder.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
             ray.get_runtime_context().get_node_id(), soft=False)).remote()
+
+        class CheckpointAcknowledgement(UserCallback):
+            def after_report(self, run_context, metrics, checkpoint):
+                if checkpoint is None:
+                    return
+                steps = {m["step"] for m in metrics}
+                if len(steps) != 1:
+                    raise RuntimeError(f"Checkpoint report steps disagree: {steps}")
+                step = steps.pop()
+                with checkpoint.as_directory() as directory:
+                    state = torch.load(Path(directory) / "state.pt",
+                                       map_location="cpu", weights_only=True)
+                if state["step"] != step:
+                    raise RuntimeError(f"Persisted checkpoint is not step {step}")
+                # CheckpointManager runs before this callback. A worker-side
+                # report return alone does not prove controller registration.
+                ray.get(recorder.acknowledge.remote(step, str(checkpoint.path)))
 
         def training(config):
             rank = train.get_context().get_world_rank()
@@ -133,6 +159,11 @@ def run(args, write_json):
                         byte_count = path.stat().st_size
                         cp = Checkpoint.from_directory(temporary)
                     train.report({"step": step}, checkpoint=cp)
+                    deadline = time.monotonic() + 60
+                    while not ray.get(recorder.acknowledged.remote(step)):
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(f"Controller did not acknowledge checkpoint {step}")
+                        time.sleep(.01)
                     ray.get(recorder.add.remote({"kind": "checkpoint", "rank": rank,
                         "step": step, "seconds": time.monotonic() - started, "bytes": byte_count}))
 
@@ -190,7 +221,8 @@ def run(args, write_json):
             torch_config=(TorchftConfig(backend="gloo", lighthouse_kwargs={"min_replicas": 2}) if aligned
                           else TorchConfig(backend="gloo", timeout_s=60)),
             run_config=RunConfig(storage_path=str(folder / "storage"),
-                failure_config=FailureConfig(max_failures=1)), **dataset_args)
+                failure_config=FailureConfig(max_failures=1),
+                callbacks=[CheckpointAcknowledgement()]), **dataset_args)
         started = time.monotonic()
         future = pool.submit(trainer.fit)
         fault_time = None
@@ -244,9 +276,42 @@ def run(args, write_json):
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def recovery_errors(sample, parameters):
+    """Audit raw evidence, including old reports that lack acknowledgement events."""
+    errors = []
+    if sample.get("status") != "completed":
+        return ["run did not complete"]
+    fault = sample["fault"]
+    ordinary = sample["mode"] == "ordinary"
+    fault_step = parameters["fault_step"]
+    latest = (fault_step // parameters["checkpoint_every"]) * parameters["checkpoint_every"]
+    events = sample.get("events", [])
+    acknowledgements = [e for e in events if e["kind"] == "checkpoint_ack"]
+    for step in range(0, parameters["steps"], parameters["checkpoint_every"]):
+        if not any(e["step"] == step for e in acknowledgements):
+            errors.append(f"no controller acknowledgement for checkpoint {step}")
+    if fault and not any(e["step"] == latest and e["time"] < sample["fault_time"]
+                         for e in acknowledgements):
+        errors.append(f"checkpoint {latest} was not acknowledged before node loss")
+    for rank in (0, 1):
+        initializations = [e for e in events if e["kind"] == "initialized" and e["rank"] == rank]
+        replaced = fault and (ordinary or rank == parameters["failed_rank"])
+        expected_restores = [0, latest] if replaced else [0]
+        restores = [e["restored_step"] for e in initializations]
+        if restores != expected_restores:
+            errors.append(f"rank {rank} restored {restores}, expected {expected_restores}")
+        repeated = sum(e["kind"] == "update" and e.get("rank") == rank for e in events) - parameters["steps"]
+        expected_repeats = fault_step - latest if fault and ordinary else 0
+        if repeated != expected_repeats:
+            errors.append(f"rank {rank} repeated {repeated} updates, expected {expected_repeats}")
+    return errors
+
+
 def validate(report):
     import numpy as np
     for sample in report["samples"]:
+        sample["recovery_errors"] = recovery_errors(sample, report["parameters"])
+        sample["recovery_contract_valid"] = not sample["recovery_errors"]
         if sample["status"] != "completed":
             continue
         reference = next(s for s in report["samples"] if s["repeat"] == sample["repeat"]
@@ -262,7 +327,7 @@ def validate(report):
     report["pairs"] = []
     for repeat in range(report["parameters"]["repeats"]):
         samples = {(s["mode"], s["fault"]): s for s in report["samples"] if s["repeat"] == repeat}
-        if len(samples) != 4 or not all(s.get("matches_reference") for s in samples.values()):
+        if len(samples) != 4 or not all(s.get("matches_reference") and s.get("recovery_contract_valid") for s in samples.values()):
             report["pairs"].append({"repeat": repeat, "valid": False})
             continue
         ordinary, ours = samples[("ordinary", True)], samples[("aligned", True)]

@@ -75,6 +75,10 @@ def main():
 
 
 def plot_ordinary(report, output):
+    from _support.ordinary_ray_comparison import recovery_errors
+
+    for sample in report["samples"]:
+        sample["recovery_contract_valid"] = not recovery_errors(sample, report["parameters"])
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -87,7 +91,7 @@ def plot_ordinary(report, output):
     for ax, (fault, field, title, ylabel) in zip(axes.flat, panels):
         for index, (mode, color) in enumerate((("ordinary", "#CC6677"), ("aligned", "#4477AA"))):
             samples = [s for s in report["samples"] if s["mode"] == mode and s["fault"] == fault]
-            validated = [s for s in samples if s.get("matches_reference") is True and field in s]
+            validated = [s for s in samples if s.get("matches_reference") is True and s["recovery_contract_valid"] and field in s]
             values = [(sum(s[field].values()) / 2 if field == "repeated_updates_per_rank" else s[field])
                       for s in validated]
             if values:
@@ -97,7 +101,7 @@ def plot_ordinary(report, output):
             else:
                 ax.text(index, .1, "No validated result", rotation=90, ha="center",
                         transform=ax.get_xaxis_transform())
-            ax.text(index, 1.02, f"{len(validated)}/{len(samples)} correct", ha="center",
+            ax.text(index, 1.02, f"{len(validated)}/{len(samples)} validated", ha="center",
                     transform=ax.get_xaxis_transform(), fontsize=9)
         ax.set_xticks([0, 1], ["Ordinary Ray\nDDP + checkpoint retry", "Our integrated path\nTorchFT + aligned input"])
         ax.set_title(title, pad=25)
@@ -105,7 +109,9 @@ def plot_ordinary(report, output):
         ax.set_ylim(bottom=0)
         ax.grid(axis="y", alpha=.2)
         ax.set_axisbelow(True)
-    pairs = [p for p in report.get("pairs", []) if p.get("valid")]
+    pairs = [p for p in report.get("pairs", []) if p.get("valid") and
+             all(s.get("matches_reference") and s["recovery_contract_valid"]
+                 for s in report["samples"] if s["repeat"] == p["repeat"])]
     if pairs:
         improvement = statistics.median(p["fault_runtime_reduction_pct"] for p in pairs)
         overhead = statistics.median(p["healthy_fit_overhead_pct"] for p in pairs)
@@ -121,7 +127,7 @@ def plot_ordinary(report, output):
         f"Synthetic CPU MLP width {p['model_width']}; {p['steps']} steps; checkpoint every {p['checkpoint_every']}; "
         f"rank {p['failed_rank']} lost before update {p['fault_step']}; {p['repeats']} repeats.\n" +
         "Same checkpoints and simulated delay in both arms. Ordinary Ray directly resumes input at its checkpoint step.\n" +
-        "Bars: medians; points: runs. Only correct runs contribute timing. Head/storage survive; one physical host.\n" +
+        "Bars: medians; points: runs. Only correctness and recovery validated runs contribute timing. Head/storage survive; one physical host.\n" +
         "Combined-system comparison includes TorchFT benefits; the separate input ablation isolates our input contribution.",
         ha="center", fontsize=8)
     fig.tight_layout(rect=(0, .17, 1, .95))
