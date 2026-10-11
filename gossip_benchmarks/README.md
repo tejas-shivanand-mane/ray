@@ -319,3 +319,42 @@ for the example above and zero for aligned input. Reports violating this contrac
 including older reports without acknowledgements, are excluded from plots and
 paired speedup claims even when their final model is correct. Use a fresh output
 name when rerunning; do not compare timings across these benchmark revisions.
+
+
+### Genuine computation and checkpoint-interval sweep
+
+Use a wider CPU MLP to measure whether saved training computation outweighs
+recovery and healthy overhead. This remains synthetic classification, not a
+production workload or a GPU result. The default width is 2048, batch size 256,
+300 updates, and failure before update 239. Checkpoint intervals 30, 60 and 120
+imply exactly 29, 59 and 119 replayed updates per ordinary worker. Aligned input
+must repeat zero. Each case includes both healthy controls, identical checkpoint
+schedules, and zero startup sleep. Forward/backward/optimizer time (including
+collective waits) is recorded as `compute_s` in committed-update events. It is
+not pure kernel time and excludes aborted attempts; fit time includes all work.
+The sweep also exercises scheduled checkpointing after recovery.
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 python gossip_benchmarks/run_training_cost_sweep.py \
+  --repeats 1 --output ~/ray-coverage/training-cost-sweep.json
+python gossip_benchmarks/plot_training_cost_sweep.py \
+  ~/ray-coverage/training-cost-sweep.json \
+  --output ~/ray-coverage/training-cost-sweep.png
+```
+
+This runs twelve observations; each has a 1800-second timeout, not a promised
+runtime. For repeated measurements use `--repeats 3` with a fresh output name.
+Both arms retain the same model width and batch size; do not tune just one arm.
+The plot reports healthy time, failure time, signed paired runtime reduction and
+healthy overhead. It includes only complete four-observation validated pairs;
+failures remain in the JSON and reduce the displayed valid-pair counts. The
+summary embeds child reports so it can be plotted without model arrays or the
+original directory layout. Raw model arrays and logs remain in per-case folders.
+Run intervals in a different order with `--intervals 120 60 30` in a separate
+sweep to check order effects. No throughput gain is assumed or required.
+
+If saved replay work still does not exceed healthy/recovery overhead, this is a
+negative result. A positive result establishes a useful compute/checkpoint regime
+for this synthetic workload; real-data training and multi-machine/GPU validation
+would still be needed before claiming industrial performance. Source reviewed
+only; the agent has not executed this sweep or rendered its plot.

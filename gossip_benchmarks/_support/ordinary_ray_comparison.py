@@ -191,6 +191,7 @@ def run(args, write_json):
                         if ray.get(recorder.claim.remote(ray.get_runtime_context().get_node_id())):
                             while True:
                                 time.sleep(.1)
+                    compute_started = time.monotonic()
                     loss = nn.functional.cross_entropy(model(torch.tensor(batch["x"])), torch.tensor(batch["y"]))
                     loss.backward()
                     optimizer.step()
@@ -198,7 +199,8 @@ def run(args, write_json):
                     # An aborted update is not a committed step and is not counted
                     # as successful recomputation. Its elapsed work remains timed.
                     if next_step > step:
-                        ray.get(recorder.add.remote({"kind": "update", "rank": rank, "step": next_step}))
+                        ray.get(recorder.add.remote({"kind": "update", "rank": rank, "step": next_step,
+                            "compute_s": time.monotonic() - compute_started}))
                     step = next_step
                 flat = np.concatenate([p.detach().cpu().numpy().reshape(-1) for p in base.parameters()])
                 model_path = folder / f"model-rank-{rank}.npy"
