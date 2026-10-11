@@ -399,3 +399,60 @@ negate its correctness utility for non-resumable streaming inputs. Conversely,
 a gain over ordinary Ray cannot by itself establish an advantage over this
 correct TorchFT baseline. Source review only; this new mode has not been executed
 by the agent.
+
+### Real-text streaming preprocessing: retained input versus cursor resume
+
+Prepare raw gzip JSONL shards from the 20 Newsgroups training split. This downloads
+public text through scikit-learn; it does not prepare model features. Alternatively
+supply `--jsonl PATH` with `text` and contiguous integer `label` fields starting at
+zero. Preparation shuffles once with seed 42, takes the requested records without
+replacement, and writes checksums. Use a fresh directory. The default preparation
+needs 7,680 records (120 steps, two ranks, batch 32).
+
+```bash
+python gossip_benchmarks/prepare_text_input.py \
+  --output-directory ~/ray-coverage/text-input
+RAY_TRAIN_V2_ENABLED=1 python gossip_benchmarks/run_step_input_experiment.py \
+  --comparison torchft-input --text-manifest ~/ray-coverage/text-input/manifest.json \
+  --repeats 1 --steps 120 --batch-size 32 --model-width 512 \
+  --checkpoint-every 60 --fault-step 89 --startup-delay-s 0 --timeout-s 900 \
+  --output ~/ray-coverage/text-input-comparison.json
+python gossip_benchmarks/plot_step_input_experiment.py \
+  ~/ray-coverage/text-input-comparison.json \
+  --output ~/ray-coverage/text-input-comparison.png
+```
+
+Each arm performs actual gzip decompression, JSON parsing, regex word tokenization,
+unigram/bigram hashing into 256 features, log counts and normalization during
+training. The classifier predicts the corpus labels. This is a recovery experiment;
+there is no validation split or claim about predictive quality. Both arms use the
+same TorchFT peer recovery, model, optimizer, input order and checkpoint schedule.
+Complete input hashes at every requested rank/step must match the healthy cursor
+baseline, including retries. Final parameters, restart counts, checkpoint
+acknowledgements and zero repeated committed updates are also checked.
+
+The baseline's cursor is `(committed_step, rank)`, mapping directly to one compressed
+batch shard. It opens that shard and preprocesses it, including after replacement;
+no unrelated prefix is deliberately replayed. The retained arm processes the same
+shards through Ray Data with one global round per source block and retains the
+current round in our coordinator. Both use surviving local files on the shared
+host; this is NOT an S3, WAN, GPU or large-cluster experiment. File-system caches
+are allowed in both, preparation/checksum preflight is outside fit timing, and
+Ray Data preprocessing/prefetch during fit is included in fit timing. Source
+checksums detect incomplete/corrupt preparation before launching training.
+
+Source telemetry records chunk IDs, compressed bytes read, records, tokens and
+preprocessing seconds. A matched recorder call per decoded chunk adds accounting
+overhead to both arms. The real-text plot replaces the rollback panel (which must
+be zero in both arms) with repeated decoding and adds total input bytes and summed
+preprocessing task time. These task times are not elapsed recovery time. Ray Data
+may prefetch; use actual duplicate chunk counts rather than assuming every extra
+read happened on the replacement. The cursor baseline intentionally reprocesses a
+requested batch on each retry instead of retaining prepared batches; this makes
+retention policy explicit. A local retry cache is another possible alternative.
+
+With cheap preprocessing, retaining only the current round may save too little
+work to beat coordination overhead. Do not add dummy processing or disable cursor
+seeking to force a win. A negative result limits the case for retention on this
+seekable corpus; a positive result still needs repetition and broader workload
+validation. This code was source reviewed but not executed or plotted by the agent.

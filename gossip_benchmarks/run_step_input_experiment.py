@@ -191,6 +191,7 @@ def main():
     parser.add_argument("--checkpoint-every", type=int, default=16)
     parser.add_argument("--model-width", type=int, default=512)
     parser.add_argument("--startup-delay-s", type=float, default=0)
+    parser.add_argument("--text-manifest", type=Path)
     parser.add_argument("--sample", type=Path)
     parser.add_argument("--mode", choices=["independent", "aligned", "ordinary", "indexed"])
     parser.add_argument("--repeat", type=int, default=0)
@@ -204,6 +205,13 @@ def main():
         parser.error("Choose a failure strictly between scheduled checkpoints")
     if args.comparison not in ("ordinary-ray", "torchft-input") and args.startup_delay_s:
         parser.error("Simulated startup delay is supported by --comparison ordinary-ray")
+    if args.text_manifest:
+        if args.comparison != "torchft-input":
+            parser.error("--text-manifest requires --comparison torchft-input")
+        args.text_manifest = args.text_manifest.expanduser().resolve()
+        if not args.sample:
+            from _support.text_stream import load_manifest
+            load_manifest(args.text_manifest, args.steps, args.batch_size)
     os.environ["RAY_TRAIN_V2_ENABLED"] = "1"
     if args.sample:
         if args.comparison in ("ordinary-ray", "torchft-input"):
@@ -227,6 +235,8 @@ def main():
         "python/ray/train/v2/_internal/execution/worker_group/worker_group.py"]
     if args.comparison in ("ordinary-ray", "torchft-input"):
         source_paths.append("gossip_benchmarks/_support/ordinary_ray_comparison.py")
+    if args.text_manifest:
+        source_paths.extend(["gossip_benchmarks/_support/text_stream.py", "gossip_benchmarks/prepare_text_input.py"])
     source_hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in source_paths}
     report = {"source_sha256": source_hashes, "source_commit": revision.stdout.strip() if revision.returncode == 0 else None,
         "profile": "ordinary-ray-peer" if args.comparison in ("ordinary-ray", "torchft-input") else "step-input-ablation", "parameters": {
@@ -244,6 +254,14 @@ def main():
         report.update(profile="torchft-input-comparison",
                       comparison="Same TorchFT peer recovery: deterministic indexed input vs retained aligned Ray Data input",
                       baseline_mode="indexed")
+    if args.text_manifest:
+        manifest = json.loads(args.text_manifest.read_text())
+        report["text_input"] = {"source": manifest["source"],
+            "manifest_sha256": hashlib.sha256(args.text_manifest.read_bytes()).hexdigest(),
+            "preprocessing": "gzip JSONL decode, word tokenization, unigram/bigram hashing",
+            "cursor": "chunk = committed_step * world_size + rank; seek directly to compressed shard",
+            "num_classes": manifest["num_classes"]}
+        report["scope"] = "CPU real-text classification with online preprocessing; local surviving source storage; two logical workers"
     baseline_mode = {"ordinary-ray": "ordinary", "torchft-input": "indexed",
                      "input-ablation": "independent"}[args.comparison]
     for repeat in range(args.repeats):
@@ -259,6 +277,8 @@ def main():
                     "--comparison", args.comparison, "--checkpoint-every", str(args.checkpoint_every),
                     "--model-width", str(args.model_width), "--startup-delay-s", str(args.startup_delay_s),
                     "--timeout-s", str(args.timeout_s)]
+                if args.text_manifest:
+                    command += ["--text-manifest", str(args.text_manifest)]
                 if fault:
                     command.append("--fault")
                 print(f"repeat {repeat + 1}/{args.repeats}: {mode}, fault={fault}", flush=True)

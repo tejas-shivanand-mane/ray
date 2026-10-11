@@ -83,14 +83,21 @@ def plot_ordinary(report, output):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    text_input = report.get("text_input")
     indexed = report.get("profile") == "torchft-input-comparison"
     baseline_mode = "indexed" if indexed else "ordinary"
-    baseline_label = "TorchFT + indexed input" if indexed else "Ordinary Ray\nDDP + checkpoint retry"
+    baseline_label = ("TorchFT + cursor resume" if text_input else "TorchFT + indexed input") if indexed else "Ordinary Ray\nDDP + checkpoint retry"
     panels = [(False, "fit_s", "Healthy completion time", "Seconds"),
               (True, "fit_s", "Completion time with worker-node loss", "Seconds"),
               (True, "recovery_to_new_progress_s", "Node loss to new model progress", "Seconds"),
               (True, "repeated_updates_per_rank", "Committed updates repeated after rollback", "Mean repeated updates per worker")]
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    if text_input:
+        panels[-1] = (True, "redecoded_chunks", "Input chunks decoded more than once", "Chunks")
+        panels.extend([(True, "compressed_bytes_read", "Total compressed input read", "Bytes"),
+                       (True, "preprocessing_worker_seconds", "Summed preprocessing task time", "Worker-seconds (not wall time)")])
+        for sample in report["samples"]:
+            sample.update(sample.get("input_work", {}))
+    fig, axes = plt.subplots(3 if text_input else 2, 2, figsize=(12, 11) if text_input else (11, 8))
     for ax, (fault, field, title, ylabel) in zip(axes.flat, panels):
         for index, (mode, color) in enumerate(((baseline_mode, "#CC6677"), ("aligned", "#4477AA"))):
             samples = [s for s in report["samples"] if s["mode"] == mode and s["fault"] == fault]
@@ -128,12 +135,13 @@ def plot_ordinary(report, output):
     fig.suptitle(f"{comparison} | simulated startup: {delay:g} s per worker invocation")
     fig.text(.5, .025,
         conclusion + "\n" +
-        f"Synthetic CPU MLP width {p['model_width']}; {p['steps']} steps; checkpoint every {p['checkpoint_every']}; "
+        f"{'Real-text' if text_input else 'Synthetic'} CPU MLP width {p['model_width']}; {p['steps']} steps; checkpoint every {p['checkpoint_every']}; "
         f"rank {p['failed_rank']} lost before update {p['fault_step']}; {p['repeats']} repeats.\n" +
         ("Same TorchFT, checkpoints and delay; indexed input reconstructs each batch at the healed model step.\n" if indexed else
          "Same checkpoints and simulated delay in both arms. Ordinary Ray directly resumes input at its checkpoint step.\n") +
         "Bars: medians; points: runs. Only correctness and recovery validated runs contribute timing. Head/storage survive; one physical host.\n" +
-        ("Input strategy comparison: cheap deterministic local reconstruction versus retained Ray Data delivery."
+        (("Local compressed text shards; identical preprocessing; cursor resume versus retained Ray Data delivery."
+          if text_input else "Input strategy comparison: cheap deterministic local reconstruction versus retained Ray Data delivery.")
          if indexed else "Combined-system comparison includes TorchFT benefits; the separate input ablation isolates our input contribution."),
         ha="center", fontsize=8)
     fig.tight_layout(rect=(0, .17, 1, .95))

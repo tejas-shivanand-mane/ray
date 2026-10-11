@@ -33,6 +33,13 @@ def run(args, write_json):
     aligned = args.mode == "aligned"
     peer_recovery = args.mode != "ordinary"
     folder = Path(args.sample).parent
+    text_manifest = None
+    if args.text_manifest:
+        from _support import text_stream
+        # Ray workers do not need this benchmark directory installed as a package.
+        ray.cloudpickle.register_pickle_by_value(text_stream)
+        text_manifest, text_root = text_stream.load_manifest(args.text_manifest, args.steps, args.batch_size)
+    num_classes = text_manifest["num_classes"] if text_manifest else 10
 
     @ray.remote(num_cpus=0)
     class Recorder:
@@ -69,6 +76,17 @@ def run(args, write_json):
         # Stateless deterministic source: cheap random access for ordinary Ray.
         # Both modes receive the exact same features and labels for each step.
         ids = np.asarray(ids, dtype=np.int64)
+        if text_manifest is not None:
+            pieces = []
+            for chunk in dict.fromkeys((ids // args.batch_size).tolist()):
+                batch, event = text_stream.read_batch(text_root, text_manifest, chunk)
+                # Same accounting RPC per decoded chunk in both strategies.
+                ray.get(recorder.add.remote(event))
+                pieces.append(batch)
+            complete = {key: np.concatenate([b[key] for b in pieces]) for key in ("id", "x", "y")}
+            positions = {int(value): index for index, value in enumerate(complete["id"])}
+            indices = [positions[int(value)] for value in ids]
+            return {key: value[indices] for key, value in complete.items()}
         features = np.sin(ids[:, None] * .013 + np.arange(256)[None, :] * .071).astype(np.float32)
         labels = ((ids // 7 + ids % 3) % 10).astype(np.int64)
         return {"x": features, "y": labels, "id": ids}
@@ -111,7 +129,7 @@ def run(args, write_json):
             base = nn.Sequential(nn.Linear(256, args.model_width), nn.ReLU(),
                 nn.Linear(args.model_width, args.model_width), nn.ReLU(),
                 nn.Linear(args.model_width, args.model_width), nn.ReLU(),
-                nn.Linear(args.model_width, 10))
+                nn.Linear(args.model_width, num_classes))
             raw_optimizer = torch.optim.Adam(base.parameters(), lr=1e-3)
             checkpoint = train.get_checkpoint()
             restored_step = 0
@@ -188,6 +206,9 @@ def run(args, write_json):
                     batch = shard.batch_for_step(step) if aligned else batch_values(ids)
                     if batch["id"].tolist() != ids:
                         raise RuntimeError("Input does not match the committed model step")
+                    if text_manifest is not None:
+                        ray.get(recorder.add.remote({"kind": "input_batch", "rank": rank,
+                            "step": step, "digest": text_stream.digest(batch)}))
                     if args.fault and rank == args.failed_rank and step == args.fault_step:
                         if ray.get(recorder.claim.remote(ray.get_runtime_context().get_node_id())):
                             while True:
@@ -215,7 +236,8 @@ def run(args, write_json):
 
         dataset_args = {}
         if aligned:
-            ds = ray.data.range(args.steps * 2 * args.batch_size).map_batches(
+            range_options = {"override_num_blocks": args.steps} if text_manifest is not None else {}
+            ds = ray.data.range(args.steps * 2 * args.batch_size, **range_options).map_batches(
                 lambda b: batch_values(b["id"]), batch_format="numpy", batch_size=2 * args.batch_size)
             dataset_args = {"datasets": {"train": ds}, "dataset_config": StepAlignedDataConfig(
                 args.batch_size, synchronous_full_membership=True)}
@@ -272,6 +294,17 @@ def run(args, write_json):
             "checkpoint_bytes": sum(e["bytes"] for e in events if e["kind"] == "checkpoint"),
             "versions": {"ray": ray.__version__, "torch": torch.__version__,
                          "torchft": importlib.metadata.version("torchft")}}
+        if text_manifest is not None:
+            preprocessing = [e for e in events if e["kind"] == "preprocess"]
+            counts = {}
+            for event in preprocessing:
+                counts[event["chunk"]] = counts.get(event["chunk"], 0) + 1
+            output["input_work"] = {
+                "decoded_chunks": len(preprocessing),
+                "unique_chunks": len(counts),
+                "redecoded_chunks": sum(max(0, count - 1) for count in counts.values()),
+                "compressed_bytes_read": sum(e["compressed_bytes"] for e in preprocessing),
+                "preprocessing_worker_seconds": sum(e["seconds"] for e in preprocessing)}
         write_json(args.sample, output)
     finally:
         ray.shutdown()
@@ -328,6 +361,15 @@ def validate(report):
                     for v in sample["final"].values())
         sample["max_parameter_error"] = error
         sample["matches_reference"] = error <= 1e-5
+        if report.get("text_input"):
+            expected_batches = {(e["rank"], e["step"]): e["digest"]
+                                for e in reference["events"] if e["kind"] == "input_batch"}
+            actual_batches = [e for e in sample["events"] if e["kind"] == "input_batch"]
+            sample["input_matches_reference"] = (
+                len(expected_batches) == 2 * report["parameters"]["steps"]
+                and {(e["rank"], e["step"]) for e in actual_batches} == set(expected_batches)
+                and all(expected_batches.get((e["rank"], e["step"])) == e["digest"] for e in actual_batches))
+            sample["matches_reference"] &= sample["input_matches_reference"]
     report["pairs"] = []
     for repeat in range(report["parameters"]["repeats"]):
         samples = {(s["mode"], s["fault"]): s for s in report["samples"] if s["repeat"] == repeat}
