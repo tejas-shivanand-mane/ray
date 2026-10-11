@@ -185,3 +185,52 @@ RAY_TRAIN_V2_ENABLED=1 timeout --signal=INT --kill-after=20s 180s \
 
 These follow-up changes have not been executed by the agent. Successful input
 protocol tests (10 passed locally) do not establish end-to-end model recovery.
+
+
+## Plot the input-recovery contribution
+
+`run_step_input_experiment.py` is a controlled ablation using the already-tested
+CPU TorchFT linear example. Both arms use the same peer model recovery,
+synchronous quorum, failure-aware communication hook, seeds and zero durable
+model checkpoints. The independent-input arm uses conventional rank-partitioned
+iteration, which advances on delivery and starts over in a replacement process.
+The aligned arm uses the model's healed committed step. This comparison isolates
+our input contribution; it is **not** ordinary Ray full-group checkpoint recovery.
+
+For each seed, run healthy and node-loss cases in both arms. Kill one complete
+logical worker node after delivery at step 20, before forward/update, while the
+head, coordinator, peer and shared storage survive. Check exact expected sample
+IDs for each requested model step, final weights/bias versus the healthy aligned
+reference (absolute tolerance 1e-5), agreement between final replicas, and exactly
+one worker restart in fault cases. A completed run can still be numerically wrong.
+Neither mismatches nor failed/timed-out observations are hidden.
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 python gossip_benchmarks/run_step_input_experiment.py \
+  --repeats 3 --output ~/ray-coverage/step-input-ablation.json
+python gossip_benchmarks/plot_step_input_experiment.py \
+  ~/ray-coverage/step-input-ablation.json \
+  --output ~/ray-coverage/step-input-ablation.png
+```
+
+Use `--repeats 1` and a different output name for an initial smoke run. Use
+`--failed-rank 1` with a fresh output name to exercise the other rank. Each sample
+has a subprocess timeout, JSON result and log; existing reports are never
+overwritten. The plot writes PNG and PDF and shows individual observations and
+medians for model error, input mismatches, and end-to-end fit time. Fit time includes
+worker startup, data execution, telemetry, and recovery; cluster creation is
+excluded. The report also records training-loop span and raw input request events.
+These request events are not a global committed-progress trace.
+
+Evidence supporting the contribution would be: both healthy arms agree; aligned
+node-loss runs have no input mismatches and match the reference; independent
+node-loss runs expose wrong input/model trajectories despite peer model recovery.
+If this pattern does not occur, report it rather than claiming a benefit. Three
+repetitions are preliminary. This small synthetic linear workload establishes
+input semantics, not model convergence or industrial throughput. The independent
+arm scans/filters its own partitions, while the aligned arm centrally splits
+batches; timing includes those different data paths. A realistic workload and
+matched infrequent-checkpoint baseline remain separate performance work.
+
+Scripts have been source-reviewed only; the agent has not executed experiments,
+tests, compilation or plotting for this addition.
