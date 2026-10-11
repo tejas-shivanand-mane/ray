@@ -234,3 +234,74 @@ matched infrequent-checkpoint baseline remain separate performance work.
 
 Scripts have been source-reviewed only; the agent has not executed experiments,
 tests, compilation or plotting for this addition.
+
+## Direct comparison with ordinary Ray
+
+The same runner now accepts `--comparison ordinary-ray`. This uses a CPU MLP
+(256 input features, three configurable-width hidden layers, 10 classes, Adam)
+and deterministic synthetic classification batches. It measures training-system
+behavior; it is not a claim about real-data prediction accuracy.
+
+* Ordinary Ray: standard TorchConfig/DDP, full worker-group retry from the last
+  durable model/Adam/step checkpoint. Input is directly indexed by the restored
+  step, giving the baseline correct resume without decoding/skipping a prefix.
+* Our integrated path: TorchFT peer model recovery, partial worker replacement,
+  and commit-aligned Ray Data input. The same scheduled durable checkpoints are
+  written, but a single worker loss recovers newer state from its surviving peer.
+
+Both use the same initialization seed, model, optimizer, batches, checkpoint
+interval, resources, failure point and optional simulated startup delay. Both
+must match the ordinary Ray healthy reference within absolute parameter tolerance
+1e-5. Final replica agreement, expected invocation counts and input IDs are also
+checked. This comparison measures the combined system, including existing TorchFT
+benefits; the earlier ablation separately isolates our input contribution.
+
+Start with one repetition (four observations):
+
+```bash
+RAY_TRAIN_V2_ENABLED=1 python gossip_benchmarks/run_step_input_experiment.py \
+  --comparison ordinary-ray --repeats 1 --steps 240 --batch-size 128 \
+  --model-width 512 --checkpoint-every 120 --fault-step 180 \
+  --startup-delay-s 0 --timeout-s 600 \
+  --output ~/ray-coverage/ordinary-ray-peer-smoke.json
+python gossip_benchmarks/plot_step_input_experiment.py \
+  ~/ray-coverage/ordinary-ray-peer-smoke.json \
+  --output ~/ray-coverage/ordinary-ray-peer-smoke.png
+```
+
+The chosen case loses a node between checkpoints: ordinary Ray should restore
+step 120 and repeat about 60 committed updates per worker, while peer recovery
+should retain step 180. The failure is injected after input delivery and before
+forward at that step; it is not a failure during checkpoint publication.
+Checkpointing occurs at steps 0 and 120; both methods report completion at 240.
+
+After the smoke run passes, use `--repeats 3` and a fresh output name for measured
+results. To simulate costly application initialization, repeat with
+`--startup-delay-s 10` and a new output name. The sleep occurs once at the start
+of **every worker invocation**, including initial startup and replacement, in
+both methods. It does not delay model updates, failure detection, or only the
+baseline. Worker delays overlap: restarting two workers does not necessarily
+cost twice as much elapsed time. Plots prominently label the simulated delay;
+retain the zero-delay control rather than treating simulated results as measured
+startup performance. Provisioning/VM boot delay itself is not modeled.
+
+The four-panel plot shows healthy runtime, node-loss runtime, node-loss-to-new-
+progress time, and repeated committed updates. New progress means both ranks
+have exceeded the pre-fault model step, including any checkpoint recomputation.
+Runtime reductions are signed: negative means our path is slower. Timing plots
+exclude incorrect runs and display correct/attempted counts. Pairwise speedup
+and healthy overhead are reported only when all four observations are correct.
+Raw events, version metadata, source hashes, checkpoint bytes and final model
+arrays remain beside the JSON for audit. Model arrays are needed if revalidating
+the report; the plotting script only needs the JSON.
+
+The ordinary baseline generates its cheaply indexed synthetic input locally;
+our mode additionally incurs Ray Data and retention costs. Thus a win is not
+created by forcing the baseline to replay input preparation. Realistic I/O-heavy
+workloads, GPUs, larger scale and different checkpoint intervals remain to be
+measured. Long checkpoint intervals can increase the benefit but also increase
+the baseline's rollback; always state the interval alongside any speedup.
+
+Source review only: this new comparison and its plots have not been run by the
+agent. It may reveal overhead or a recovery/reporting limitation instead of an
+improvement. Do not suppress those results.

@@ -187,16 +187,30 @@ def main():
     parser.add_argument("--fault-step", type=int, default=20)
     parser.add_argument("--failed-rank", type=int, choices=[0, 1], default=0)
     parser.add_argument("--timeout-s", type=int, default=300)
+    parser.add_argument("--comparison", choices=["input-ablation", "ordinary-ray"], default="input-ablation")
+    parser.add_argument("--checkpoint-every", type=int, default=16)
+    parser.add_argument("--model-width", type=int, default=512)
+    parser.add_argument("--startup-delay-s", type=float, default=0)
     parser.add_argument("--sample", type=Path)
-    parser.add_argument("--mode", choices=["independent", "aligned"])
+    parser.add_argument("--mode", choices=["independent", "aligned", "ordinary"])
     parser.add_argument("--repeat", type=int, default=0)
     parser.add_argument("--fault", action="store_true")
     args = parser.parse_args()
     if not 0 < args.fault_step < args.steps or min(args.batch_size, args.repeats, args.timeout_s) <= 0:
         parser.error("Require 0 < fault-step < steps and positive sizes/repeats/timeout")
+    if args.checkpoint_every <= 0 or args.model_width <= 0 or args.startup_delay_s < 0:
+        parser.error("Checkpoint interval/model width must be positive; startup delay nonnegative")
+    if args.comparison == "ordinary-ray" and args.fault_step % args.checkpoint_every == 0:
+        parser.error("Choose a failure strictly between scheduled checkpoints")
+    if args.comparison != "ordinary-ray" and args.startup_delay_s:
+        parser.error("Simulated startup delay is supported by --comparison ordinary-ray")
     os.environ["RAY_TRAIN_V2_ENABLED"] = "1"
     if args.sample:
-        observation(args)
+        if args.comparison == "ordinary-ray":
+            from _support.ordinary_ray_comparison import run
+            run(args, write_json)
+        else:
+            observation(args)
         return
     args.output = args.output.expanduser().resolve()
     directory = args.output.parent / (args.output.stem + "-runs")
@@ -211,23 +225,35 @@ def main():
         "python/ray/train/v2/_internal/data_integration/step_aligned_input.py",
         "python/ray/train/v2/_internal/callbacks/datasets.py",
         "python/ray/train/v2/_internal/execution/worker_group/worker_group.py"]
+    if args.comparison == "ordinary-ray":
+        source_paths.append("gossip_benchmarks/_support/ordinary_ray_comparison.py")
     source_hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in source_paths}
     report = {"source_sha256": source_hashes, "source_commit": revision.stdout.strip() if revision.returncode == 0 else None,
-        "profile": "step-input-ablation", "parameters": {
+        "profile": "ordinary-ray-peer" if args.comparison == "ordinary-ray" else "step-input-ablation", "parameters": {
         "steps": args.steps, "batch_size": args.batch_size, "fault_step": args.fault_step,
-        "failed_rank": args.failed_rank, "repeats": args.repeats}, "samples": [],
+        "failed_rank": args.failed_rank, "repeats": args.repeats,
+        "checkpoint_every": args.checkpoint_every, "model_width": args.model_width,
+        "startup_delay_s": args.startup_delay_s}, "samples": [],
         "scope": "CPU linear model; two logical worker nodes; surviving head/coordinator; no durable checkpoints; Fixed-R not enabled by harness",
         "comparison": "Same TorchFT and failure-aware hook; independent input vs commit-aligned input"}
+    if args.comparison == "ordinary-ray":
+        report.update(scope="CPU MLP synthetic classification; two logical worker nodes; surviving head/storage; identical scheduled checkpoints; Fixed-R not enabled by harness",
+                      comparison="Ordinary Ray DDP full-group checkpoint retry vs TorchFT with commit-aligned input and partial peer recovery",
+                      startup_simulation="Each worker invocation sleeps startup_delay_s, including initial startup and restarts in both arms")
+    baseline_mode = "ordinary" if args.comparison == "ordinary-ray" else "independent"
     for repeat in range(args.repeats):
         for fault in (False, True):
-            for mode in (["independent", "aligned"] if repeat % 2 == 0 else ["aligned", "independent"]):
+            for mode in ([baseline_mode, "aligned"] if repeat % 2 == 0 else ["aligned", baseline_mode]):
                 folder = directory / f"r{repeat}-{mode}-{'fault' if fault else 'healthy'}"
                 folder.mkdir()
                 sample = folder / "sample.json"
                 command = [sys.executable, str(Path(__file__).resolve()), "--output", str(args.output),
                     "--sample", str(sample), "--mode", mode, "--repeat", str(repeat),
                     "--steps", str(args.steps), "--batch-size", str(args.batch_size),
-                    "--fault-step", str(args.fault_step), "--failed-rank", str(args.failed_rank)]
+                    "--fault-step", str(args.fault_step), "--failed-rank", str(args.failed_rank),
+                    "--comparison", args.comparison, "--checkpoint-every", str(args.checkpoint_every),
+                    "--model-width", str(args.model_width), "--startup-delay-s", str(args.startup_delay_s),
+                    "--timeout-s", str(args.timeout_s)]
                 if fault:
                     command.append("--fault")
                 print(f"repeat {repeat + 1}/{args.repeats}: {mode}, fault={fault}", flush=True)
@@ -252,6 +278,13 @@ def main():
                 report["samples"].append(entry)
                 write_json(args.output, report)
                 print(f"  {entry['status']}", flush=True)
+    if args.comparison == "ordinary-ray":
+        from _support.ordinary_ray_comparison import validate
+        validate(report)
+        report["status"] = "finished"
+        write_json(args.output, report)
+        print(args.output)
+        return
     # Each seed's healthy aligned control is the reference for both arms.
     for sample in report["samples"]:
         if sample["status"] != "completed":

@@ -11,6 +11,9 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     report = json.loads(args.report.expanduser().read_text())
+    if report.get("profile") == "ordinary-ray-peer":
+        plot_ordinary(report, args.output)
+        return
     if report.get("profile") != "step-input-ablation":
         parser.error("Expected a step-input-ablation report")
     import matplotlib
@@ -64,6 +67,65 @@ def main():
         ha="center", fontsize=8)
     fig.tight_layout(rect=(0, .16, 1, .94))
     output = args.output.expanduser()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=180)
+    fig.savefig(output.with_suffix(".pdf"))
+    plt.close(fig)
+    print(output)
+
+
+def plot_ordinary(report, output):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    panels = [(False, "fit_s", "Healthy completion time", "Seconds"),
+              (True, "fit_s", "Completion time with worker-node loss", "Seconds"),
+              (True, "recovery_to_new_progress_s", "Node loss to new model progress", "Seconds"),
+              (True, "repeated_updates_per_rank", "Committed updates repeated after rollback", "Mean repeated updates per worker")]
+    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    for ax, (fault, field, title, ylabel) in zip(axes.flat, panels):
+        for index, (mode, color) in enumerate((("ordinary", "#CC6677"), ("aligned", "#4477AA"))):
+            samples = [s for s in report["samples"] if s["mode"] == mode and s["fault"] == fault]
+            validated = [s for s in samples if s.get("matches_reference") is True and field in s]
+            values = [(sum(s[field].values()) / 2 if field == "repeated_updates_per_rank" else s[field])
+                      for s in validated]
+            if values:
+                ax.bar(index, statistics.median(values), color=color, alpha=.6, width=.55)
+                for j, value in enumerate(values):
+                    ax.scatter(index + .07 * (j - (len(values) - 1) / 2), value, color=color, zorder=3)
+            else:
+                ax.text(index, .1, "No validated result", rotation=90, ha="center",
+                        transform=ax.get_xaxis_transform())
+            ax.text(index, 1.02, f"{len(validated)}/{len(samples)} correct", ha="center",
+                    transform=ax.get_xaxis_transform(), fontsize=9)
+        ax.set_xticks([0, 1], ["Ordinary Ray\nDDP + checkpoint retry", "Our integrated path\nTorchFT + aligned input"])
+        ax.set_title(title, pad=25)
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(bottom=0)
+        ax.grid(axis="y", alpha=.2)
+        ax.set_axisbelow(True)
+    pairs = [p for p in report.get("pairs", []) if p.get("valid")]
+    if pairs:
+        improvement = statistics.median(p["fault_runtime_reduction_pct"] for p in pairs)
+        overhead = statistics.median(p["healthy_fit_overhead_pct"] for p in pairs)
+        conclusion = (f"Paired median fault-runtime reduction: {improvement:+.1f}% "
+                      f"(negative means slower); healthy fit overhead: {overhead:+.1f}%.")
+    else:
+        conclusion = "No complete correctness-validated pair; no speedup claim."
+    p = report["parameters"]
+    delay = p.get("startup_delay_s", 0)
+    fig.suptitle(f"Ordinary Ray comparison | simulated startup: {delay:g} s per worker invocation")
+    fig.text(.5, .025,
+        conclusion + "\n" +
+        f"Synthetic CPU MLP width {p['model_width']}; {p['steps']} steps; checkpoint every {p['checkpoint_every']}; "
+        f"rank {p['failed_rank']} lost before update {p['fault_step']}; {p['repeats']} repeats.\n" +
+        "Same checkpoints and simulated delay in both arms. Ordinary Ray directly resumes input at its checkpoint step.\n" +
+        "Bars: medians; points: runs. Only correct runs contribute timing. Head/storage survive; one physical host.\n" +
+        "Combined-system comparison includes TorchFT benefits; the separate input ablation isolates our input contribution.",
+        ha="center", fontsize=8)
+    fig.tight_layout(rect=(0, .17, 1, .95))
+    output = Path(output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=180)
     fig.savefig(output.with_suffix(".pdf"))
