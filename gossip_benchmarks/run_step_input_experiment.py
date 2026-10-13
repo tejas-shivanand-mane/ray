@@ -192,6 +192,7 @@ def main():
     parser.add_argument("--model-width", type=int, default=512)
     parser.add_argument("--startup-delay-s", type=float, default=0)
     parser.add_argument("--profile-recovery", action="store_true")
+    parser.add_argument("--slurm", action="store_true", help="Fresh physical cluster in this allocation")
     parser.add_argument("--text-manifest", type=Path)
     parser.add_argument("--sample", type=Path)
     parser.add_argument("--mode", choices=["independent", "aligned", "ordinary", "indexed"])
@@ -215,6 +216,12 @@ def main():
         if not args.sample:
             from _support.text_stream import load_manifest
             load_manifest(args.text_manifest, args.steps, args.batch_size)
+    if args.slurm:
+        if args.comparison == "input-ablation" or args.profile_recovery:
+            parser.error("--slurm supports ordinary-ray/torchft-input without single-host profiling")
+        if not os.environ.get("SLURM_JOB_ID"):
+            parser.error("--slurm must run inside an allocation")
+        os.environ.pop("RAY_ADDRESS", None)
     os.environ["RAY_TRAIN_V2_ENABLED"] = "1"
     if args.sample:
         if args.comparison in ("ordinary-ray", "torchft-input"):
@@ -242,13 +249,16 @@ def main():
         source_paths.extend(["gossip_benchmarks/_support/text_stream.py", "gossip_benchmarks/prepare_text_input.py"])
     if args.profile_recovery:
         source_paths.append("gossip_benchmarks/_support/recovery_trace.py")
+    if args.slurm:
+        source_paths.append("gossip_benchmarks/_support/slurm_cluster.py")
     source_hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in source_paths}
     report = {"source_sha256": source_hashes, "source_commit": revision.stdout.strip() if revision.returncode == 0 else None,
         "profile": "ordinary-ray-peer" if args.comparison in ("ordinary-ray", "torchft-input") else "step-input-ablation", "parameters": {
         "steps": args.steps, "batch_size": args.batch_size, "fault_step": args.fault_step,
         "failed_rank": args.failed_rank, "repeats": args.repeats,
         "checkpoint_every": args.checkpoint_every, "model_width": args.model_width,
-        "startup_delay_s": args.startup_delay_s, "profile_recovery": args.profile_recovery}, "samples": [],
+        "startup_delay_s": args.startup_delay_s, "profile_recovery": args.profile_recovery,
+        "slurm": args.slurm}, "samples": [],
         "scope": "CPU linear model; two logical worker nodes; surviving head/coordinator; no durable checkpoints; Fixed-R not enabled by harness",
         "comparison": "Same TorchFT and failure-aware hook; independent input vs commit-aligned input"}
     if args.comparison in ("ordinary-ray", "torchft-input"):
@@ -267,6 +277,10 @@ def main():
             "cursor": "chunk = committed_step * world_size + rank; seek directly to compressed shard",
             "num_classes": manifest["num_classes"]}
         report["scope"] = "CPU real-text classification with online preprocessing; local surviving source storage; two logical workers"
+    if args.slurm:
+        report["scope"] = ("Physical Slurm hosts, four allocated CPUs each; two training workers; "
+                           "surviving head and shared storage; SIGKILL of one complete worker step; "
+                           "same Ray build in both arms; Fixed-R not enabled by harness")
     baseline_mode = {"ordinary-ray": "ordinary", "torchft-input": "indexed",
                      "input-ablation": "independent"}[args.comparison]
     for repeat in range(args.repeats):
@@ -282,6 +296,8 @@ def main():
                     "--comparison", args.comparison, "--checkpoint-every", str(args.checkpoint_every),
                     "--model-width", str(args.model_width), "--startup-delay-s", str(args.startup_delay_s),
                     "--timeout-s", str(args.timeout_s)]
+                if args.slurm:
+                    command.append("--slurm")
                 if args.profile_recovery:
                     command.append("--profile-recovery")
                 if args.text_manifest:
@@ -303,6 +319,12 @@ def main():
                             os.killpg(process.pid, signal.SIGKILL)
                             process.wait()
                         code = process.returncode
+                if args.slurm:
+                    # The child may have been killed before its finally block.
+                    # A cleanup failure aborts the sweep instead of contaminating
+                    # subsequent observations with an old cluster.
+                    from _support.slurm_cluster import cancel_steps
+                    cancel_steps(folder)
                 entry = json.loads(sample.read_text()) if sample.exists() else {}
                 if timed_out or code != 0:
                     entry.update(status="timeout" if timed_out else "failed", exit_code=code)

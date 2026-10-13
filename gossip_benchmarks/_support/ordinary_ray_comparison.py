@@ -54,7 +54,10 @@ def run(args, write_json):
 
         def add(self, event):
             event = dict(event)
-            event.setdefault("time", time.monotonic())
+            if getattr(args, "slurm", False):
+                event["time"] = time.monotonic()
+            else:
+                event.setdefault("time", time.monotonic())
             self.events.append(event)
 
         def acknowledge(self, step, path):
@@ -96,12 +99,21 @@ def run(args, write_json):
         labels = ((ids // 7 + ids % 3) % 10).astype(np.int64)
         return {"x": features, "y": labels, "id": ids}
 
-    cluster = Cluster()
+    physical = getattr(args, "slurm", False)
+    if physical:
+        from _support.slurm_cluster import SlurmCluster
+        cluster = SlurmCluster(folder)
+    else:
+        cluster = Cluster()
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        cluster.add_node(num_cpus=2, include_dashboard=False)
-        nodes = [cluster.add_node(num_cpus=1, resources={"train_slot": 1}) for _ in range(3)]
-        ray.init(address=cluster.address)
+        if physical:
+            nodes = cluster.start()
+            write_json(folder / "cluster.json", cluster.metadata)
+        else:
+            cluster.add_node(num_cpus=2, include_dashboard=False)
+            nodes = [cluster.add_node(num_cpus=1, resources={"train_slot": 1}) for _ in range(3)]
+            ray.init(address=cluster.address)
         recorder = Recorder.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
             ray.get_runtime_context().get_node_id(), soft=False)).remote()
 
@@ -134,9 +146,10 @@ def run(args, write_json):
             rank = train.get_context().get_world_rank()
             # Deliberate simulated initialization, identical per invocation in
             # both modes. Concurrent worker startup delays are not summed.
-            ray.get(recorder.add.remote({"kind": "start", "rank": rank}))
+            ray.get(recorder.add.remote({"kind": "start", "rank": rank,
+                "node_id": ray.get_runtime_context().get_node_id()}))
             time.sleep(args.startup_delay_s)
-            torch.set_num_threads(1)
+            torch.set_num_threads(3 if physical else 1)
             torch.manual_seed(100 + args.repeat)
             torch.use_deterministic_algorithms(True)
             base = nn.Sequential(nn.Linear(256, args.model_width), nn.ReLU(),
@@ -267,7 +280,7 @@ def run(args, write_json):
             dataset_args = {"datasets": {"train": ds}, "dataset_config": StepAlignedDataConfig(
                 args.batch_size, synchronous_full_membership=True)}
         trainer = TorchTrainer(training, scaling_config=ScalingConfig(num_workers=2,
-            placement_strategy="STRICT_SPREAD", resources_per_worker={"CPU": 1, "train_slot": 1}),
+            placement_strategy="STRICT_SPREAD", resources_per_worker={"CPU": 3 if physical else 1, "train_slot": 1}),
             torch_config=(TorchftConfig(backend="gloo", lighthouse_kwargs={"min_replicas": 2}) if peer_recovery
                           else TorchConfig(backend="gloo", timeout_s=60)),
             run_config=RunConfig(storage_path=str(folder / "storage"),
@@ -284,6 +297,8 @@ def run(args, write_json):
                     if args.profile_recovery:
                         ray.get(recorder.add.remote({"kind": "node_kill_requested", "time": fault_time, "node": node}))
                     cluster.remove_node(next(n for n in nodes if n.node_id == node), allow_graceful=False)
+                    if physical:
+                        write_json(folder / "cluster.json", cluster.metadata)
                     if args.profile_recovery:
                         ray.get(recorder.add.remote({"kind": "node_kill_returned", "time": time.monotonic()}))
                         # This observes the driver's node table, not the exact GCS
@@ -341,6 +356,17 @@ def run(args, write_json):
                 "redecoded_chunks": sum(max(0, count - 1) for count in counts.values()),
                 "compressed_bytes_read": sum(e["compressed_bytes"] for e in preprocessing),
                 "preprocessing_worker_seconds": sum(e["seconds"] for e in preprocessing)}
+        if physical:
+            first_nodes = [next(e["node_id"] for e in starts if e["rank"] == r) for r in (0, 1)]
+            allowed = {n.node_id for n in nodes}
+            if len(set(first_nodes)) != 2 or not set(first_nodes) <= allowed:
+                raise RuntimeError("Training ranks were not on distinct physical workers")
+            if args.fault:
+                killed = cluster.metadata["killed_node"]["node_id"]
+                later = [e for e in starts if e["time"] >= fault_time]
+                if any(e["node_id"] == killed or e["node_id"] not in allowed for e in later):
+                    raise RuntimeError("Replacement did not use a surviving physical worker")
+            output["cluster"] = cluster.metadata
         write_json(args.sample, output)
     finally:
         ray.shutdown()

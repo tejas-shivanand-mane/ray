@@ -139,7 +139,8 @@ def plot_ordinary(report, output):
         f"rank {p['failed_rank']} lost before update {p['fault_step']}; {p['repeats']} repeats.\n" +
         ("Same TorchFT, checkpoints and delay; indexed input reconstructs each batch at the healed model step.\n" if indexed else
          "Same checkpoints and simulated delay in both arms. Ordinary Ray directly resumes input at its checkpoint step.\n") +
-        "Bars: medians; points: runs. Only correctness and recovery validated runs contribute timing. Head/storage survive; one physical host.\n" +
+        "Bars: medians; points: runs. Only correctness and recovery validated runs contribute timing. Head/storage survive.\n" +
+        ("Physical Slurm hosts, 4 CPUs each; whole worker-step SIGKILL; host itself stays up.\n" if p.get("slurm") else "One physical host.\n") +
         (("Local compressed text shards; identical preprocessing; cursor resume versus retained Ray Data delivery."
           if text_input else "Input strategy comparison: cheap deterministic local reconstruction versus retained Ray Data delivery.")
          if indexed else "Combined-system comparison includes TorchFT benefits; the separate input ablation isolates our input contribution."),
