@@ -9,7 +9,8 @@ import statistics
 import time
 from pathlib import Path
 
-from planner import Schedule, lease_cost, plan_key, search, simulate
+from planner import plan_key, search, topological_order
+from replay_runtime import replay_once
 from workload import Workers, prepare_data, validate_state, write_json
 
 
@@ -31,12 +32,20 @@ def profile(config, folder):
     samples = {t: {m: [] for m in config["machines"]} for t in tasks}
     references = {}
     try:
-        for name, task in tasks.items():
+        for name in topological_order(tasks):
+            task = tasks[name]
             for machine in config["machines"]:
                 for repeat in range(config["profile_repeats"]):
                     attempt = folder / "profile" / f"{name}-{machine}-{repeat}"
                     begin = time.monotonic()
-                    workers.submit(machine, name, task, None, attempt)
+                    workers.submit(
+                        machine,
+                        name,
+                        task,
+                        None,
+                        attempt,
+                        [references[parent] for parent in task.get("depends_on", [])],
+                    )
                     while True:
                         connection = workers.connections[machine]
                         if not connection.poll(120):
@@ -78,6 +87,7 @@ def profile(config, folder):
                 ),
             }
     result = dict(
+        schema_version=2,
         config=config,
         tasks=tasks,
         machines=config["machines"],
@@ -99,14 +109,20 @@ def enumerate_study(folder):
     if (folder / "search.json").exists():
         raise FileExistsError("Search exists; use a new study folder")
     measured = read(folder / "profile.json")
+    if measured.get("schema_version") != 2:
+        raise ValueError(
+            "Use a new profile folder for the revised benchmark; old results are preserved"
+        )
     config, tasks, estimates = (
         measured["config"],
         measured["tasks"],
         measured["estimates"],
     )
     # A common deadline scale, independent of which policy is being evaluated.
-    parallel_lower_bound = max(
-        min(
+    earliest = {}
+    for name in topological_order(tasks):
+        task = tasks[name]
+        duration = min(
             p["init_s"]
             + task["epochs"] * p["epoch_s"]
             + (
@@ -116,34 +132,37 @@ def enumerate_study(folder):
             * p["save_s"]
             for p in estimates[name].values()
         )
-        for name, task in tasks.items()
-    )
+        earliest[name] = duration + max(
+            (earliest[parent] for parent in task.get("depends_on", [])), default=0
+        )
+    parallel_lower_bound = max(earliest.values())
     cases = []
     for discount in config["spot_cost_multipliers"]:
         machines = copy.deepcopy(config["machines"])
         for m in config["failure_machines"]:
             machines[m]["cost_per_hour"] *= discount
         for probability in config["failure_probabilities"]:
-            fault_at = parallel_lower_bound * config["fault_time_fraction"]
+            fractions = config.get(
+                "fault_time_fractions", [config.get("fault_time_fraction", 0.45)]
+            )
+            if not fractions or any(f < 0 for f in fractions):
+                raise ValueError("Need nonnegative failure-time fractions")
             a, b = config["failure_machines"]
-            scenarios = [
-                dict(name="healthy", probability=1 - probability, failures={}),
-                dict(
-                    name=f"loss-{a}",
-                    probability=probability * 0.4,
-                    failures={a: fault_at},
-                ),
-                dict(
-                    name=f"loss-{b}",
-                    probability=probability * 0.4,
-                    failures={b: fault_at},
-                ),
-                dict(
-                    name="correlated-loss",
-                    probability=probability * 0.2,
-                    failures={a: fault_at, b: fault_at},
-                ),
-            ]
+            scenarios = [dict(name="healthy", probability=1 - probability, failures={})]
+            for fraction in fractions:
+                fault_at = parallel_lower_bound * fraction
+                for name, weight, failed in [
+                    (f"loss-{a}", 0.4, [a]),
+                    (f"loss-{b}", 0.4, [b]),
+                    ("correlated-loss", 0.2, [a, b]),
+                ]:
+                    scenarios.append(
+                        dict(
+                            name=f"{name}-t{fraction}",
+                            probability=probability * weight / len(fractions),
+                            failures=dict.fromkeys(failed, fault_at),
+                        )
+                    )
             for multiplier in config["deadline_multipliers"]:
                 case = search(
                     tasks,
@@ -152,6 +171,7 @@ def enumerate_study(folder):
                     scenarios,
                     parallel_lower_bound * multiplier,
                     config["success_target"],
+                    config.get("accounting"),
                 )
                 case[
                     "name"
@@ -166,6 +186,7 @@ def enumerate_study(folder):
                     flush=True,
                 )
     result = dict(
+        schema_version=2,
         kind="modeled_finite_scenario_results",
         parallel_lower_bound_s=parallel_lower_bound,
         cases=cases,
@@ -174,158 +195,15 @@ def enumerate_study(folder):
     return result
 
 
-def replay_once(measured, case, plan, scenario, output):
-    output = Path(output).resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    tasks, machines = measured["tasks"], case["machines"]
-    # Warm the controller's tensor validator as well as the workers. Otherwise
-    # the first result pays a one-off torch import and can delay fault injection.
-    for reference in measured["references"].values():
-        validate_state(reference, reference)
-    workers = Workers(machines, measured["data_path"])
-    schedule = Schedule(plan, machines)
-    checkpoints, committed, starts, tokens = {}, {}, {}, {}
-    errors, injections, fault_evidence = {}, {}, {}
-    attempts = 0
-    begin = time.monotonic()
-    horizon = case["horizon_s"]
-    events_file = (output / "events.jsonl").open("w")
-
-    def log(event):
-        events_file.write(
-            json.dumps({"elapsed_s": time.monotonic() - begin, **event}) + "\n"
-        )
-        events_file.flush()
-
-    try:
-        while len(schedule.done) < len(tasks):
-            now = time.monotonic() - begin
-            for machine, failure_at in scenario["failures"].items():
-                if now >= failure_at and machine not in schedule.dead:
-                    killed_task = schedule.active.get(machine)
-                    evidence = workers.kill(machine)
-                    injections[machine] = time.monotonic() - begin
-                    fault_evidence[machine] = dict(
-                        requested_s=failure_at,
-                        observed_s=injections[machine],
-                        active_task=killed_task,
-                        **evidence,
-                    )
-                    log(
-                        dict(
-                            kind="process_killed",
-                            machine=machine,
-                            requested_s=failure_at,
-                            active_task=killed_task,
-                            **evidence,
-                        )
-                    )
-                    schedule.fail(machine)
-                    tokens.pop(machine, None)
-            for name, machine in schedule.dispatch():
-                attempts += 1
-                starts.setdefault(machine, time.monotonic() - begin)
-                checkpoint = checkpoints.get(name, {}).get("path")
-                tokens[machine] = workers.submit(
-                    machine,
-                    name,
-                    tasks[name],
-                    checkpoint,
-                    output / f"attempt-{attempts}",
-                )
-                log(
-                    dict(
-                        kind="dispatch",
-                        machine=machine,
-                        task=name,
-                        checkpoint=checkpoint,
-                        generation=tokens[machine],
-                    )
-                )
-            for machine in machines:
-                if machine in schedule.dead:
-                    continue
-                connection = workers.connections[machine]
-                while connection.poll():
-                    event = connection.recv()
-                    if event["kind"] == "error":
-                        raise RuntimeError(event["traceback"])
-                    if tokens.get(machine) != event.get("generation"):
-                        continue
-                    name = event["task"]
-                    log({**event, "machine": machine})
-                    if event["kind"] == "checkpoint":
-                        if event["epoch"] > checkpoints.get(name, {}).get("epoch", 0):
-                            checkpoints[name] = event
-                    if event["kind"] == "result":
-                        errors[name] = validate_state(
-                            event["path"], measured["references"][name]
-                        )
-                        if name in committed:
-                            raise AssertionError("Duplicate task commit")
-                        committed[name] = event
-                        for cancelled in schedule.finish(name):
-                            workers.cancel(cancelled)
-                            tokens.pop(cancelled, None)
-                        log(dict(kind="commit", task=name, max_abs_error=errors[name]))
-                if not workers.processes[machine].is_alive():
-                    raise RuntimeError(f"Uninjected worker exit: {machine}")
-            if time.monotonic() - begin > horizon:
-                break
-            if not schedule.active and not schedule.pending:
-                break
-            if len(schedule.dead) == len(machines):
-                break
-            time.sleep(0.001)
-        elapsed = time.monotonic() - begin
-        complete = len(committed) == len(tasks)
-        selected = (
-            max(sorted(committed), key=lambda t: committed[t]["accuracy"])
-            if complete
-            else None
-        )
-        reference_accuracy = {
-            t: next(iter(measured["samples"][t].values()))[0]["accuracy"] for t in tasks
-        }
-        expected_selected = max(sorted(tasks), key=lambda t: reference_accuracy[t])
-        if complete and selected != expected_selected:
-            raise AssertionError("Hyperparameter selection changed")
-        predicted = simulate(
-            plan, tasks, machines, measured["estimates"], scenario["failures"], horizon
-        )
-        result = dict(
-            kind="measured_local_process_replay",
-            scenario=scenario,
-            plan=plan,
-            complete=complete,
-            correct=complete,
-            met_deadline=complete and elapsed <= case["deadline_s"],
-            elapsed_s=elapsed,
-            predicted=predicted,
-            assumed_cost=lease_cost(machines, starts, injections, elapsed),
-            deadline_s=case["deadline_s"],
-            injections=injections,
-            fault_evidence=fault_evidence,
-            attempts=attempts,
-            max_abs_error=errors,
-            selected_trial=selected,
-            workers=workers.ready,
-        )
-        write_json(output / "result.json", result)
-        return result
-    finally:
-        events_file.close()
-        workers.close()
-
-
 def replay(folder, case_indices=None, repeats=2, holdout_fraction=0.8):
     if repeats < 1:
         raise ValueError("Need at least one replay repeat")
     folder = Path(folder).resolve()
     measured, searched = read(folder / "profile.json"), read(folder / "search.json")
-    if (
-        holdout_fraction < 0
-        or holdout_fraction == measured["config"]["fault_time_fraction"]
+    if measured.get("schema_version") != 2:
+        raise ValueError("Use a new profile folder for the revised benchmark")
+    if holdout_fraction < 0 or holdout_fraction in measured["config"].get(
+        "fault_time_fractions", [measured["config"].get("fault_time_fraction", 0.45)]
     ):
         raise ValueError(
             "Use a nonnegative holdout time different from the planning time"
@@ -362,19 +240,23 @@ def replay(folder, case_indices=None, repeats=2, holdout_fraction=0.8):
     for index in case_indices:
         case = cases[index]
         unique = {}
-        for name, row in case["policies"].items():
+        # Replay modeled-infeasible baselines too; otherwise difficult cases
+        # silently exclude the conventional scheduler from measured comparisons.
+        for name, feasible_row in case["policies"].items():
+            row = feasible_row or case.get("unconstrained_policies", {}).get(name)
             if row is not None:
                 entry = unique.setdefault(
-                    plan_key(row["plan"]), {"plan": row["plan"], "policies": []}
+                    plan_key(row["plan"]),
+                    {"plan": row["plan"], "policies": [], "modeled_feasible": {}},
                 )
                 entry["policies"].append(name)
+                entry["modeled_feasible"][name] = feasible_row is not None
         for number, entry in enumerate(unique.values()):
-            # Healthy, training-scenario single loss, and an unseen-time
-            # correlated loss. Holdout does not participate in policy selection.
+            # Replay all planning scenarios and held-out single/correlated loss.
+            # Holdouts do not participate in policy selection.
             fault_time = searched["parallel_lower_bound_s"] * holdout_fraction
             scenarios = [
-                case["scenarios"][0],
-                case["scenarios"][1],
+                *case["scenarios"],
                 dict(
                     name="holdout-correlated-loss",
                     probability=None,
@@ -382,11 +264,20 @@ def replay(folder, case_indices=None, repeats=2, holdout_fraction=0.8):
                         measured["config"]["failure_machines"], fault_time
                     ),
                 ),
+                dict(
+                    name="holdout-single-loss",
+                    probability=None,
+                    failures={measured["config"]["failure_machines"][0]: fault_time},
+                ),
             ]
             for scenario in scenarios:
                 for repeat in range(repeats):
                     jobs.append((index, number, entry, scenario, repeat))
     random.Random(735).shuffle(jobs)
+    print(
+        f"Replaying {len(jobs)} runs; startup and validation add time beyond the profiled training duration.",
+        flush=True,
+    )
     rows = []
     for index, number, entry, scenario, repeat in jobs:
         result = replay_once(
@@ -397,7 +288,13 @@ def replay(folder, case_indices=None, repeats=2, holdout_fraction=0.8):
             replay_dir / f"case-{index}-plan-{number}-{scenario['name']}-{repeat}",
         )
         rows.append(
-            dict(case_index=index, policies=entry["policies"], repeat=repeat, **result)
+            dict(
+                case_index=index,
+                policies=entry["policies"],
+                modeled_feasible=entry["modeled_feasible"],
+                repeat=repeat,
+                **result,
+            )
         )
         write_json(
             folder / "replay.json",

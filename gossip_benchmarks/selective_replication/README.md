@@ -1,41 +1,61 @@
 # Selective replication feasibility
 
-Run `gossip_benchmarks/Selective_Replication_Feasibility.ipynb` in a Python
-environment with torch, numpy, scikit-learn, and matplotlib. It uses scikit-learn's
-bundled digits dataset (no download), three independent MLP hyperparameter trials,
-and three local CPU worker processes. All settings are visible in the notebook.
+Open `gossip_benchmarks/Selective_Replication_Audit.ipynb` with your `ray-dev`
+kernel (torch, numpy, scikit-learn, matplotlib). Run cells in order. It prints the
+Python path and keeps settings and helper code visible. Results get a new folder;
+old notebooks and saved measurements are preserved. Revised runs require a fresh
+profile; don't compare version 1 and 2 timings as identical measurements.
 
-The question is whether choosing task placement and duplication together offers
-enough benefit to justify an SMT implementation. No SMT solver is used yet.
-Replicas execute the same trial with private model/optimizer state. The first
-validated result commits once; other copies are cancelled. This is task
-replication, not adding DDP ranks. All policies can retry from shared checkpoints.
+First, constructed positive/negative controls check that a surviving duplicate
+can beat checkpoint retry after a late loss, and that healthy duplication uses
+more worker time. These deliberately favorable controls validate the mechanism,
+not a practical benefit. A failed control means investigate before interpretation.
 
-The enumerator covers one/two copies per trial, ordered placements on distinct
-machines, and all task priority orders. Originals have dispatch priority over
-backups. Failed assignments relocate to the cheapest free live machine; a busy
-live assigned machine is waited for. This restricted search does not optimize
-arbitrary start times, adaptive priorities, or an arbitrary DAG. Shared input and
-the final selection run outside the failure domain on the controller.
+The workload is a small dependent local-SGD example: two identical MLPs train on
+disjoint digits shards, then a task averages their weights, resets momentum, and
+fine-tunes on the full training split. All policies use the same data and durable
+checkpoints. Parent results are retained on shared storage. This is CPU process
+loss on one host, not Ray/TorchFT, Fixed-R, SMT, or head-VM recovery.
 
-Profiles measure one-thread CPU training, initialization, and checkpoint writes.
-The model averages per-epoch/checkpoint times; it does not model contention or
-variable restoration costs. Local replay tests these modeling limitations.
-Worker startup and dataset preparation are outside the warm-pool timing interval.
-Controller/dataset/checkpoint storage survive injected process loss. Nothing here
-establishes head-VM resilience or a TorchFT/Fixed-R contribution.
+| Policy | Placement and protection |
+|---|---|
+| `round_robin_retry` | Fixed round-robin primaries; checkpoint retry |
+| `fixed_placement_replication` | Same primaries/order; optimize replica additions |
+| `checkpoint_retry` | Exhaustively optimized placement/order; one copy |
+| `uniform_replication` | Optimized placement/order; two copies per task |
+| `placement_first` | Healthy-cost placement first, then optimize replicas |
+| `greedy_replication` | Protect risk-duration-ranked tasks on that placement |
+| `joint_enumeration` | Optimize placement/order and one/two copies together |
 
-Costs and scenario probabilities are assumptions, not current cloud prices or
-estimated failure rates. Billing starts on first use and includes idle time until
-job completion or machine loss. Provisioning, standby-pool, storage and network
-charges are excluded. The two failure-prone workers can fail together; the third
-is assumed to survive the enumerated scenarios. No independence assumption is
-used to multiply node survival probabilities.
+The 4,374-policy search uses fixed priorities, one task per worker, fixed checkpoint
+intervals, and supplied failure scenarios. It does not optimize arbitrary start
+times, checkpoint protocols, adaptive schedules, or pool size. Equal modeled costs
+(to 12 decimal places) prefer fewer replicas. Model-infeasible baselines are still
+replayed and labeled (using maximum modeled success, then cost, if infeasible). An SMT implementation would be a separate scalability and
+modeling question, not automatically an improvement over this enumeration.
 
-Run the notebook's profile, search, replay, and report cells in order. Use a new
-output directory for each study; existing results are never overwritten by a new
-profile/search/replay. Replay defaults select cases using modeled results and
-include an unseen fault time; edit case indices for broader coverage. Identical
-plans share measurements. Report tiny effects and negative results honestly.
+A controller thread injects faults independently of dispatch; actual signal times
+and exit codes are recorded. Result checking and disk log writes happen after the
+timed interval. Dependencies consume first-completed results under a crash-only
+model; every committed model/optimizer/input history is subsequently checked at
+absolute tolerance 1e-5. An invalid result invalidates the run. Cancellation must
+be acknowledged before worker reuse; completion time and cancellation settlement
+are separate, and billing continues through settlement. Worker-busy seconds,
+restore/initialization times, and injection delays are reported. CPU sharing,
+checkpoint I/O, and cancellation delays are not accurately predicted by the simple
+simulator; measured replays expose these limitations.
+
+Default accounting charges all available warm workers (including idle reserves)
+and an assumed shared-storage service hourly rate. Checkpoint writes/restores are
+executed and timed. Startup, provisioning, per-byte network charges, and physical
+storage failure are outside this experiment. First-use billing is an explicit
+alternative that excludes standby costs; report that assumption. No free spare or
+storage claim should be inferred. Failure scenarios include both workers and
+correlated loss at multiple times; holdout times are excluded from optimization.
+Report active versus idle fault exposure and uninjected faults when a job ends
+first. Weighted replay costs use all planning scenarios; observed deadline rates
+are not statistical reliability guarantees.
 
 Tests: `python -m pytest -q -o addopts='' gossip_benchmarks/selective_replication/test_study.py`.
+Share `controls/controls.json`, `workflow/{profile,search,replay}.json`, and
+`workflow/summary.md`. Negative findings apply only to this workload/model.

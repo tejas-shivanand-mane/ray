@@ -43,12 +43,15 @@ def prepare_data(folder, seed=123):
     return str(path.resolve()), digest
 
 
-def train(task, data, resume, folder, notify, cancelled):
+def train(task, data, resume, folder, notify, cancelled, parents=None):
     import numpy as np
     import torch
     from torch import nn
 
     start = time.monotonic()
+    if task.get("shard") is not None:
+        index, count = task["shard"]
+        data = {**data, **{k: data[k][index::count] for k in ("x", "y", "ids")}}
     torch.manual_seed(task["seed"])
     width = task["width"]
     model = nn.Sequential(
@@ -58,6 +61,16 @@ def train(task, data, resume, folder, notify, cancelled):
         nn.ReLU(),
         nn.Linear(width, 10),
     )
+    if parents and not resume:
+        # One local-SGD round: average completed shard models in stable parent
+        # order, reset momentum, then fine-tune on the full training split.
+        states = [
+            torch.load(path, map_location="cpu", weights_only=True)["model"]
+            for path in parents
+        ]
+        model.load_state_dict(
+            {k: torch.stack([state[k] for state in states]).mean(0) for k in states[0]}
+        )
     optimizer = torch.optim.SGD(model.parameters(), lr=task["lr"], momentum=0.9)
     identity = fingerprint(task)
     completed, input_history = 0, []
@@ -70,7 +83,16 @@ def train(task, data, resume, folder, notify, cancelled):
         completed, input_history = state["epoch"], state["input_history"]
     x, y = torch.from_numpy(data["x"]), torch.from_numpy(data["y"])
     init_s = time.monotonic() - start
-    notify({"kind": "start", "restored_epoch": completed})
+    checkpoint_load_s = init_s if resume else 0.0
+    notify(
+        {
+            "kind": "start",
+            "restored_epoch": completed,
+            "initialization_s": init_s,
+            "restore_init_s": checkpoint_load_s,
+            "parent_count": len(parents or []),
+        }
+    )
     epoch_times, save_times = [], []
     path = Path(resume) if resume else None
     folder = Path(folder)
@@ -168,7 +190,9 @@ def worker(connection, generation, data_path, cpu):
                 job["folder"],
                 notify,
                 lambda: generation.value != token,
+                job.get("parents"),
             )
+            notify({"kind": "idle"})
     except (EOFError, BrokenPipeError):
         return
     except Exception:
@@ -187,7 +211,9 @@ class Workers:
         try:
             for index, machine in enumerate(machines):
                 parent, child = context.Pipe()
-                generation = context.Value("i", 0)
+                generation = context.Value(
+                    "i", 0, lock=False
+                )  # Single writer; avoid killing a lock holder.
                 process = context.Process(
                     target=worker,
                     args=(child, generation, data_path, cpus[index] if cpus else None),
@@ -208,7 +234,7 @@ class Workers:
             self.close()
             raise
 
-    def submit(self, machine, name, task, resume, folder):
+    def submit(self, machine, name, task, resume, folder, parents=None):
         self.generations[machine].value += 1
         token = self.generations[machine].value
         self.connections[machine].send(
@@ -218,6 +244,7 @@ class Workers:
                 task=task,
                 resume=resume,
                 folder=str(folder),
+                parents=parents or [],
             )
         )
         return token

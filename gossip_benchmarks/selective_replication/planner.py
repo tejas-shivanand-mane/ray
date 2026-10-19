@@ -1,6 +1,6 @@
 """Finite policy enumeration, with shared dispatch rules for model and replay.
 
-This is a warm-pool, independent-trial experiment, not a general DAG optimizer.
+This is a warm-pool finite-scenario experiment, not a general DAG optimizer.
 """
 
 import itertools
@@ -22,8 +22,12 @@ def plan_key(plan):
 
 
 class Schedule:
-    def __init__(self, plan, machines):
+    def __init__(self, plan, machines, tasks=None):
         self.machines = machines
+        self.dependencies = {
+            t: set(v.get("depends_on", [])) for t, v in (tasks or {}).items()
+        }
+        self.blocked = set()
         self.done = set()
         self.dead = set()
         self.active = {}
@@ -43,7 +47,9 @@ class Schedule:
             if task in self.done:
                 self.pending.remove((task, assigned))
                 continue
-            free = set(self.machines) - self.dead - set(self.active)
+            if not self.dependencies.get(task, set()) <= self.done:
+                continue
+            free = set(self.machines) - self.dead - set(self.active) - self.blocked
             if assigned in self.dead:
                 assigned_live = sorted(
                     free, key=lambda m: (self.machines[m]["cost_per_hour"], m)
@@ -76,18 +82,25 @@ class Schedule:
 
 
 def lease_cost(machines, starts, failures, elapsed):
-    # Once first used, a machine is billed until workflow completion or loss,
-    # including idle periods. Costs are assumptions, never actual cloud invoices.
-    return sum(
+    # Bill all warm workers or first-used workers, including subsequent idle
+    # time. Costs are assumptions, never actual cloud invoices.
+    accounting = next(iter(machines.values())).get("accounting", {})
+    billed = (
+        dict.fromkeys(machines, 0.0)
+        if accounting.get("bill_warm_pool", False)
+        else starts
+    )
+    compute = sum(
         max(0, min(elapsed, failures.get(m, elapsed)) - start)
         * machines[m]["cost_per_hour"]
         / 3600
-        for m, start in starts.items()
+        for m, start in billed.items()
     )
+    return compute + elapsed * accounting.get("shared_storage_per_hour", 0.0) / 3600
 
 
 def simulate(plan, tasks, machines, profile, failures, horizon):
-    schedule = Schedule(plan, machines)
+    schedule = Schedule(plan, machines, tasks)
     checkpoints = dict.fromkeys(tasks, 0)
     active = {}
     starts = {}
@@ -163,6 +176,20 @@ def evaluate(plan, tasks, machines, profile, scenarios, deadline, horizon):
     }
 
 
+def topological_order(tasks):
+    remaining = set(tasks)
+    ordered = []
+    while remaining:
+        ready = sorted(
+            t for t in remaining if set(tasks[t].get("depends_on", [])) <= set(ordered)
+        )
+        if not ready:
+            raise ValueError("Missing or cyclic task dependencies")
+        ordered.extend(ready)
+        remaining.difference_update(ready)
+    return ordered
+
+
 def choose(rows, target):
     feasible = [r for r in rows if r["success_probability"] + 1e-12 >= target]
     if not feasible:
@@ -170,14 +197,23 @@ def choose(rows, target):
     return min(
         feasible,
         key=lambda r: (
-            r["expected_cost"],
+            round(r["expected_cost"], 12),
+            sum(len(ms) for ms in r["plan"]["copies"].values()),
             r["expected_elapsed_s"],
             plan_key(r["plan"]),
         ),
     )
 
 
-def search(tasks, machines, profile, scenarios, deadline, target=0.95):
+def search(tasks, machines, profile, scenarios, deadline, target=0.95, accounting=None):
+    accounting = accounting or {}
+    machines = {m: dict(v, accounting=accounting) for m, v in machines.items()}
+    if (
+        not math.isfinite(accounting.get("shared_storage_per_hour", 0))
+        or accounting.get("shared_storage_per_hour", 0) < 0
+    ):
+        raise ValueError("Shared-storage rate must be finite and nonnegative")
+    ordered = topological_order(tasks)
     if not 0 < target <= 1 or deadline <= 0:
         raise ValueError("Invalid target or deadline")
     if (
@@ -261,7 +297,26 @@ def search(tasks, machines, profile, scenarios, deadline, target=0.95):
             )
             copy[t] += (backup,)
         greedy_keys.add(plan_key({"copies": copy, "order": fixed["order"]}))
+    conventional = {
+        "order": ordered,
+        "copies": {
+            t: [tuple(machines)[i % len(machines)]] for i, t in enumerate(ordered)
+        },
+    }
+    conventional_rows = [
+        r for r in all_rows if plan_key(r["plan"]) == plan_key(conventional)
+    ]
+    fixed_replication = [
+        r
+        for r in all_rows
+        if tuple(r["plan"]["order"]) == tuple(ordered)
+        and all(
+            r["plan"]["copies"][t][0] == conventional["copies"][t][0] for t in tasks
+        )
+    ]
     families = {
+        "round_robin_retry": conventional_rows,
+        "fixed_placement_replication": fixed_replication,
         "checkpoint_retry": single,
         "uniform_replication": double,
         "placement_first": sequential,
@@ -278,6 +333,11 @@ def search(tasks, machines, profile, scenarios, deadline, target=0.95):
         "machines": machines,
         "horizon_s": horizon,
         "policies": {name: choose(rows, target) for name, rows in families.items()},
+        "unconstrained_policies": {
+            name: choose(rows, max(r["success_probability"] for r in rows))
+            for name, rows in families.items()
+        },
+        "accounting": accounting,
         "maximum_success_probability": {
             name: max(r["success_probability"] for r in rows)
             for name, rows in families.items()
