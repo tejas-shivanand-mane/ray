@@ -7,18 +7,46 @@ import itertools
 import math
 
 
-def plans(tasks, machines):
+def plans(tasks, machines, checkpoint_choices=None):
     names = tuple(machines)
     choices = [(m,) for m in names] + list(itertools.permutations(names, 2))
     for assignment in itertools.product(choices, repeat=len(tasks)):
         for order in itertools.permutations(tasks):
-            yield {"copies": dict(zip(tasks, assignment)), "order": order}
+            for intervals in itertools.product(
+                *(
+                    (checkpoint_choices or {}).get(t, [v["checkpoint_every"]])
+                    for t, v in tasks.items()
+                )
+            ):
+                plan = {"copies": dict(zip(tasks, assignment)), "order": order}
+                if checkpoint_choices is not None:
+                    plan["checkpoint_every"] = dict(zip(tasks, intervals))
+                yield plan
 
 
 def plan_key(plan):
-    return tuple(plan["order"]), tuple(
-        (t, tuple(ms)) for t, ms in sorted(plan["copies"].items())
+    return (
+        tuple(plan["order"]),
+        tuple((t, tuple(ms)) for t, ms in sorted(plan["copies"].items())),
+        tuple(sorted(plan.get("checkpoint_every", {}).items())),
     )
+
+
+def execution_tasks(tasks, plan):
+    """Checkpoint frequency changes protection, never the learning problem."""
+    intervals = plan.get("checkpoint_every", {})
+    if set(intervals) - set(tasks):
+        raise ValueError("Unknown checkpoint task")
+    result = {
+        t: dict(v, checkpoint_every=intervals.get(t, v["checkpoint_every"]))
+        for t, v in tasks.items()
+    }
+    if any(
+        not isinstance(v["checkpoint_every"], int) or v["checkpoint_every"] <= 0
+        for v in result.values()
+    ):
+        raise ValueError("Checkpoint intervals must be positive integers")
+    return result
 
 
 class Schedule:
@@ -100,6 +128,7 @@ def lease_cost(machines, starts, failures, elapsed):
 
 
 def simulate(plan, tasks, machines, profile, failures, horizon):
+    tasks = execution_tasks(tasks, plan)
     schedule = Schedule(plan, machines, tasks)
     checkpoints = dict.fromkeys(tasks, 0)
     active = {}
@@ -107,6 +136,7 @@ def simulate(plan, tasks, machines, profile, failures, horizon):
     events = sorted((float(t), m) for m, t in failures.items())
     now = 0.0
     attempts = 0
+    busy_s = 0.0
     while now < horizon and len(schedule.done) < len(tasks):
         # Loss wins a tie with a checkpoint/result: conservative failure model.
         while events and events[0][0] <= now:
@@ -126,8 +156,10 @@ def simulate(plan, tasks, machines, profile, failures, horizon):
             break
         next_time = min(v[0] for v in active.values())
         if events and events[0][0] <= next_time:
+            busy_s += len(active) * (min(events[0][0], horizon) - now)
             now = min(events[0][0], horizon)
             continue
+        busy_s += len(active) * (min(next_time, horizon) - now)
         now = min(next_time, horizon)
         if next_time > horizon:
             break
@@ -151,6 +183,7 @@ def simulate(plan, tasks, machines, profile, failures, horizon):
         "elapsed_s": now,
         "cost": lease_cost(machines, starts, failures, now),
         "attempts": attempts,
+        "worker_busy_s": busy_s,
     }
 
 
@@ -172,6 +205,9 @@ def evaluate(plan, tasks, machines, profile, scenarios, deadline, horizon):
         "expected_elapsed_s": sum(
             s["probability"] * r["elapsed_s"] for s, r in zip(scenarios, rows)
         ),
+        "expected_worker_busy_s": sum(
+            s["probability"] * r["worker_busy_s"] for s, r in zip(scenarios, rows)
+        ),
         "scenarios": rows,
     }
 
@@ -190,14 +226,14 @@ def topological_order(tasks):
     return ordered
 
 
-def choose(rows, target):
+def choose(rows, target, objective="expected_cost"):
     feasible = [r for r in rows if r["success_probability"] + 1e-12 >= target]
     if not feasible:
         return None
     return min(
         feasible,
         key=lambda r: (
-            round(r["expected_cost"], 12),
+            round(r[objective], 12),
             sum(len(ms) for ms in r["plan"]["copies"].values()),
             r["expected_elapsed_s"],
             plan_key(r["plan"]),
@@ -205,7 +241,28 @@ def choose(rows, target):
     )
 
 
-def search(tasks, machines, profile, scenarios, deadline, target=0.95, accounting=None):
+def search(
+    tasks,
+    machines,
+    profile,
+    scenarios,
+    deadline,
+    target=0.95,
+    accounting=None,
+    checkpoint_choices=None,
+    objective="expected_cost",
+):
+    if objective not in ("expected_cost", "expected_worker_busy_s"):
+        raise ValueError("Unknown planning objective")
+    if checkpoint_choices is not None:
+        if set(checkpoint_choices) != set(tasks) or any(
+            not values or any(not isinstance(n, int) or n <= 0 for n in values)
+            for values in checkpoint_choices.values()
+        ):
+            raise ValueError("Provide positive checkpoint choices for every task")
+        checkpoint_choices = {
+            t: sorted(set(values)) for t, values in checkpoint_choices.items()
+        }
     accounting = accounting or {}
     machines = {m: dict(v, accounting=accounting) for m, v in machines.items()}
     if (
@@ -229,8 +286,9 @@ def search(tasks, machines, profile, scenarios, deadline, target=0.95, accountin
     if not tasks or len(machines) < 2:
         raise ValueError("Need at least one task and two machines")
     count = len(machines) ** (2 * len(tasks)) * math.factorial(len(tasks))
-    if count > 10000:
-        raise ValueError(f"{count} candidates exceeds the small-study limit (10000)")
+    count *= math.prod(len(v) for v in (checkpoint_choices or {}).values())
+    if count > 150000:
+        raise ValueError(f"{count} candidates exceeds the small-study limit (150000)")
     if any(t["epochs"] <= 0 or t["checkpoint_every"] <= 0 for t in tasks.values()):
         raise ValueError("Epoch and checkpoint counts must be positive")
     if any(
@@ -245,7 +303,7 @@ def search(tasks, machines, profile, scenarios, deadline, target=0.95, accountin
     )
     all_rows = [
         evaluate(p, tasks, machines, profile, scenarios, deadline, horizon)
-        for p in plans(tasks, machines)
+        for p in plans(tasks, machines, checkpoint_choices)
     ]
     single = [
         r for r in all_rows if all(len(ms) == 1 for ms in r["plan"]["copies"].values())
@@ -261,7 +319,13 @@ def search(tasks, machines, profile, scenarios, deadline, target=0.95, accountin
     ]
     eligible = [r for r in healthy if r["healthy"]["elapsed_s"] <= deadline] or healthy
     fixed = min(
-        eligible, key=lambda r: (r["healthy"]["cost"], r["healthy"]["elapsed_s"])
+        eligible,
+        key=lambda r: (
+            r["healthy"][
+                "worker_busy_s" if objective == "expected_worker_busy_s" else "cost"
+            ],
+            r["healthy"]["elapsed_s"],
+        ),
     )["plan"]
     sequential = [
         r
@@ -304,7 +368,11 @@ def search(tasks, machines, profile, scenarios, deadline, target=0.95, accountin
         },
     }
     conventional_rows = [
-        r for r in all_rows if plan_key(r["plan"]) == plan_key(conventional)
+        r
+        for r in single
+        if r["plan"]["copies"]
+        == {t: tuple(ms) for t, ms in conventional["copies"].items()}
+        and tuple(r["plan"]["order"]) == tuple(ordered)
     ]
     fixed_replication = [
         r
@@ -321,20 +389,27 @@ def search(tasks, machines, profile, scenarios, deadline, target=0.95, accountin
         "uniform_replication": double,
         "placement_first": sequential,
         "greedy_replication": [
-            r for r in all_rows if plan_key(r["plan"]) in greedy_keys
+            r
+            for r in all_rows
+            if plan_key({k: v for k, v in r["plan"].items() if k != "checkpoint_every"})
+            in greedy_keys
         ],
         "joint_enumeration": all_rows,
     }
     return {
         "candidate_count": len(all_rows),
+        "objective": objective,
+        "checkpoint_choices": checkpoint_choices,
         "deadline_s": deadline,
         "target": target,
         "scenarios": scenarios,
         "machines": machines,
         "horizon_s": horizon,
-        "policies": {name: choose(rows, target) for name, rows in families.items()},
+        "policies": {
+            name: choose(rows, target, objective) for name, rows in families.items()
+        },
         "unconstrained_policies": {
-            name: choose(rows, max(r["success_probability"] for r in rows))
+            name: choose(rows, max(r["success_probability"] for r in rows), objective)
             for name, rows in families.items()
         },
         "accounting": accounting,

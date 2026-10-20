@@ -201,6 +201,8 @@ def enumerate_study(folder):
                     parallel_lower_bound * multiplier,
                     config["success_target"],
                     config.get("accounting"),
+                    checkpoint_choices=config.get("checkpoint_choices"),
+                    objective=config.get("objective", "expected_cost"),
                 )
                 case[
                     "name"

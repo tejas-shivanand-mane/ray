@@ -36,6 +36,30 @@ def test_cloud_confirmation_required_and_failure_rejected(tmp_path):
         bad.snapshot()
 
 
+def test_budget_caps_cloud_calls_and_reserves_bounded_cleanup(monkeypatch):
+    from gcp.launcher import GCPStudy, HeadVMLoss
+
+    cloud = object.__new__(GCPStudy)
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    cloud.experiment_deadline = 110
+    calls = []
+    monkeypatch.setattr(HeadVMLoss, "gc", lambda self, *args, **kw: calls.append(kw))
+    cloud.gc("compute", timeout=600)
+    assert calls[-1]["timeout"] == 10
+    clock[0] = 111
+    with pytest.raises(TimeoutError, match="budget exhausted"):
+        cloud.gc("compute")
+    cloud.fence_driver = lambda: cloud.remaining_s() > 0
+    cloud.release_lock = lambda: calls.append("released")
+    cloud.finish_session()
+    assert calls[-1] == "released"
+    assert not cloud._finishing
+    clock[0] = 201
+    with pytest.raises(TimeoutError):
+        cloud.finish_session()
+
+
 def test_idle_faults_and_missing_restores_do_not_pass():
     row = dict(
         correct=True,
@@ -235,6 +259,10 @@ def test_injector_adapter_replays_actual_local_process_loss(tmp_path):
 
     class ExtraMetadataInjector(FaultInjector):
         def snapshot(self):
+            # Withhold final kill evidence until the workflow completes. Recovery
+            # must proceed from the dead connection, never wait for this evidence.
+            if len(self.schedule.done) < len(self.schedule.dependencies):
+                return {}
             return {
                 m: dict(record, machine=m, test_metadata=True)
                 for m, record in super().snapshot().items()
@@ -259,7 +287,9 @@ def test_injector_adapter_replays_actual_local_process_loss(tmp_path):
     row = replay_once(
         measured,
         dict(machines=machines, deadline_s=30, horizon_s=60),
-        dict(order=["train"], copies={"train": ["spot_a"]}),
+        dict(
+            order=["train"], copies={"train": ["spot_a"]}, checkpoint_every={"train": 5}
+        ),
         dict(name="test-local-process-loss", failures={"spot_a": 0.01}, probability=1),
         tmp_path / "replay",
         injector_factory=ExtraMetadataInjector,
@@ -703,3 +733,37 @@ def test_resume_collects_success_without_replaying(tmp_path, monkeypatch):
     )
     assert cloud.run_suite("full", [dict(id="run-0030")], skip_smoke=True)["valid"]
     assert json.loads((folder / "replay.json").read_text())["rows"] == [row]
+
+
+def test_pilot_mechanism_gate_blocks_comparison_and_timeout_is_incomplete(
+    tmp_path, monkeypatch
+):
+    from gcp import launcher
+
+    cloud = object.__new__(launcher.GCPStudy)
+    cloud.local, cloud.head, cloud.prepared = tmp_path, "head", True
+    cloud.failure_mode = "process"
+    cloud.manifest = dict(helper_sha256={}, failure_mode="process")
+    folder = tmp_path / "pilot"
+    folder.mkdir()
+    write_json(folder / "manifest.json", dict(environment=cloud.manifest))
+    cloud.acquire_lock = lambda: None
+    cloud.release_lock = lambda: None
+    cloud.put = lambda *a: None
+    cloud.fence_driver = lambda: True
+    cloud.reset = lambda: pytest.fail("Comparison must not start after failed controls")
+    for i in range(2):
+        write_json(folder / f"run-{i:04d}.json", dict(correct=True))
+    plan = [dict(id=f"run-{i:04d}") for i in range(3)]
+    monkeypatch.setattr(launcher, "assess", lambda *a, **kw: dict(valid=False))
+    with pytest.raises(RuntimeError, match="mechanism controls failed"):
+        cloud.run_suite("pilot", plan, mechanism_prefix=2)
+    assert not json.loads((folder / "mechanism-gate.json").read_text())["valid"]
+    cloud.experiment_deadline = time.monotonic() - 1
+    with pytest.raises(TimeoutError, match="budget exhausted"):
+        cloud.run_suite("pilot", plan, mechanism_prefix=2)
+    summary = json.loads((folder / "summary.json").read_text())
+    assert not summary["valid"] and summary["incomplete"]
+    assert summary["stopped_on_timeout"]
+    assert summary["expected_observations"] == 3
+    assert summary["completed_observations"] == 2

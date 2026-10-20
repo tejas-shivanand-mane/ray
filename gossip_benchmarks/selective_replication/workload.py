@@ -79,7 +79,9 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
             {k: torch.stack([state[k] for state in states]).mean(0) for k in states[0]}
         )
     optimizer = torch.optim.SGD(model.parameters(), lr=task["lr"], momentum=0.9)
-    identity = fingerprint(task)
+    # Checkpoint cadence is a protection choice, not part of the learned state.
+    # All data/model/optimizer/epoch settings remain in the identity.
+    identity = fingerprint({k: v for k, v in task.items() if k != "checkpoint_every"})
     completed, input_history = 0, []
     if resume:
         state = torch.load(resume, map_location="cpu", weights_only=True)

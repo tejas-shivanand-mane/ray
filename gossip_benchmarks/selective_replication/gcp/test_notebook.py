@@ -162,3 +162,89 @@ def test_cleanup_preserves_shared_network_and_other_firewall_rules(tmp_path):
     assert len(deleted) == 2
     assert all(c[:3] == ("compute", "firewall-rules", "delete") for c in deleted)
     assert all(c[3].startswith(ctx["RUN_ID"]) for c in deleted)
+
+
+def test_notebook_budget_covers_setup_and_experiment_but_allows_cleanup(tmp_path):
+    from types import SimpleNamespace
+
+    notebook = json.loads(NOTEBOOK.read_text())
+    helpers = next(
+        "".join(c["source"])
+        for c in notebook["cells"]
+        if "def gcloud(" in "".join(c["source"])
+    )
+    clock = [0.0]
+    calls = []
+    ctx = context(tmp_path)
+    ctx.update(
+        time=SimpleNamespace(monotonic=lambda: clock[0]),
+        MAX_EXPERIMENT_MINUTES=28,
+        concurrent=SimpleNamespace(futures=None),
+        subprocess=SimpleNamespace(
+            run=lambda *a, **kw: (
+                calls.append(kw) or SimpleNamespace(returncode=0, stdout="", stderr="")
+            )
+        ),
+    )
+    exec(helpers, ctx)
+    ctx["gcloud"]("test", timeout=2000)
+    assert calls[-1]["timeout"] == 1680
+    clock[0] = 1681
+    with pytest.raises(TimeoutError, match="budget exhausted"):
+        ctx["gcloud"]("test")
+    ctx["CLEANUP_MODE"] = True
+    ctx["gcloud"]("cleanup", timeout=20)
+    assert calls[-1]["timeout"] == 20
+
+
+def test_pilot_matrix_budget_and_checkpoint_choices(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from gcp import suite
+
+    n = json.loads(NOTEBOOK.read_text())
+
+    def source(text):
+        return next(
+            "".join(c["source"]) for c in n["cells"] if text in "".join(c["source"])
+        )
+
+    for c in n["cells"]:
+        if c["cell_type"] == "code":
+            compile("".join(c["source"]), "notebook", "exec")
+    settings = source('PROJECT = "research-488322"')
+    ctx = {}
+    exec(settings[: settings.index("ROOT =")], ctx)
+    cases = [{"policies": {}, "scenarios": []}]
+    captured = {}
+
+    def prepare(name, config):
+        captured.update(config)
+        return dict(cases=cases)
+
+    # Simulate the maximum number of distinct policy plans; no lucky dedup needed.
+    jobs = [
+        dict(id=str(i), scenario=dict(name=s), policies=[p])
+        for i, (p, s) in enumerate(
+            (p, s) for p in ctx["POLICIES"] for s in ctx["SCENARIOS"]
+        )
+    ]
+    ctx.update(
+        config=suite.config,
+        cloud=SimpleNamespace(prepare_suite=prepare, preview=lambda *a, **kw: jobs),
+    )
+    controls = [
+        dict(scenario=dict(name=s), policies=["control_retry"])
+        for s in ["control-single", "control-correlated"]
+    ]
+    monkeypatch.setattr(suite, "smoke_jobs", lambda searched: controls)
+    exec(source("from gcp.suite import smoke_jobs as mechanism_jobs"), ctx)
+    exec(source("controls = [j for j in mechanism_jobs"), ctx)
+    assert len(ctx["pilot_jobs"]) == 10
+    assert len({j["id"] for j in ctx["pilot_jobs"]}) == 10
+    assert captured["objective"] == "expected_worker_busy_s"
+    assert captured["checkpoint_choices"] == {
+        "shard-a": [100, 600],
+        "shard-b": [100, 900],
+        "finetune": [100, 300],
+    }

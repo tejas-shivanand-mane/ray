@@ -31,6 +31,65 @@ def test_checkpoint_retry_and_loss_boundary(problem):
     assert recovered["attempts"] == 2
 
 
+def test_busy_time_counts_cancelled_and_failed_copies(problem):
+    tasks, machines, profiles = problem
+    tasks = {"a": tasks["a"]}
+    single = {"order": ["a"], "copies": {"a": ["spot"]}}
+    replica = {"order": ["a"], "copies": {"a": ["spot", "safe"]}}
+    assert simulate(single, tasks, machines, profiles, {}, 20)["worker_busy_s"] == 4
+    assert simulate(replica, tasks, machines, profiles, {}, 20)["worker_busy_s"] == 8
+    assert (
+        simulate(replica, tasks, machines, profiles, {"spot": 1}, 20)["worker_busy_s"]
+        == 5
+    )
+    assert simulate(replica, tasks, machines, profiles, {}, 2)["worker_busy_s"] == 4
+
+
+def test_checkpoint_choices_share_objective_across_baselines(problem):
+    from planner import plan_key
+
+    tasks, machines, profiles = problem
+    tasks = {"a": tasks["a"]}
+    choices = {"a": [2, 4]}
+    scenarios = [
+        {"probability": 0.5, "failures": {}},
+        {"probability": 0.5, "failures": {"spot": 2.5}},
+    ]
+    result = search(
+        tasks,
+        machines,
+        profiles,
+        scenarios,
+        5,
+        1,
+        checkpoint_choices=choices,
+        objective="expected_worker_busy_s",
+    )
+    assert result["candidate_count"] == 8
+    joint = result["policies"]["joint_enumeration"]
+    for baseline in result["policies"].values():
+        if baseline:
+            assert baseline["plan"]["checkpoint_every"]["a"] in choices["a"]
+            assert (
+                joint["expected_worker_busy_s"]
+                <= baseline["expected_worker_busy_s"] + 1e-12
+            )
+    plan = {"order": ["a"], "copies": {"a": ["spot"]}}
+    checkpointed = dict(plan, checkpoint_every={"a": 2})
+    restart = dict(plan, checkpoint_every={"a": 4})
+    assert plan_key(checkpointed) != plan_key(restart)
+    assert (
+        simulate(checkpointed, tasks, machines, profiles, {"spot": 2.5}, 20)[
+            "elapsed_s"
+        ]
+        == 4.5
+    )
+    assert (
+        simulate(restart, tasks, machines, profiles, {"spot": 2.5}, 20)["elapsed_s"]
+        == 6.5
+    )
+
+
 def test_replica_survives_and_first_result_cancels(problem):
     tasks, machines, profiles = problem
     tasks = {"a": tasks["a"]}
@@ -158,6 +217,17 @@ def test_real_checkpoint_restores_optimizer_and_input_state(tmp_path, dtype):
     restored = []
     train(task, data, checkpoint, tmp_path / "restored", restored.append, lambda: False)
     assert validate_state(restored[-1]["path"], full) == 0
+    # Protection cadence changes neither model identity nor the learned state.
+    other_cadence = []
+    train(
+        dict(task, checkpoint_every=4),
+        data,
+        checkpoint,
+        tmp_path / "changed-cadence",
+        other_cadence.append,
+        lambda: False,
+    )
+    assert validate_state(other_cadence[-1]["path"], full) == 0
     # Failure after persisting the final checkpoint but before committing result.
     final_retry = []
     train(task, data, full, tmp_path / "final-retry", final_retry.append, lambda: False)

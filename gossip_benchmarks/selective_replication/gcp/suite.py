@@ -253,6 +253,8 @@ def paired_comparisons(rows, bootstrap=True):
     for baseline, candidate in [
         ("round_robin_retry", "fixed_placement_replication"),
         ("checkpoint_retry", "joint_enumeration"),
+        ("fixed_placement_replication", "joint_enumeration"),
+        ("placement_first", "joint_enumeration"),
         ("uniform_replication", "joint_enumeration"),
         ("control_retry", "control_replica"),
     ]:

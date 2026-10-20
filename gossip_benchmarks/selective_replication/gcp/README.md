@@ -22,21 +22,50 @@ Neither mode tests TorchFT peer recovery, Fixed-R or SMT synthesis.
 
 ## Short comparison
 
-Defaults: 300 shard epochs, 600 fine-tuning epochs, one repetition, one setting.
-Six smoke observations test healthy, single-worker and correlated worker loss.
-Smoke checkpoints every 20 epochs so early process kills can exercise restoration.
-The focused test adds at most twelve observations (identical plans share runs):
+Defaults: shard A uses 600 epochs, shard B 900, and fine-tuning 300. The
+unequal shard durations expose placement/protection choices without synthetic
+sleep delays. One shared profile (one repeat) supports both mechanism controls
+and comparison. The planner enumerates checkpoint intervals of 100 epochs or
+final-only saving, as well as placement and one/two copies. Final-only saving
+means restarting from zero after a mid-task loss.
 
-- Fixed primary placement: retry versus selective replication.
-- Optimized checkpoint retry versus jointly selected placement/replication.
-- Healthy, late single-worker loss, and late correlated loss.
+Every policy family receives the same checkpoint choices, deadline/reliability
+requirement, and objective: minimize expected summed worker busy time. This is
+an occupancy proxy, not measured CPU utilization or monetary cost. The existing
+modeled lease-cost objective remains available. Fixed placement still optimizes
+backup additions; placement-first fixes healthy primary placement/order before
+optimizing protection. Neither baseline is forced to replicate unnecessarily.
 
-This targets a shorter run, not a guaranteed two-hour completion time. Profiling,
-Ray startup and SSH add overhead. One repetition supplies initial evidence, not
-statistical assurance. Negative results remain visible. Correct recovery alone
-is not proof of a speedup; compare matched scenario runtimes and worker occupancy.
-Costs are normalized assumptions, not a GCP invoice. Selected scenarios are not
-used to claim the full weighted expected-cost objective.
+The notebook runs at most **10 observations**:
+
+- Two explicit retry controls: active single loss and active correlated loss.
+  Checkpoint restoration and verified kills are required before comparison.
+- Four policies: optimized checkpoint retry, fixed-placement replication,
+  placement-first, and joint enumeration.
+- Two matched comparison scenarios: healthy and early correlated loss.
+  Identical executable plans share runs. Single-loss policy comparisons and
+  extra repetitions are deliberately outside this short pilot.
+
+The work budget is **28 minutes from the first cloud command**, including
+provisioning, profiling, enumeration and replay. Pauses between cells count.
+Cloud command timeouts use the remaining budget, and each remote controller
+has a systemd runtime limit. Another 90 seconds is reserved for controller
+fencing/lock release. Expiry preserves completed observations and marks a
+partial comparison invalid/incomplete; it does not promise all runs complete.
+Cleanup remains available after expiry. **VMs remain billable until cleanup.**
+
+The two predeclared planning cases differ only in deadline (1.15x and 1.5x the
+profiled ideal time); the pilot replays case 0. Both modeled cases, ties and
+infeasible outcomes remain visible. One repetition is preliminary evidence.
+An offline check using extrapolated older timings selected different shard
+placements but predicted only a small improvement and a tie with optimized
+checkpoint retry; this is not new measured evidence. Do not tune cases after
+seeing replay outcomes or claim weighted reliability from this scenario subset.
+
+Recovery starts when Ray reports actor loss, while independent process/VM kill
+verification still gates final validity. Busy-time accounting stops at detected
+loss rather than delayed external confirmation. The simulator does not model
+cloud injection/detection delay; compare predictions with measured results.
 
 ## Correctness and evidence
 
@@ -46,7 +75,7 @@ input history and metadata must match exactly. Float64 reduces rounding
 sensitivity but cannot guarantee cross-hardware equality. Mismatches stop the
 run and write `study/profile-failure.json` with tensor/build/CPU details.
 
-Run cells individually. Smoke must pass before the focused test. Use new suite
+Run cells individually. The two mechanism controls must pass before comparison. Use new suite
 names after failures or setting changes. Local files under
 `ray_gcp_results/selective-vm/<run-id>/<suite>` include `profile.json`,
 `search.json`, `replay.json`, `summary.json`, `jobs.json` and `manifest.json`.
@@ -57,7 +86,7 @@ may be compacted after validation; `checkpoint-retention.json` records hashes.
 The cleanup cell deletes only this run's VMs, boot disks and two firewall rules.
 Download needed evidence first. The saved image and existing VPC/subnet survive.
 No live GCP execution was available during development; local tests are not cloud
-validation. The original GCP notebooks are unchanged.
+validation. Reprofile on fresh instances after pulling these changes.
 
 If a controller is interrupted, keep the existing kernel/cluster. The supervisor
 retries failed SSH service-status queries rather than treating them as service
@@ -67,13 +96,6 @@ attempt's control files and checkpoints into an archive before retrying. It
 refuses active controllers and completed results. Then rerun `run_suite` with the
 same matrix: completed local observations are skipped. An archived retry is
 recorded locally as `<job-id>-retry.json`; it must not be concealed in analysis.
-
-To omit smoke on a fresh cluster, set `SKIP_SMOKE=True`, skip the two smoke code
-cells, and run focused preparation/execution. The runner accepts
-`run_suite(FULL, full_jobs, skip_smoke=True)` without a saved smoke report.
-Correctness and fault-verification checks remain enabled; smoke-specific active
-failure/restoration coverage is reported but does not gate validity. The summary
-explicitly records `smoke_skipped=true`. This does not claim smoke was passed.
 
 Read-only result polling retries SSH exit 255 and timeouts up to four attempts
 with bounded backoff. Successful rows record `supervisor_transport_retries` so

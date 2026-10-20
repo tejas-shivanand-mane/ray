@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from planner import Schedule, lease_cost, simulate
+from planner import Schedule, execution_tasks, lease_cost, simulate
 from workload import Workers, validate_state, write_json
 
 
@@ -79,7 +79,7 @@ def replay_once(
 ):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    tasks, machines = measured["tasks"], case["machines"]
+    tasks, machines = execution_tasks(measured["tasks"], plan), case["machines"]
     workers = workers_factory(machines, measured["data_path"])
     schedule = Schedule(plan, machines, tasks)
     checkpoints, committed, starts, tokens = {}, {}, {}, {}
@@ -93,21 +93,25 @@ def replay_once(
     def log(event):
         events.append({"elapsed_s": time.monotonic() - begin, **event})
 
+    def mark_lost(machine, record):
+        if machine in schedule.dead:
+            return
+        if machine in work_started:
+            busy_times.append(max(0, record["observed_s"] - work_started.pop(machine)))
+        log({**record, "kind": "worker_lost", "machine": machine})
+        schedule.fail(machine)
+        schedule.blocked.discard(machine)
+        blocked.pop(machine, None)
+        tokens.pop(machine, None)
+
     def collect_faults():
         for machine, record in injector.snapshot().items():
+            # Confirmation may arrive after recovery has already started.
+            evidence[machine] = dict(record)
             if machine in schedule.dead:
                 continue
             workers.processes[machine].join(timeout=0)
-            evidence[machine] = dict(record)
-            if machine in work_started:
-                busy_times.append(
-                    max(0, record["observed_s"] - work_started.pop(machine))
-                )
-            log({**evidence[machine], "kind": "worker_lost", "machine": machine})
-            schedule.fail(machine)
-            schedule.blocked.discard(machine)
-            blocked.pop(machine, None)
-            tokens.pop(machine, None)
+            mark_lost(machine, record)
 
     try:
         while time.monotonic() - begin <= case["horizon_s"]:
@@ -206,13 +210,23 @@ def replay_once(
                             if len(committed) == len(tasks):
                                 complete_at = time.monotonic() - begin
                 except (EOFError, BrokenPipeError):
-                    injector.observe_loss(machine)
-                    # Wait for the independent injector's evidence publication.
+                    # Reject unrelated or premature losses; verify injection later.
                     if (
                         machine not in scenario["failures"]
                         or time.monotonic() - begin < scenario["failures"][machine]
                     ):
                         raise RuntimeError(f"Uninjected worker exit: {machine}")
+                    injector.observe_loss(machine)
+                    # RayActorError is sufficient to schedule recovery. Independent
+                    # SIGKILL/VM verification still gates the final valid result.
+                    mark_lost(
+                        machine,
+                        dict(
+                            observed_s=time.monotonic() - begin,
+                            active_task=schedule.active.get(machine),
+                            recovery_trigger="actor_or_connection_loss",
+                        ),
+                    )
                 if (
                     not workers.processes[machine].is_alive()
                     and machine not in scenario["failures"]

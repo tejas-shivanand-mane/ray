@@ -26,6 +26,31 @@ LOCK = "/var/lib/raybench/ray-selective-lock"
 
 
 class GCPStudy(HeadVMLoss):
+    def remaining_s(self):
+        deadline = getattr(self, "experiment_deadline", None)
+        if deadline is None:
+            return float("inf")
+        remaining = deadline - time.monotonic()
+        if getattr(self, "_finishing", False):
+            remaining += 90  # Reserved outside the 28-minute work budget.
+        if remaining <= 0:
+            raise TimeoutError(
+                "Experiment wall-time budget exhausted; completed results are saved"
+            )
+        return remaining
+
+    def gc(self, *args, **kwargs):
+        kwargs["timeout"] = min(kwargs.get("timeout", 180), self.remaining_s())
+        return super().gc(*args, **kwargs)
+
+    def finish_session(self):
+        self._finishing = True
+        try:
+            if self.fence_driver():
+                self.release_lock()
+        finally:
+            self._finishing = False
+
     def __init__(
         self, state_file, workdir="ray_gcp_results/selective-vm", failure_mode="process"
     ):
@@ -57,6 +82,7 @@ class GCPStudy(HeadVMLoss):
     def read_ssh(self, name, command, **kwargs):
         """Retry read-only SSH queries; never replay a mutation after a timeout."""
         for attempt in range(4):
+            self.remaining_s()
             try:
                 result = self.ssh(name, command, check=False, **kwargs)
                 if result.returncode == 0:
@@ -534,11 +560,16 @@ class GCPStudy(HeadVMLoss):
             "gcp.controller",
             control + "/request.json",
         ]
+        if getattr(self, "experiment_deadline", None) is not None:
+            # Stops the remote controller even if the notebook loses its connection.
+            command.insert(
+                3, "--property=RuntimeMaxSec=" + str(max(1, int(self.remaining_s())))
+            )
         self.ssh(self.head, shlex.join(command))
         pending, sent = {}, set()
         self.transport_retries = []
         timeout = request.get("case", {}).get("horizon_s", 21600) + 900
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + min(timeout, self.remaining_s())
         read_code = (
             "import pathlib,json; p=pathlib.Path("
             + repr(control)
@@ -645,8 +676,7 @@ class GCPStudy(HeadVMLoss):
             )
             return searched
         finally:
-            if self.fence_driver():
-                self.release_lock()
+            self.finish_session()
 
     def preview(self, name, repeats=3, smoke=False, case_indices=None, policies=None):
         searched = json.loads((self.local / name / "search.json").read_text())
@@ -658,12 +688,29 @@ class GCPStudy(HeadVMLoss):
         # A conservative limit, not an invoice or expected runtime. Stop/start,
         # Python cold start and validation are outside the profiled workflow time.
         seconds = sum(j["case"]["horizon_s"] + 900 for j in planned)
-        print(
-            f"{len(planned)} observations; conservative runtime limit {seconds/3600:.1f} hours."
-        )
+        if getattr(self, "experiment_deadline", None) is not None:
+            print(
+                f"{len(planned)} candidate observations before notebook filtering; "
+                f"shared wall-time budget remaining: {self.remaining_s()/60:.1f} minutes. "
+                "Partial runs remain incomplete."
+            )
+        else:
+            print(
+                f"{len(planned)} observations; conservative runtime limit {seconds/3600:.1f} hours."
+            )
         return planned
 
-    def run_suite(self, name, planned, smoke_gate=None, skip_smoke=False):
+    def run_suite(
+        self, name, planned, smoke_gate=None, skip_smoke=False, mechanism_prefix=0
+    ):
+        if mechanism_prefix and (
+            skip_smoke
+            or smoke_gate is not None
+            or not 0 < mechanism_prefix <= len(planned)
+        ):
+            raise ValueError(
+                "Mechanism prefix requires standalone controls in this matrix"
+            )
         if skip_smoke and smoke_gate is not None:
             raise ValueError("Use either smoke_gate or skip_smoke=True, not both")
         require_mechanisms = smoke_gate is None and not skip_smoke
@@ -700,6 +747,14 @@ class GCPStudy(HeadVMLoss):
         try:
             self.put(planned, root + "/jobs.json")
             for job in planned:
+                self.remaining_s()
+                if mechanism_prefix and len(rows) == mechanism_prefix:
+                    gate = assess(rows, mechanism_prefix, require_mechanisms=True)
+                    write_json(local / "mechanism-gate.json", gate)
+                    if not gate["valid"]:
+                        raise RuntimeError(
+                            "Active-loss/checkpoint mechanism controls failed; comparison not started"
+                        )
                 path = local / (job["id"] + ".json")
                 if path.exists():
                     rows.append(json.loads(path.read_text()))
@@ -784,9 +839,28 @@ class GCPStudy(HeadVMLoss):
             write_json(local / "summary.json", summary)
             self.put(summary, root + "/summary.json")
             return summary
+        except (TimeoutError, subprocess.TimeoutExpired):
+            # Preserve cached successes even when a retry exhausts the budget
+            # before walking all previously completed jobs.
+            rows = [
+                json.loads((local / (job["id"] + ".json")).read_text())
+                for job in planned
+                if (local / (job["id"] + ".json")).exists()
+            ]
+            summary = assess(rows, len(planned), require_mechanisms=require_mechanisms)
+            summary.update(
+                valid=False,
+                incomplete=True,
+                stopped_on_timeout=True,
+                expected_observations=len(planned),
+                completed_observations=len(rows),
+                smoke_skipped=skip_smoke,
+            )
+            write_json(local / "replay.json", dict(rows=rows))
+            write_json(local / "summary.json", summary)
+            raise
         finally:
-            if self.fence_driver():
-                self.release_lock()
+            self.finish_session()
             # Never restart a faulted VM as exception cleanup.
 
     def download(self, name):
