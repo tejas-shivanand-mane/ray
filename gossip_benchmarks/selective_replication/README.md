@@ -10,6 +10,11 @@ on a longer reliable branch. Code is prepared for the project owner to run;
 do not execute experiments, benchmarks, tests, or automatic validation unless
 the owner explicitly requests it.
 
+The [joint-planning offline screen](offline_study/JOINT_PLANNING.md) compares
+joint placement/checkpoint selection with risk-aware sequential and multistart
+alternating optimization over a predeclared synthetic grid. It is resumable and
+does not execute training or use cloud resources.
+
 Open `gossip_benchmarks/Selective_Replication_Audit.ipynb` with your `ray-dev`
 kernel (torch, numpy, scikit-learn, matplotlib). Run cells in order. It prints the
 Python path and keeps settings and helper code visible. Results get a new folder;
