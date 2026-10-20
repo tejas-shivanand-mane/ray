@@ -100,7 +100,7 @@ def make_config(args):
         for m in ("safe", "spot_a", "spot_b")
     }
     return dict(
-        schema_version=1,
+        schema_version=2,
         kind="measured_training_controlled_worker_pacing"
         if not native
         else "measured_training_native_workers",
@@ -113,8 +113,11 @@ def make_config(args):
         profile_timeout_s=120,
         success_target=0.99,
         deadline_multipliers=[1.05, 1.2, 1.5],
-        planning_fractions=[0.2, 0.4, 0.6, 0.8],
-        replay_fractions=[0.3, 0.7],
+        planning_early_fractions=[0.2, 0.4, 0.6, 0.8],
+        planning_late_fractions=[0.6, 0.8],
+        replay_early_fractions=[0.3, 0.7],
+        replay_late_fractions=[0.7],
+        early_failure_weight=2 / 3,
         probabilities=dict(
             healthy=0.5, safe=0.005, single_a=0.245, single_b=0.245, correlated=0.005
         ),
@@ -131,10 +134,43 @@ def make_config(args):
     )
 
 
-def scenarios(config, window, fractions):
+def failure_timing(config, measured, window):
+    """Freeze early/late wall-clock times from profiling, before choosing plans."""
+    fast = measured["estimates"]["trial-a"]["spot_a"]
+    fast_a = (
+        fast["init_s"]
+        + measured["tasks"]["trial-a"]["epochs"] * fast["epoch_s"]
+        + fast["save_s"]
+    )
+    # Keep early and late bands separate even on unexpectedly similar workers.
+    early = min(fast_a, window / 2)
+    result = dict(
+        fast_trial_a_final_only_s=fast_a,
+        early_reference_s=early,
+        late_reference_s=window,
+        early_failure_weight=config["early_failure_weight"],
+    )
+    for phase in ("planning", "replay"):
+        result[phase] = [
+            dict(
+                band=band,
+                fraction=f,
+                time_s=reference * f,
+                conditional_weight=weight / len(config[f"{phase}_{band}_fractions"]),
+            )
+            for band, reference, weight in (
+                ("early", early, config["early_failure_weight"]),
+                ("late", window, 1 - config["early_failure_weight"]),
+            )
+            for f in config[f"{phase}_{band}_fractions"]
+        ]
+    return result
+
+
+def scenarios(config, timing_points):
     probs = config["probabilities"]
     result = [dict(name="healthy", probability=probs["healthy"], failures={})]
-    for f in fractions:
+    for point in timing_points:
         for label, failed in (
             ("safe", ["safe"]),
             ("single_a", ["spot_a"]),
@@ -143,9 +179,10 @@ def scenarios(config, window, fractions):
         ):
             result.append(
                 dict(
-                    name=f"{label}-t{f:g}",
-                    probability=probs[label] / len(fractions),
-                    failures=dict.fromkeys(failed, window * f),
+                    name=f"{label}-{point['band']}-t{point['fraction']:g}",
+                    timing_band=point["band"],
+                    probability=probs[label] * point["conditional_weight"],
+                    failures=dict.fromkeys(failed, point["time_s"]),
                 )
             )
     return result
@@ -232,7 +269,8 @@ def plan_study(root, config):
         + measured["estimates"][t]["safe"]["save_s"]
         for t in tasks
     )
-    planning = scenarios(config, window, config["planning_fractions"])
+    timing = failure_timing(config, measured, window)
+    planning = scenarios(config, timing["planning"])
     cases = []
     for multiplier in config["deadline_multipliers"]:
         case = planner.search(
@@ -278,7 +316,7 @@ def plan_study(root, config):
         )
         entry["policies"].append(name)
         entry["modeled_feasible"][name] = feasible is not None
-    replay_scenarios = scenarios(config, window, config["replay_fractions"])
+    replay_scenarios = scenarios(config, timing["replay"])
     jobs = [
         dict(plan_id=p, scenario=s, repeat=r)
         for r in range(config["repeats"])
@@ -299,10 +337,16 @@ def plan_study(root, config):
         jobs=healthy + failures,
         replay_scenarios=replay_scenarios,
         failure_window_s=window,
+        failure_timing=timing,
         checkpoint_choices=choices,
         selection_rule="Maximum modeled gain over best feasible checkpoint/fixed/uniform baseline; ties prefer earliest deadline. Fallback is middle deadline. No replay result influences selection.",
     )
     write_json(root / "search.json", result)
+    print(
+        "Shared replay fault times:",
+        [(p["band"], round(p["time_s"], 3)) for p in timing["replay"]],
+        flush=True,
+    )
     print(
         f"Selected deadline {case['deadline_s']:.2f}s; {len(plans)} distinct plans; {len(jobs)} measured runs",
         flush=True,
@@ -356,6 +400,37 @@ def replay_study(root, config):
     report(root, config)
 
 
+def fault_exposure(records):
+    """Separate actual interrupted work from idle or unreached scheduled faults."""
+    counts = dict(
+        requested=0,
+        injected=0,
+        active=0,
+        idle=0,
+        trial_a=0,
+        early_active=0,
+        early_trial_a=0,
+    )
+    for record in records:
+        scenario = record["job"]["scenario"]
+        counts["requested"] += len(scenario["failures"])
+        early = scenario.get("timing_band") == "early"
+        for evidence in record["result"]["fault_evidence"].values():
+            active = evidence.get("active_task") is not None
+            trial_a = evidence.get("active_task") == "trial-a"
+            counts["injected"] += 1
+            counts["active"] += active
+            counts["idle"] += not active
+            counts["trial_a"] += trial_a
+            counts["early_active"] += early and active
+            counts["early_trial_a"] += early and trial_a
+    counts["not_injected"] = counts["requested"] - counts["injected"]
+    counts["early_trial_a_check"] = (
+        "exercised" if counts["early_trial_a"] else "not_exercised"
+    )
+    return counts
+
+
 def report(root, config):
     searched = read(root / "search.json")
     case = searched["cases"][searched["selected_case"]]
@@ -374,6 +449,7 @@ def report(root, config):
                     complete=False,
                     observations=len(records),
                     expected_observations=len(jobs),
+                    fault_exposure=fault_exposure(records),
                 )
             continue
         weighted = {
@@ -403,6 +479,11 @@ def report(root, config):
                     for r in matched
                     for e in r["fault_evidence"].values()
                 ),
+                trial_a_faults=sum(
+                    e.get("active_task") == "trial-a"
+                    for r in matched
+                    for e in r["fault_evidence"].values()
+                ),
             )
         for name in entry["policies"]:
             summaries[name] = dict(
@@ -413,6 +494,7 @@ def report(root, config):
                 scenarios=groups,
                 all_correct=all(r["result"]["correct"] for r in records),
                 plan_id=plan_id,
+                fault_exposure=fault_exposure(records),
             )
     result = dict(
         kind=config["kind"],
@@ -421,6 +503,7 @@ def report(root, config):
         completed_observations=len(available),
         expected_observations=len(searched["jobs"]),
         deadline_s=case["deadline_s"],
+        failure_timing=searched["failure_timing"],
         policies=summaries,
         limitations=config["limitations"],
         comparison_note="Weighted observations use assumed failure weights. Shared plan IDs reuse identical measurements. Compare deadline attainment before claiming a resource advantage; report untriggered and idle-worker faults.",
@@ -432,21 +515,35 @@ def report(root, config):
         f"Completed observations: {len(available)}/{len(searched['jobs'])}.",
         f"Kind: {config['kind']}. Smoke test: {config['smoke']}. Deadline: {case['deadline_s']:.3f}s.",
         "",
-        "| Policy | Weighted busy seconds | Weighted elapsed seconds | Weighted deadline fraction |",
-        "| --- | ---: | ---: | ---: |",
+        "| Policy | Weighted busy seconds | Weighted elapsed seconds | Weighted deadline fraction | Early faults interrupting A |",
+        "| --- | ---: | ---: | ---: | ---: |",
     ]
     for name, row in summaries.items():
         if row["complete"]:
             v = row["weighted_observed"]
             lines.append(
-                f"| {name} | {v['worker_busy_s']:.3f} | {v['elapsed_s']:.3f} | {v['met_deadline']:.4f} |"
+                f"| {name} | {v['worker_busy_s']:.3f} | {v['elapsed_s']:.3f} | {v['met_deadline']:.4f} | {row['fault_exposure']['early_trial_a']} |"
             )
         else:
-            lines.append(f"| {name} | incomplete | incomplete | incomplete |")
+            lines.append(
+                f"| {name} | incomplete | incomplete | incomplete | {row['fault_exposure']['early_trial_a']} |"
+            )
+    lines += [
+        "",
+        "Fault times are fixed across policies. Zero early faults interrupting A means this part of the experiment was not exercised for that policy; it is not evidence of recovery. A policy may legitimately finish or place A elsewhere before the loss. Fault counts are descriptive, not success rates.",
+    ]
     lines += ["", *config["limitations"], "", result["comparison_note"], ""]
     (root / "summary.md").write_text("\n".join(lines))
     if result["complete"]:
         print("Measured experiment complete. Summary:", root / "summary.md", flush=True)
+        print(
+            "Early trial-A exposure:",
+            {
+                n: r["fault_exposure"]["early_trial_a_check"]
+                for n, r in summaries.items()
+            },
+            flush=True,
+        )
 
 
 def stop_group(process):

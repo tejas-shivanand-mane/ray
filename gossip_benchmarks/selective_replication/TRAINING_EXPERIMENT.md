@@ -57,18 +57,38 @@ fixed-placement, or uniform-replication baseline **before any replay**. A tie or
 loss does not stop execution. The fixed-placement baseline may select no backup;
 it is the existing stronger baseline, not forced double execution.
 
-Planning uses failure times at 20%, 40%, 60%, and 80% of a common measured duration.
-Replays use unseen 30% and 70% times: loss of either unreliable worker, loss of the
-usually reliable worker, and correlated loss of both unreliable workers, plus a
-healthy control. Healthy runs execute first; subsequent order is seeded and
-shuffled. Exact duplicate plans share observations, identified in the report.
-All tasks retain checkpoint retry, including tasks without replicas.
+Fault times are frozen from profiling before choosing any plan. The early-time
+reference is trial A's predicted final-only duration on the fast worker, capped
+at half the reliable-worker reference duration to separate early and late times.
+Planning uses 20%, 40%, 60%, and 80% of that early reference, plus 60% and 80% of
+the reliable-worker reference. Replay uses unseen 30% and 70% of the early
+reference, plus 70% of the reliable-worker reference. For the first uploaded
+profile, this moves replay faults to approximately **0.97, 2.27, and 9.33 seconds**,
+covering trial A before its observed 3.31-second completion while retaining late
+losses. Other machines get times from their own profile.
+
+Every policy receives the exact same wall-clock times. Each time tests loss of
+either unreliable worker, loss of the usually reliable worker, and correlated
+loss of both unreliable workers. Including healthy control, this is 13 scenarios
+per distinct plan per repeat. Healthy runs execute first; subsequent order is
+seeded and shuffled. Exact duplicate plans share observations, identified in the
+report. All tasks retain checkpoint retry, including tasks without replicas.
 
 The assumed scenario weights match the offline experiment: healthy 50%, each
 individual unreliable-worker loss 24.5%, reliable-worker loss 0.5%, and correlated
-loss 0.5%. Weighted observed deadline fractions are not reliability estimates.
-Actual injections, idle-worker losses, and faults not reached before completion
-are recorded. Compare deadline attainment together with resource usage.
+loss 0.5%. Within each failure type, two thirds of the weight belongs to early
+losses and one third to late losses, equally split among that band's times.
+This changes the timing distribution from the previous all-late experiment;
+weighted results across those versions are not directly comparable.
+
+Weighted observed deadline fractions are not reliability estimates. The summary
+separates requested, injected, active-task, idle-worker, and unreached faults.
+Its **Early faults interrupting A** column and per-policy `fault_exposure` fields
+show whether trial A was actually interrupted. Zero is explicitly marked
+`not_exercised`; merely injecting a fault is not evidence of recovery. A policy
+may legitimately finish or place A elsewhere before the loss; we retain that
+result without retiming failures per policy. Compare deadline attainment together
+with resource usage.
 
 The controller and shared storage survive. Failures are SIGKILL of local workers,
 not machine loss. Every completed trial's model, optimizer, input history, and
@@ -88,6 +108,8 @@ Completed profiles, plans, and replay observations are reused. An interrupted
 observation gets a new attempt directory; old attempts are retained. A local
 file lock prevents two runners using the same directory. `--max-minutes 5` lowers
 the budget for an invocation. The printed stage logs show detailed progress.
+Start a fresh run after pulling this timing change; the source check prevents
+mixing the earlier fault schedule with new observations in a resumed directory.
 
 Upload **`analysis.zip`** from the output directory. It contains the configuration,
 profiles, all searches, summary, observation records, fault events, and logs,
