@@ -67,3 +67,10 @@ attempt's control files and checkpoints into an archive before retrying. It
 refuses active controllers and completed results. Then rerun `run_suite` with the
 same matrix: completed local observations are skipped. An archived retry is
 recorded locally as `<job-id>-retry.json`; it must not be concealed in analysis.
+
+To omit smoke on a fresh cluster, set `SKIP_SMOKE=True`, skip the two smoke code
+cells, and run focused preparation/execution. The runner accepts
+`run_suite(FULL, full_jobs, skip_smoke=True)` without a saved smoke report.
+Correctness and fault-verification checks remain enabled; smoke-specific active
+failure/restoration coverage is reported but does not gate validity. The summary
+explicitly records `smoke_skipped=true`. This does not claim smoke was passed.

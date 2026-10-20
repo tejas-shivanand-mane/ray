@@ -523,3 +523,44 @@ def test_archive_interrupted_moves_evidence_without_deleting(tmp_path):
     assert any("mv /srv/ray-gcp/selective-vm/full-01/run-0030" in c for c in commands)
     assert all("rm -" not in c for c in commands)
     assert (tmp_path / "full-01/run-0030-retry.json").exists()
+
+
+def test_explicit_smoke_skip_preserves_correctness_checks(tmp_path):
+    from gcp.launcher import GCPStudy
+
+    cloud = object.__new__(GCPStudy)
+    cloud.prepared = True
+    cloud.local, cloud.head, cloud.failure_mode = tmp_path, "head", "process"
+    cloud.manifest = dict(helper_sha256={}, failure_mode="process")
+    cloud.ssh = lambda *a, **kw: SimpleNamespace(returncode=0, stdout="")
+    cloud.put = lambda *a: None
+    cloud.fence_driver = lambda: True
+    folder = tmp_path / "focused"
+    folder.mkdir()
+    write_json(folder / "manifest.json", dict(environment=cloud.manifest))
+    row = dict(
+        correct=True,
+        fault_coverage_complete=True,
+        fault_evidence={},
+        failure_mode="process",
+        scenario=dict(name="healthy", failures={}, probability=None),
+        restorations=[],
+        policies=["checkpoint_retry"],
+        case_index=0,
+        repeat=0,
+        elapsed_s=1,
+        met_deadline=True,
+        assumed_cost=1,
+        worker_busy_s=1,
+    )
+    write_json(folder / "run-0000.json", row)
+    plan = [dict(id="run-0000")]
+    summary = cloud.run_suite("focused", plan, skip_smoke=True)
+    assert summary["valid"] and summary["smoke_skipped"]
+    assert not summary["mechanism_coverage"]["checkpoint_restoration_observed"]
+    assert not cloud.run_suite("focused", plan)["valid"]
+    row["correct"] = False
+    write_json(folder / "run-0000.json", row)
+    assert not cloud.run_suite("focused", plan, skip_smoke=True)["valid"]
+    with pytest.raises(ValueError, match="not both"):
+        cloud.run_suite("focused", plan, smoke_gate="smoke", skip_smoke=True)

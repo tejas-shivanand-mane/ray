@@ -537,7 +537,10 @@ class GCPStudy(HeadVMLoss):
         )
         return planned
 
-    def run_suite(self, name, planned, smoke_gate=None):
+    def run_suite(self, name, planned, smoke_gate=None, skip_smoke=False):
+        if skip_smoke and smoke_gate is not None:
+            raise ValueError("Use either smoke_gate or skip_smoke=True, not both")
+        require_mechanisms = smoke_gate is None and not skip_smoke
         if not self.prepared:
             raise RuntimeError("Run prepare() first")
         if not re.fullmatch(r"[a-zA-Z0-9_-]+", name) or not planned:
@@ -619,8 +622,9 @@ class GCPStudy(HeadVMLoss):
                 rows.append(row)
                 write_json(local / "replay.json", dict(rows=rows))
                 summary = assess(
-                    rows, len(planned), require_mechanisms=smoke_gate is None
+                    rows, len(planned), require_mechanisms=require_mechanisms
                 )
+                summary["smoke_skipped"] = skip_smoke
                 write_json(local / "summary.json", summary)
                 print(
                     f"{job['id']}: correct={row['correct']} deadline={row['met_deadline']} {row['elapsed_s']:.1f}s",
@@ -630,7 +634,8 @@ class GCPStudy(HeadVMLoss):
                     raise RuntimeError(
                         "Correctness/fault coverage failed; inspect evidence before continuing"
                     )
-            summary = assess(rows, len(planned), require_mechanisms=smoke_gate is None)
+            summary = assess(rows, len(planned), require_mechanisms=require_mechanisms)
+            summary["smoke_skipped"] = skip_smoke
             write_json(local / "summary.json", summary)
             self.put(summary, root + "/summary.json")
             return summary
