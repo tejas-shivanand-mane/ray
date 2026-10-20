@@ -1,5 +1,10 @@
 # Selective replication feasibility
 
+For the separate experiment that selectively saves **training state** on
+`t1 || (t2; t3)`, see [STATE_PROTECTION_EXPERIMENT.md](STATE_PROTECTION_EXPERIMENT.md).
+It compares optimized uniform checkpoints, selective checkpoints, and
+placement-first versus joint planning without duplicating task execution.
+
 Open `gossip_benchmarks/Selective_Replication_Audit.ipynb` with your `ray-dev`
 kernel (torch, numpy, scikit-learn, matplotlib). Run cells in order. It prints the
 Python path and keeps settings and helper code visible. Results get a new folder;
