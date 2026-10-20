@@ -43,7 +43,7 @@ class OptimizerChecks(unittest.TestCase):
         rows = table([[1, 10], [2, 3]], [[0.94, 1.0], [0.8, 0.9]])
         results = study.solve_methods(rows, [0], 0, 0.95)
         self.assertEqual(results["uniform_checkpoint"]["row_index"], 0)
-        for method in study.METHODS[1:]:
+        for method in results.keys() - {"uniform_checkpoint"}:
             self.assertEqual(results[method]["row_index"], 1)
         pair = study.comparison(rows[0], rows[1], 0, 0.95)
         self.assertEqual(pair["verdict"], "only_baseline_feasible")

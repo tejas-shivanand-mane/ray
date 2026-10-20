@@ -1,10 +1,11 @@
 # Offline selective recovery study
 
-For the new comparison of **joint checkpoint planning against strong sequential
-and multistart alternating optimization**, use [JOINT_PLANNING.md](JOINT_PLANNING.md).
-Its default is a 12-case benchmark with a 29-minute total process limit. It saves
-all wins/ties/losses and requires no training run. The older commands below
-concern the replication study.
+For **joint checkpoint planning, literature interval policies, and Han's
+checkpoint DP**, use [LITERATURE_BENCHMARK.md](LITERATURE_BENCHMARK.md).
+Its default has 1,152 state-checkpoint cases and 48 separate Han-DP cases, with
+a 29-minute total process limit. Published kernels, adaptations and our controls
+are identified separately. It saves all wins/ties/losses and requires no training
+run. The older commands below concern the replication study.
 
 Run from the repository root using Python 3.10 or newer. The study uses only the
 standard library and the existing parent `planner.py`; it needs no Ray cluster,

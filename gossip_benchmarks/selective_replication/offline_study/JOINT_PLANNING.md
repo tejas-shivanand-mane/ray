@@ -1,5 +1,11 @@
 # Does joint placement and checkpoint planning beat simpler optimization?
 
+**The default has changed.** Use [LITERATURE_BENCHMARK.md](LITERATURE_BENCHMARK.md)
+for the 1,152-case benchmark with published interval-policy adaptations and a
+separate Han checkpoint-DP comparison. This page describes the original controls
+and the retained `--suite short` workload. All current suites additionally report
+the three interval adaptations described in the new guide.
+
 This is a new, unexecuted, model-only screen. It does not run training, start
 Ray, kill processes, contact a cloud provider, or use a GPU. It uses Python's
 standard library and the existing deterministic `planner.py` simulator.
@@ -14,11 +20,11 @@ without executing them.
 From the repository root in the existing `ray-dev` environment:
 
 ```bash
-python gossip_benchmarks/selective_replication/offline_study/joint_checkpoint_sweep.py
+python gossip_benchmarks/selective_replication/offline_study/joint_checkpoint_sweep.py --suite short
 ```
 
-The default `short` benchmark has **six model families**, each evaluated at two
-deadlines and one success target: **12 comparison cases**, with five methods in
+The optional `short` benchmark has **six model families**, each evaluated at two
+deadlines and one success target: **12 comparison cases**, with eight methods in
 each case. It enumerates 2,916 plans per family (17,496 total), using a smaller
 checkpoint menu shared by every method. No earlier training run is required.
 
@@ -30,7 +36,7 @@ all cases before the cutoff is not guaranteed on every machine. A timeout exits
 with code 124 and does not count as a completed benchmark. Only
 `status.json: state=complete` means that all 12 cases completed.
 
-An uploadable partial report is written before enumeration and after each family.
+An uploadable partial report is written before enumeration and every eight families.
 At the cooperative time limit, remaining completed cases are included in the
 final report. If the watchdog forces termination, the last saved archive remains
 available; its status may still say `running`, and must be treated as incomplete.
@@ -55,7 +61,7 @@ invocations. Each invocation still has the same hard time limit. Do not expand
 the study merely to seek a win after the short benchmark ties.
 
 Extended runs can use `--resume /absolute/path/to/run`. The cache is saved every
-128 candidates and on a cooperative timeout or Ctrl-C. A run lock prevents
+1,024 candidates and on a cooperative timeout or Ctrl-C. A run lock prevents
 concurrent writers. Saved source hashes and schema must match; runs created by
 the earlier script version require that original version to resume.
 
@@ -180,8 +186,8 @@ planning and held-out costs/success shown separately. `summary.json` also groups
 held-out results against alternating optimization by each grid axis. A partial
 run is labelled partial; its completed prefix is not evidence across the full grid.
 
-The predeclared practical flag requires at least **5% lower cost against both
-multistart baselines**, with joint and baseline plans all meeting their required
+The current practical flag requires at least **5% lower cost against both
+multistart baselines and all three literature interval adaptations**, with joint and baseline plans all meeting their required
 success target in both planning and held-out evaluation. Feasibility-only wins
 are reported separately, not converted to cost gains. The flag does not require
 equal achieved success probabilities; it requires the same threshold. The raw

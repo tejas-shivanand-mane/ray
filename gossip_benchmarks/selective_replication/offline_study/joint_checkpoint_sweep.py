@@ -1,7 +1,7 @@
-"""Short model-only comparison of joint, sequential and alternating planning.
+"""Bounded model-only comparison with published checkpoint algorithm kernels.
 
 Uses only the standard library and the existing deterministic planner. It never
-starts training, Ray, cloud instances or worker processes. See JOINT_PLANNING.md.
+starts training, Ray, cloud instances or worker processes. See LITERATURE_BENCHMARK.md.
 """
 
 import argparse
@@ -21,12 +21,14 @@ import time
 from uuid import uuid4
 import zipfile
 
+import literature_baselines as literature
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import planner  # noqa: E402
 
 
-SCHEMA = 2
+SCHEMA = 3
 TASKS = ("t1", "t2", "t3")
 NODES = ("safe", "spot_a", "spot_b")
 DEADLINES = (1.2, 1.5, 2.0)
@@ -36,6 +38,7 @@ METHODS = (
     "risk_aware_sequential",
     "sequential_multistart",
     "alternating_multistart",
+    *literature.INTERVAL_METHODS,
     "joint_checkpoint",
 )
 LIMITATIONS = [
@@ -52,7 +55,9 @@ LIMITATIONS = [
     "Exactness is limited to the finite placement, dispatch-order and checkpoint menu.",
     "Held-out times test temporal sensitivity within this model, not real reliability.",
     "Grid cells are not independent repetitions or samples of production workloads.",
-    "These are research controls, not implementations of Dyna, uHEFT or CKPTSOME.",
+    "Literature interval policies are labelled adaptations, not complete training systems.",
+    "Han's published checkpoint DP is evaluated separately under its expected-time model.",
+    "No full Dyna, uHEFT, CKPTSOME mapper or CheckFreq system is implemented.",
 ]
 
 
@@ -76,12 +81,26 @@ def atomic_json(path, value):
 def source_hashes():
     return {
         p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in (Path(__file__), HERE.parent / "planner.py")
+        for p in (Path(__file__), HERE.parent / "planner.py", HERE / "literature_baselines.py")
     }
 
 
 def family_grid(suite):
     """Freeze the complete grid before any result is available."""
+    if suite == "literature":
+        families = [
+            dict(workload=workload, t1_units=units, save_fraction=save,
+                 spot_price=price, spot_speed=speed, failure_mass=mass,
+                 spot_to_safe_risk_ratio=ratio, correlated_share=correlated)
+            for workload, units in (("branch3", 0.5), ("branch3", 4.0),
+                                    ("chain3", 2.0), ("forkjoin4", 1.0))
+            for save, price, speed, mass in itertools.product(
+                (0.005, 0.10), (0.25, 0.75), (0.75, 1.5), (0.10, 0.50))
+            for ratio, correlated in ((1.0, 0.0), (20.0, 0.0), (20.0, 0.5))
+        ]
+        # Fixed hash order distributes conditions through a possible partial run.
+        # It is not an outcome-dependent search and not a statistical sample.
+        return sorted(families, key=digest)
     if suite == "short":
         # Six fixed settings: cheap/expensive saves, each with asymmetric,
         # equal-risk and correlated-loss conditions. No outcome-driven search.
@@ -122,6 +141,12 @@ def make_problem(spec):
         )
         for t in TASKS
     }
+    if spec.get("workload") == "chain3":
+        tasks["t2"]["depends_on"] = ["t1"]
+    elif spec.get("workload") == "forkjoin4":
+        tasks["t2"]["depends_on"] = ["t1"]
+        tasks["t3"]["depends_on"] = ["t1"]
+        tasks["t4"] = dict(epochs=24, checkpoint_every=24, depends_on=["t2", "t3"])
     machines = {
         m: dict(
             cost_per_hour=1.0 if m == "safe" else spec["spot_price"],
@@ -131,10 +156,12 @@ def make_problem(spec):
     }
     estimates = {
         t: {
-            m: dict(init_s=0.3, epoch_s=2.5, save_s=60 * spec["save_fraction"])
+            m: dict(init_s=0.3,
+                    epoch_s=2.5 / (1.0 if m == "safe" else spec.get("spot_speed", 1.0)),
+                    save_s=60 * spec["save_fraction"])
             for m in NODES
         }
-        for t in TASKS
+        for t in tasks
     }
     return tasks, machines, estimates
 
@@ -142,27 +169,28 @@ def make_problem(spec):
 def plan_space(tasks, divisors=(2, 4, 8)):
     orders = [
         list(order)
-        for order in itertools.permutations(TASKS)
-        if order.index("t2") < order.index("t3")
+        for order in itertools.permutations(tasks)
+        if all(order.index(parent) < order.index(t)
+               for t, task in tasks.items() for parent in task.get("depends_on", []))
     ]
     schedules = [
-        dict(copies={t: [m] for t, m in zip(TASKS, nodes)}, order=order)
+        dict(copies={t: [m] for t, m in zip(tasks, nodes)}, order=order)
         for nodes, order in itertools.product(
-            itertools.product(NODES, repeat=3), orders
+            itertools.product(NODES, repeat=len(tasks)), orders
         )
     ]
     # Uniform includes shared work fractions AND shared epoch intervals, with
     # final-only as an explicit option. Selective uses their Cartesian closure.
-    uniform = [{t: tasks[t]["epochs"] for t in TASKS}]
+    uniform = [{t: tasks[t]["epochs"] for t in tasks}]
     shortest = min(task["epochs"] for task in tasks.values())
     for divisor in divisors:
-        uniform.append({t: max(1, shortest // divisor) for t in TASKS})
-        uniform.append({t: max(1, tasks[t]["epochs"] // divisor) for t in TASKS})
+        uniform.append({t: max(1, shortest // divisor) for t in tasks})
+        uniform.append({t: max(1, tasks[t]["epochs"] // divisor) for t in tasks})
     uniform = list({digest(c): c for c in uniform}.values())
-    choices = {t: sorted({c[t] for c in uniform}) for t in TASKS}
+    choices = {t: sorted({c[t] for c in uniform}) for t in tasks}
     checkpoints = [
-        dict(zip(TASKS, values))
-        for values in itertools.product(*(choices[t] for t in TASKS))
+        dict(zip(tasks, values))
+        for values in itertools.product(*(choices[t] for t in tasks))
     ]
     keys = {digest(c) for c in uniform}
     uniform_ids = [i for i, c in enumerate(checkpoints) if digest(c) in keys]
@@ -382,7 +410,7 @@ def enumerate_family(root, family_id, spec, manifest, end, progress):
     schedules, checkpoints, uniform_ids = plan_space(
         problem[0], manifest["checkpoint_divisors"]
     )
-    final = {t: problem[0][t]["epochs"] for t in TASKS}
+    final = {t: problem[0][t]["epochs"] for t in problem[0]}
     reference = min(
         planner.simulate(
             dict(**schedule, checkpoint_every=final), *problem, {}, 10000
@@ -417,7 +445,7 @@ def enumerate_family(root, family_id, spec, manifest, end, progress):
             rows.append(
                 dict(schedule_id=schedule_id, checkpoint_id=checkpoint_id, **metrics)
             )
-            if len(rows) % 128 == 0:
+            if len(rows) % 1024 == 0:
                 atomic_json(cache_path, cache)
                 progress.update(
                     active_family=family_id, plans_done=len(rows), plans_total=total
@@ -470,6 +498,12 @@ def finish_family(root, family_id, spec, manifest, space, end):
     )
     completed = {(c["deadline_index"], c["target"]) for c in result["cases"]}
     detailed = {}
+    interval_rules = literature.interval_candidates(
+        space["problem"], space["schedules"], space["checkpoints"],
+        space["scenarios"], space["reference_s"])
+    result["literature_interval_inputs"] = {
+        k: v for k, v in interval_rules.items() if k != "candidates"
+    }
     for index, target in itertools.product(
         range(len(space["deadlines_s"])), manifest["targets"]
     ):
@@ -477,8 +511,16 @@ def finish_family(root, family_id, spec, manifest, space, end):
             continue
         check_budget(end)
         selected = solve_methods(space["rows"], space["uniform_ids"], index, target)
+        for method, candidates in interval_rules["candidates"].items():
+            row_id = min(candidates, key=lambda i: score(space["rows"][i], index, target))
+            selected[method] = dict(
+                row_index=row_id, candidate_queries=len(candidates),
+                provenance="published_interval_policy_adapted_to_shared_menu",
+                interval_rule_inputs=candidates[row_id],
+            )
         policies = {}
         for method, selection in selected.items():
+            check_budget(end)
             row_id = selection["row_index"]
             row = space["rows"][row_id]
             plan = dict(
@@ -526,7 +568,7 @@ def finish_family(root, family_id, spec, manifest, space, end):
             )
         # A practical screening threshold, NOT statistical significance. The
         # finite optimum only bounds planning performance, never held-out results.
-        strong = ("sequential_multistart", "alternating_multistart")
+        strong = ("sequential_multistart", "alternating_multistart", *literature.INTERVAL_METHODS)
         candidate = all(
             pairs[method][phase]["joint_feasible"]
             and pairs[method][phase]["baseline_feasible"]
@@ -564,6 +606,8 @@ def reports(root, manifest, status):
                     case_id=case["case_id"], family_id=family["family_id"],
                     **family["spec"], deadline_multiplier=case["deadline_multiplier"],
                     target=case["target"], baseline=method,
+                    baseline_provenance=("published_interval_adaptation"
+                                         if method in literature.INTERVAL_METHODS else "our_control"),
                     identical_plan=pair["identical_plan"],
                     practical_candidate=case["practical_candidate"],
                     joint_queries=j["candidate_queries"], baseline_queries=b["candidate_queries"],
@@ -627,11 +671,25 @@ def reports(root, manifest, status):
             lines.append(f"| {method} | " + " | ".join(map(str, values)) + " |")
         lines.append("")
     lines += [
-        f"Cases with at least 5% cost savings over BOTH multistart baselines, with all plans meeting their targets in BOTH evaluations: {len(candidate_ids)}.",
+        f"Cases with at least 5% cost savings over both multistart controls AND all three literature interval adaptations, with all plans feasible in both evaluations: {len(candidate_ids)}.",
         "This is a practical screening flag, not a significance test or novelty claim.", "",
         "See comparisons.csv for every win, tie, loss and feasibility difference; summary.json also groups results by grid axis.", "",
         "## Limits", "", *[f"- {item}" for item in LIMITATIONS], "",
     ]
+    han_path = root / "han_comparison.json"
+    if han_path.exists():
+        han = read(han_path)
+        gain_counts = {}
+        for key in ("joint_gain_vs_healthy_mapping", "joint_gain_vs_best_fixed"):
+            gain_counts[key] = dict(Counter(
+                "tie" if abs(c[key]) <= 1e-9 else "joint_faster" if c[key] > 0 else "baseline_faster"
+                for c in han["cases"]
+            ))
+        lines += ["## Separate Han checkpoint-DP comparison", "",
+                  f"Completed analytical chain cases: {len(han['cases'])}.",
+                  *[f"- {key}: {value}" for key, value in gain_counts.items()], "",
+                  "See han_comparison.json: expected makespan under repeated Poisson failures, not the deadline-success model above.",
+                  "This implements Algorithm 2 on fixed superchains, with explicitly labelled mapping adapters; it is not the complete CKPTSOME system.", ""]
     (root / "summary.md").write_text("\n".join(lines))
     temporary_zip = root / "analysis.zip.tmp"
     with zipfile.ZipFile(temporary_zip, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -639,6 +697,8 @@ def reports(root, manifest, status):
             archive.write(root / name, name)
         for path in sorted((root / "families").glob("*.json")):
             archive.write(path, str(path.relative_to(root)))
+        if han_path.exists():
+            archive.write(han_path, "han_comparison.json")
     temporary_zip.replace(root / "analysis.zip")
     return completed, expected
 
@@ -648,7 +708,7 @@ def main():
     location = parser.add_mutually_exclusive_group()
     location.add_argument("--output", type=Path)
     location.add_argument("--resume", type=Path)
-    parser.add_argument("--suite", choices=("short", "smoke", "screen", "full"))
+    parser.add_argument("--suite", choices=("literature", "short", "smoke", "screen", "full"))
     parser.add_argument("--max-minutes", type=float, default=25,
                         help="Computation budget (at most 25); total process limit is 29 minutes")
     args = parser.parse_args()
@@ -674,16 +734,20 @@ def main():
             if manifest["schema"] != SCHEMA or manifest["source_hashes"] != source_hashes():
                 parser.error("Source/schema changed; use the original commit to resume or start a new run")
         else:
-            suite = args.suite or "short"
+            suite = args.suite or "literature"
             manifest = dict(
                 schema=SCHEMA, run_id=uuid4().hex, suite=suite,
                 created_utc=datetime.now(timezone.utc).isoformat(),
                 source_hashes=source_hashes(), families=family_grid(suite),
                 deadline_multipliers=[1.2, 1.5] if suite == "short" else list(DEADLINES),
                 targets=[0.95] if suite == "short" else list(TARGETS),
-                checkpoint_divisors=[2, 4] if suite == "short" else [2, 4, 8],
-                planning_fractions=[0.2, 0.5, 0.8, 1.1],
-                held_out_fractions=[0.1, 0.35, 0.65, 0.95, 1.2],
+                checkpoint_divisors=[2, 4] if suite in ("short", "literature") else [2, 4, 8],
+                planning_fractions=([0.1 + 0.2 * i for i in range(8)]
+                                    if suite == "literature" else [0.2, 0.5, 0.8, 1.1]),
+                held_out_fractions=([0.05 + 0.1 * i for i in range(16)]
+                                    if suite == "literature" else [0.1, 0.35, 0.65, 0.95, 1.2]),
+                literature_sources=literature.SOURCES,
+                methods=list(METHODS),
                 objective="expected_cost", limitations=LIMITATIONS,
             )
             atomic_json(root / "manifest.json", manifest)
@@ -693,13 +757,18 @@ def main():
         atomic_json(root / "status.json", status)
         print(f"Output: {root}", flush=True)
         print("Total process limit: 29 minutes, including reports. Watchdog exit code: 124.", flush=True)
-        if manifest["suite"] != "short":
+        if manifest["suite"] not in ("short", "literature"):
             print(f"Resume: python {Path(__file__).relative_to(HERE.parents[2])} --resume {root}", flush=True)
         exit_code = 0
         try:
             # Keep an uploadable partial report even if the watchdog interrupts
             # a later family or final report generation.
             reports(root, manifest, status)
+            if manifest["suite"] == "literature" and not (root / "han_comparison.json").exists():
+                print("Han checkpoint-DP panel: 48 analytical cases", flush=True)
+                han = literature.han_panel(lambda: check_budget(end))
+                atomic_json(root / "han_comparison.json", han)
+                reports(root, manifest, status)
             for number, spec in enumerate(manifest["families"]):
                 family_id = f"family-{number:03d}"
                 path = root / "families" / f"{family_id}.json"
@@ -711,7 +780,8 @@ def main():
                     finish_family(root, family_id, spec, manifest, space, end)
                 status["families_done"] = number + 1
                 atomic_json(root / "status.json", status)
-                reports(root, manifest, status)
+                if (number + 1) % 8 == 0:
+                    reports(root, manifest, status)
                 print(f"{family_id}: complete", flush=True)
             status["state"] = "complete"
         except BudgetExpired:

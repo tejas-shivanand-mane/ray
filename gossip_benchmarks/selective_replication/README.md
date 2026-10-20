@@ -10,10 +10,11 @@ on a longer reliable branch. Code is prepared for the project owner to run;
 do not execute experiments, benchmarks, tests, or automatic validation unless
 the owner explicitly requests it.
 
-The [joint-planning offline screen](offline_study/JOINT_PLANNING.md) compares
-joint placement/checkpoint selection with risk-aware sequential and multistart
-alternating optimization. Its default is a 12-case synthetic benchmark with a
-29-minute total process limit; it does not execute training or use cloud resources.
+The [literature benchmark](offline_study/LITERATURE_BENCHMARK.md) compares joint
+placement/checkpoint selection with sequential/alternating controls and published
+interval-policy adaptations, plus a separate Han checkpoint-DP panel. Its default
+has 1,152 state-checkpoint cases and 48 analytical Han-DP cases, with a 29-minute
+total process limit. It does not execute training or use cloud resources.
 
 Open `gossip_benchmarks/Selective_Replication_Audit.ipynb` with your `ray-dev`
 kernel (torch, numpy, scikit-learn, matplotlib). Run cells in order. It prints the
