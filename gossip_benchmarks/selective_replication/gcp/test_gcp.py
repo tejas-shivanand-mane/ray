@@ -206,7 +206,9 @@ def test_fence_treats_collected_driver_as_finished_but_not_ssh_failure():
     cloud.head = "head"
     cloud.ssh = lambda *a, **kw: SimpleNamespace(returncode=3, stdout="inactive\n")
     assert cloud.fence_driver()
-    cloud.ssh = lambda *a, **kw: SimpleNamespace(returncode=255, stdout="")
+    cloud.ssh = lambda *a, **kw: SimpleNamespace(
+        returncode=255, stdout="", stderr="IAP failure"
+    )
     assert not cloud.fence_driver()
 
 
@@ -606,3 +608,98 @@ def test_read_poll_retries_iap_and_timeout_but_not_remote_errors(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="four attempts"):
         cloud.read_ssh("head", "read-only")
+
+
+def test_lock_retry_is_idempotent_and_does_not_steal(tmp_path, monkeypatch):
+    import shlex
+    import subprocess
+    import sys
+
+    from gcp import launcher
+
+    monkeypatch.setattr(launcher, "LOCK", str(tmp_path / "lock"))
+    monkeypatch.setattr(launcher, "PYTHON", sys.executable)
+
+    def remote(host, command):
+        result = subprocess.run(
+            shlex.split(command)[1:], capture_output=True, text=True
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr)
+        return result
+
+    first = object.__new__(launcher.GCPStudy)
+    second = object.__new__(launcher.GCPStudy)
+    for cloud in (first, second):
+        cloud.head = "head"
+        cloud.read_ssh = remote
+    first.acquire_lock()
+    first.acquire_lock()  # lost acknowledgement or same-kernel recovery
+    with pytest.raises(RuntimeError, match="owns the suite lock"):
+        second.acquire_lock()
+    with pytest.raises(RuntimeError, match="ownership changed"):
+        second.release_lock()
+    first.release_lock()
+    first.release_lock()  # lost release acknowledgement
+    second.acquire_lock()
+    second.release_lock()
+    (tmp_path / "lock").mkdir()
+    with pytest.raises(RuntimeError, match="legacy run"):
+        first.acquire_lock()
+
+
+def test_collect_remote_success_checks_identity_and_preserves_timing(tmp_path):
+    from gcp.launcher import GCPStudy
+
+    cloud = object.__new__(GCPStudy)
+    cloud.local = tmp_path
+    cloud.failure_mode = "process"
+    (tmp_path / "full").mkdir()
+    job = dict(
+        id="run-0030",
+        case_index=0,
+        policies=["checkpoint_retry"],
+        repeat=0,
+        scenario=dict(failures={}),
+    )
+    files = {
+        "status.json": dict(ok=True),
+        "request.json": dict(job, failure_mode="process"),
+        "result.json": dict(correct=True, fault_coverage_complete=True, elapsed_s=65.5),
+    }
+    cloud.get = lambda path: files[path.rsplit("/", 1)[-1]].copy()
+    cloud.verify_worker_loss = lambda job: None
+    result = cloud.collect_completed("full", job)
+    assert result["elapsed_s"] == 65.5
+    assert result["observation_wall_s"] is None
+    assert json.loads((tmp_path / "full/run-0030.json").read_text()) == result
+    files["request.json"]["repeat"] = 1
+    with pytest.raises(RuntimeError, match="does not match"):
+        cloud.collect_completed("full", job)
+
+
+def test_resume_collects_success_without_replaying(tmp_path, monkeypatch):
+    from gcp import launcher
+
+    cloud = object.__new__(launcher.GCPStudy)
+    cloud.local, cloud.head, cloud.prepared = tmp_path, "head", True
+    cloud.failure_mode = "process"
+    cloud.manifest = dict(helper_sha256={}, failure_mode="process")
+    folder = tmp_path / "full"
+    folder.mkdir()
+    write_json(folder / "manifest.json", dict(environment=cloud.manifest))
+    cloud.acquire_lock = lambda: None
+    cloud.release_lock = lambda: None
+    cloud.put = lambda *a: None
+    cloud.fence_driver = lambda: True
+    cloud.reset = lambda: pytest.fail("Completed observation must not be replayed")
+    cloud.read_ssh = lambda host, command: SimpleNamespace(
+        stdout='{"ok": true}' if "status.json" in command else "yes"
+    )
+    row = dict(correct=True)
+    cloud.collect_completed = lambda name, job: row
+    monkeypatch.setattr(
+        launcher, "assess", lambda rows, *a, **kw: dict(valid=rows == [row])
+    )
+    assert cloud.run_suite("full", [dict(id="run-0030")], skip_smoke=True)["valid"]
+    assert json.loads((folder / "replay.json").read_text())["rows"] == [row]

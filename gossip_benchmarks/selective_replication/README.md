@@ -59,3 +59,13 @@ are not statistical reliability guarantees.
 Tests: `python -m pytest -q -o addopts='' gossip_benchmarks/selective_replication/test_study.py`.
 Share `controls/controls.json`, `workflow/{profile,search,replay}.json`, and
 `workflow/summary.md`. Negative findings apply only to this workload/model.
+
+GCP interruption recovery: keep the same notebook kernel and rerun `run_suite`
+with the identical job matrix. Completed remote observations are collected before
+any reset; their unavailable notebook wall time is recorded as null. Interrupted
+observations without a final status are archived after stopping workers and use
+unique retry output directories. Explicit remote training failures still stop
+with their traceback. Lock operations tolerate lost SSH acknowledgements and
+recognize the same supervisor's token; another notebook's or an older unowned
+lock is never silently removed. Persistent GCP outages can still stop the run;
+no live GCP validation is implied by the local harness tests.

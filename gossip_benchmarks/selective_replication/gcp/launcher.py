@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -86,7 +87,13 @@ class GCPStudy(HeadVMLoss):
     def driver_state(self):
         """An SSH error is not evidence that the controller has exited."""
         for attempt in range(3):
-            result = self.ssh(self.head, "systemctl is-active " + UNIT, check=False)
+            try:
+                result = self.ssh(self.head, "systemctl is-active " + UNIT, check=False)
+            except subprocess.TimeoutExpired:
+                if attempt == 2:
+                    raise RuntimeError("Cannot determine driver state: SSH timed out")
+                time.sleep(1)
+                continue
             state = result.stdout.strip()
             if result.returncode == 0 and state in (
                 "active",
@@ -107,7 +114,81 @@ class GCPStudy(HeadVMLoss):
             f"stdout={result.stdout!r}; stderr={result.stderr!r}"
         )
 
-    def archive_interrupted(self, name, job_id):
+    def acquire_lock(self):
+        # A stable token makes a lost SSH acknowledgement safe to retry. Never
+        # steal another notebook's lock merely because its driver is inactive.
+        if not hasattr(self, "_lock_token"):
+            self._lock_token = uuid.uuid4().hex
+        code = (
+            "import pathlib; p=pathlib.Path(" + repr(LOCK) + "); "
+            "existed=p.exists(); p.mkdir(exist_ok=True); owner=p/'owner'; "
+            "token=" + repr(self._lock_token) + "; "
+            "old=owner.read_text() if owner.exists() else None; "
+            "assert (not existed) or old == token, 'Another notebook or legacy run owns the suite lock'; "
+            "owner.write_text(token)"
+        )
+        # flock serializes owner inspection/creation, including concurrent hosts.
+        self.read_ssh(
+            self.head,
+            "sudo flock " + LOCK + ".guard " + PYTHON + " -c " + shlex.quote(code),
+        )
+
+    def release_lock(self):
+        code = (
+            "import pathlib; p=pathlib.Path(" + repr(LOCK) + "); owner=p/'owner'; "
+            "token=" + repr(self._lock_token) + "; "
+            "assert not p.exists() or (owner.exists() and owner.read_text()==token), "
+            "'Suite lock ownership changed'; "
+            "owner.unlink(missing_ok=True); "
+            "p.rmdir() if p.exists() else None"
+        )
+        self.read_ssh(
+            self.head,
+            "sudo flock " + LOCK + ".guard " + PYTHON + " -c " + shlex.quote(code),
+        )
+
+    def collect_completed(self, name, job):
+        control = SHARED + "/" + name + "/" + job["id"]
+        status = self.get(control + "/status.json")
+        if not status["ok"]:
+            raise RuntimeError(status["traceback"])
+        request = self.get(control + "/request.json")
+        if any(request.get(k) != v for k, v in job.items()):
+            raise RuntimeError("Remote observation does not match the planned job")
+        if request.get("failure_mode", "vm") != self.failure_mode:
+            raise RuntimeError("Remote observation failure mode differs")
+        row = self.get(control + "/result.json")
+        if not row["correct"] or not row["fault_coverage_complete"]:
+            raise RuntimeError("Remote correctness/fault coverage failed")
+        self.verify_worker_loss(job)
+        retry_file = self.local / name / (job["id"] + "-retry.json")
+        row.update(
+            case_index=job["case_index"],
+            policies=job["policies"],
+            repeat=job["repeat"],
+            failure_mode=self.failure_mode,
+            retry=json.loads(retry_file.read_text()) if retry_file.exists() else None,
+            collected_after_ssh_interruption=True,
+            observation_wall_s=None,
+            all_five_vm_hours_upper_bound=None,
+        )
+        write_json(self.local / name / (job["id"] + ".json"), row)
+        return row
+
+    def verify_worker_loss(self, job):
+        for machine in job["scenario"]["failures"]:
+            if self.failure_mode == "process":
+                evidence = json.loads(
+                    self.node(self.mapping[machine], "process_status").stdout
+                )
+                if not evidence["unit_empty"]:
+                    raise AssertionError(
+                        "Killed worker rejoined before observation ended"
+                    )
+            elif self.describe(self.mapping[machine])["status"] != "TERMINATED":
+                raise AssertionError("Failed VM restarted before observation ended")
+
+    def archive_interrupted(self, name, job_id, *, locked=False):
         """Preserve a failed attempt so the same matrix can resume explicitly."""
         if not re.fullmatch(r"[a-zA-Z0-9_-]+", name) or not re.fullmatch(
             r"run-[0-9]+", job_id
@@ -119,7 +200,8 @@ class GCPStudy(HeadVMLoss):
         control = SHARED + "/" + name + "/" + job_id
         if self.driver_state() == "active":
             raise RuntimeError("Driver is still running; cannot archive")
-        self.ssh(self.head, "sudo mkdir " + LOCK)
+        if not locked:
+            self.acquire_lock()
         try:
             if self.driver_state() == "active":
                 raise RuntimeError("Driver started; cannot archive")
@@ -167,18 +249,20 @@ class GCPStudy(HeadVMLoss):
             )
             return archive
         finally:
-            self.ssh(self.head, "sudo rmdir " + LOCK)
+            if not locked:
+                self.release_lock()
 
     def fence_driver(self):
         # --collect can remove a successfully completed transient unit. A missing
         # unit is safe; a failed SSH call or a still-running service is not.
-        self.ssh(self.head, "sudo systemctl stop " + UNIT, check=False)
-        state = self.ssh(self.head, "systemctl is-active " + UNIT, check=False)
-        return state.returncode in (3, 4) and state.stdout.strip() in (
-            "inactive",
-            "unknown",
-            "failed",
-        )
+        try:
+            self.ssh(self.head, "sudo systemctl stop " + UNIT, check=False)
+        except subprocess.TimeoutExpired:
+            pass  # The stop may have succeeded; verify instead of assuming.
+        try:
+            return self.driver_state() != "active"
+        except (RuntimeError, subprocess.TimeoutExpired):
+            return False
 
     def prepare(self, install_missing_dependencies=False):
         print(json.dumps(self.inventory(), indent=2), flush=True)
@@ -532,7 +616,7 @@ class GCPStudy(HeadVMLoss):
         local = self.local / name
         if local.exists():
             raise FileExistsError("Suite exists; use download/resume, not overwrite")
-        self.ssh(self.head, "sudo mkdir " + LOCK)
+        self.acquire_lock()
         try:
             # Exclusive remote mkdir protects results even from another notebook host.
             self.ssh(self.head, "sudo -u raybench mkdir " + root)
@@ -562,7 +646,7 @@ class GCPStudy(HeadVMLoss):
             return searched
         finally:
             if self.fence_driver():
-                self.ssh(self.head, "sudo rmdir " + LOCK)
+                self.release_lock()
 
     def preview(self, name, repeats=3, smoke=False, case_indices=None, policies=None):
         searched = json.loads((self.local / name / "search.json").read_text())
@@ -611,10 +695,10 @@ class GCPStudy(HeadVMLoss):
         if plan_path.exists() and json.loads(plan_path.read_text()) != planned:
             raise RuntimeError("Resume requires the identical matrix")
         write_json(plan_path, planned)
-        self.ssh(self.head, "sudo mkdir " + LOCK)
-        self.put(planned, root + "/jobs.json")
+        self.acquire_lock()
         rows = []
         try:
+            self.put(planned, root + "/jobs.json")
             for job in planned:
                 path = local / (job["id"] + ".json")
                 if path.exists():
@@ -622,10 +706,33 @@ class GCPStudy(HeadVMLoss):
                     continue
                 control = root + "/" + job["id"]
                 # Never replay an interrupted observation under the same ID.
-                if self.ssh(self.head, "test ! -d " + control, check=False).returncode:
-                    raise RuntimeError(
-                        "Interrupted observation: download evidence; use a new suite name"
+                exists = (
+                    self.read_ssh(
+                        self.head,
+                        "if test -d " + control + "; then echo yes; else echo no; fi",
+                    ).stdout.strip()
+                    == "yes"
+                )
+                if exists:
+                    if not self.fence_driver():
+                        raise RuntimeError("Cannot confirm previous controller stopped")
+                    status = json.loads(
+                        self.read_ssh(
+                            self.head,
+                            f"if test -f {control}/status.json; then cat {control}/status.json; else printf null; fi",
+                        ).stdout
                     )
+                    if status and status.get("ok"):
+                        rows.append(self.collect_completed(name, job))
+                        write_json(local / "replay.json", dict(rows=rows))
+                        print(
+                            job["id"] + ": collected completed remote result",
+                            flush=True,
+                        )
+                        continue
+                    if status:
+                        raise RuntimeError(status["traceback"])
+                    self.archive_interrupted(name, job["id"], locked=True)
                 retry_file = local / (job["id"] + "-retry.json")
                 retry = (
                     json.loads(retry_file.read_text()) if retry_file.exists() else {}
@@ -654,19 +761,7 @@ class GCPStudy(HeadVMLoss):
                     * (time.monotonic() - before)
                     / 3600,
                 )
-                for machine in job["scenario"]["failures"]:
-                    if self.failure_mode == "process":
-                        evidence = json.loads(
-                            self.node(self.mapping[machine], "process_status").stdout
-                        )
-                        if not evidence["unit_empty"]:
-                            raise AssertionError(
-                                "Killed worker rejoined before observation ended"
-                            )
-                    elif self.describe(self.mapping[machine])["status"] != "TERMINATED":
-                        raise AssertionError(
-                            "Failed VM restarted before observation ended"
-                        )
+                self.verify_worker_loss(job)
                 row["failure_mode"] = self.failure_mode
                 write_json(path, row)
                 rows.append(row)
@@ -691,7 +786,7 @@ class GCPStudy(HeadVMLoss):
             return summary
         finally:
             if self.fence_driver():
-                self.ssh(self.head, "sudo rmdir " + LOCK)
+                self.release_lock()
             # Never restart a faulted VM as exception cleanup.
 
     def download(self, name):
