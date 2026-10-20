@@ -70,9 +70,13 @@ def main(request):
                 request["output"],
                 workers_factory=RayWorkers,
                 injector_factory=functools.partial(
-                    VMFaultInjector, folder=request["control"]
+                    VMFaultInjector,
+                    folder=request["control"],
+                    failure_mode=request.get("failure_mode", "vm"),
                 ),
-                kind="measured_gcp_worker_vm_loss",
+                kind="measured_gcp_worker_"
+                + request.get("failure_mode", "vm")
+                + "_loss",
             )
             # A stopped VM is not restored until after validation and driver exit.
             write_json(Path(request["control"]) / "result.json", row)

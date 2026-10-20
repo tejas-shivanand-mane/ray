@@ -30,6 +30,7 @@ def context(tmp_path):
         json=json,
         shlex=shlex,
         subprocess=subprocess,
+        FAILURE_MODE="process",
         PROJECT="test",
         ZONE="us-central1-a",
         REGION="us-central1",

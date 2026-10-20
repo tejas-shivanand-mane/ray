@@ -55,7 +55,7 @@ def test_idle_faults_and_missing_restores_do_not_pass():
     )
     result = assess([row], 1)
     assert not result["valid"]
-    assert not result["checks"]["active_single_vm_loss"]
+    assert not result["checks"]["active_single_worker_loss"]
     assert not result["checks"]["checkpoint_restoration_observed"]
     assert not assess([row], 2)["checks"]["all_runs_present"]
 
@@ -407,3 +407,64 @@ def test_preflight_failure_does_not_create_resources(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="unsupported CLI"):
         cluster.provision()
     assert not cluster.state.get("provision_started")
+
+
+def test_process_loss_requires_fenced_group_and_cannot_pass_as_vm_loss():
+    from gcp.backend import valid_fault
+
+    record = dict(
+        instance_id="123",
+        failure_mode="process",
+        status="PROCESSES_KILLED",
+        unit_empty=True,
+        signal="SIGKILL",
+    )
+    assert valid_fault(record, "process")
+    assert not valid_fault(record, "vm")
+    assert not valid_fault(dict(record, unit_empty=False), "process")
+    assert not valid_fault(dict(record, signal="SIGTERM"), "process")
+
+
+def test_process_mode_kills_service_group_without_stopping_vm(tmp_path):
+    from gcp.launcher import GCPStudy
+
+    cloud = object.__new__(GCPStudy)
+    cloud.failure_mode = "process"
+    cloud.mapping = {"spot_a": "worker"}
+    cloud.local = tmp_path
+    cloud.describe = lambda name: dict(id="123", status="RUNNING")
+    calls = []
+
+    def node(name, action):
+        calls.append((name, action))
+        return SimpleNamespace(
+            stdout=json.dumps(dict(unit_empty=True, signal="SIGKILL", pids=[]))
+        )
+
+    cloud.node = node
+    cloud.gc = lambda *a, **kw: pytest.fail("Must not stop/start a VM")
+    result = cloud.kill_worker("spot_a", {}, "/control/run-1")
+    assert result["status"] == "PROCESSES_KILLED"
+    assert calls == [("worker", "kill")]
+
+
+def test_fencing_detects_descendant_processes_even_if_unit_inactive(
+    tmp_path, monkeypatch
+):
+    import importlib.util
+    from pathlib import Path
+
+    source = Path(__file__).parent / "bootstrap/node_control.py"
+    spec = importlib.util.spec_from_file_location("node_control_test", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    group = tmp_path / "ray-exp-node.service" / "child"
+    group.mkdir(parents=True)
+    (group / "cgroup.procs").write_text("123\n456\n")
+    monkeypatch.setattr(module, "Path", lambda path: tmp_path)
+    monkeypatch.setattr(module, "active", lambda: "inactive")
+    status = module.process_status("/ray-exp-node.service")
+    assert status["pids"] == [123, 456]
+    assert not status["unit_empty"]
+    (group / "cgroup.procs").write_text("")
+    assert module.process_status("/ray-exp-node.service")["unit_empty"]

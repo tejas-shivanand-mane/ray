@@ -5,6 +5,7 @@ import random
 import statistics
 from collections import defaultdict
 
+from gcp.backend import valid_fault
 from planner import plan_key
 
 POLICIES = [
@@ -159,12 +160,12 @@ def assess(rows, expected, require_mechanisms=True):
         all_states_correct=bool(rows) and all(r["correct"] for r in rows),
         all_faults_injected=bool(rows)
         and all(r["fault_coverage_complete"] for r in rows),
-        all_vm_stops_verified=all(
-            e.get("status") == "TERMINATED" and e.get("instance_id")
+        all_worker_losses_verified=all(
+            valid_fault(e, r.get("failure_mode", "vm"))
             for r in rows
             for e in r["fault_evidence"].values()
         ),
-        active_single_vm_loss=any(
+        active_single_worker_loss=any(
             len(r["scenario"]["failures"]) == 1
             and any(
                 e.get("active_task") or e.get("active_at_actor_loss")
@@ -172,7 +173,7 @@ def assess(rows, expected, require_mechanisms=True):
             )
             for r in rows
         ),
-        active_correlated_vm_loss=any(
+        active_correlated_worker_loss=any(
             len(r["scenario"]["failures"]) == 2
             and all(
                 e.get("active_task") or e.get("active_at_actor_loss")
@@ -188,8 +189,8 @@ def assess(rows, expected, require_mechanisms=True):
     coverage = {
         name: checks[name]
         for name in (
-            "active_single_vm_loss",
-            "active_correlated_vm_loss",
+            "active_single_worker_loss",
+            "active_correlated_worker_loss",
             "checkpoint_restoration_observed",
         )
     }
@@ -216,8 +217,8 @@ def assess(rows, expected, require_mechanisms=True):
                 min_s=min(values),
                 max_s=max(values),
                 deadline_hits=sum(r["met_deadline"] for r in members),
-                injected_vm_losses=sum(len(r["fault_evidence"]) for r in members),
-                active_vm_losses=sum(
+                injected_worker_losses=sum(len(r["fault_evidence"]) for r in members),
+                active_worker_losses=sum(
                     bool(e.get("active_task") or e.get("active_at_actor_loss"))
                     for r in members
                     for e in r["fault_evidence"].values()
@@ -229,6 +230,7 @@ def assess(rows, expected, require_mechanisms=True):
             )
         )
     return dict(
+        failure_modes=sorted({r.get("failure_mode", "vm") for r in rows}),
         valid=all(checks.values()),
         checks=checks,
         mechanism_coverage=coverage,

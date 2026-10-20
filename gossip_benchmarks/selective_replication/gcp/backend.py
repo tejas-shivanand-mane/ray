@@ -205,6 +205,19 @@ class RayWorkers:
             ray.kill(actor, no_restart=True)
 
 
+def valid_fault(record, mode):
+    if record.get("error") or not record.get("instance_id"):
+        return False
+    if mode == "process":
+        return (
+            record.get("failure_mode") == "process"
+            and record.get("status") == "PROCESSES_KILLED"
+            and record.get("unit_empty") is True
+            and record.get("signal") == "SIGKILL"
+        )
+    return record.get("status") == "TERMINATED"
+
+
 class VMFaultInjector:
     """File handoff to external gcloud supervisor; no cloud keys on guests.
 
@@ -212,7 +225,8 @@ class VMFaultInjector:
     externally supervised policy, not Ray's native failure detection latency.
     """
 
-    def __init__(self, workers, failures, begin, schedule, folder):
+    def __init__(self, workers, failures, begin, schedule, folder, failure_mode="vm"):
+        self.failure_mode = failure_mode
         self.failures, self.begin, self.schedule = failures, begin, schedule
         self.folder = Path(folder)
         self.requested, self.records, self.detected = {}, {}, {}
@@ -258,7 +272,7 @@ class VMFaultInjector:
             if machine in self.records or not path.exists():
                 continue
             response = json.loads(path.read_text())
-            if response.get("status") != "TERMINATED" or response.get("error"):
+            if not valid_fault(response, self.failure_mode):
                 raise RuntimeError(f"VM stop failed: {response}")
             self.records[machine] = {
                 **request,
@@ -282,5 +296,5 @@ class VMFaultInjector:
 
     def verify(self, evidence):
         for machine, record in evidence.items():
-            if record["status"] != "TERMINATED" or not record.get("instance_id"):
-                raise AssertionError("Missing whole-VM-loss evidence")
+            if not valid_fault(record, self.failure_mode):
+                raise AssertionError("Missing verified worker-loss evidence")

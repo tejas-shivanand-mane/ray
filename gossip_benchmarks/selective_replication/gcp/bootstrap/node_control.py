@@ -40,6 +40,29 @@ def stop():
     run(["systemctl", "reset-failed", UNIT], False)
 
 
+def process_status(group=None):
+    group = (
+        group
+        or run(
+            ["systemctl", "show", UNIT, "--property=ControlGroup", "--value"]
+        ).stdout.strip()
+    )
+    pids = []
+    if group:
+        root = Path("/sys/fs/cgroup") / group.lstrip("/")
+        for path in root.rglob("cgroup.procs"):
+            try:
+                pids.extend(int(p) for p in path.read_text().split())
+            except FileNotFoundError:
+                pass
+    state = active()
+    return dict(
+        active=state,
+        pids=sorted(set(pids)),
+        unit_empty=not pids and state in ("inactive", "failed", "unknown", ""),
+    )
+
+
 def main():
     config = json.loads(CONFIG.read_text())
     request = json.load(sys.stdin)
@@ -121,18 +144,28 @@ def main():
             ]
         run(cmd)
         result = {"started": True, "name": config["name"]}
+    elif action == "process_status":
+        result = process_status()
     elif action == "kill":
         if config["head"]:
             raise ValueError("Head failure is outside this experiment")
         if active() != "active":
             raise RuntimeError("Cannot inject failure into an inactive service")
+        group = run(
+            ["systemctl", "show", UNIT, "--property=ControlGroup", "--value"]
+        ).stdout.strip()
+        if not group:
+            raise RuntimeError("Cannot identify Ray service process group")
         run(["systemctl", "kill", "--kill-whom=all", "--signal=SIGKILL", UNIT])
         deadline = time.monotonic() + 15
         while active() in ("active", "activating", "deactivating"):
             if time.monotonic() > deadline:
                 raise RuntimeError("Worker service remained active after SIGKILL")
             time.sleep(0.1)
-        result = {"killed": True, "name": config["name"], "active": active()}
+        result = process_status(group)
+        if not result["unit_empty"]:
+            raise RuntimeError("Ray service still has live processes after SIGKILL")
+        result.update(killed=True, name=config["name"], signal="SIGKILL")
     elif action == "stop":
         stop()
         result = {"stopped": True}

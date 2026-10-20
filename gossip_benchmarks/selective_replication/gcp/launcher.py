@@ -24,7 +24,12 @@ LOCK = "/var/lib/raybench/ray-selective-lock"
 
 
 class GCPStudy(HeadVMLoss):
-    def __init__(self, state_file, workdir="ray_gcp_results/selective-vm"):
+    def __init__(
+        self, state_file, workdir="ray_gcp_results/selective-vm", failure_mode="process"
+    ):
+        if failure_mode not in ("process", "vm"):
+            raise ValueError("failure_mode must be process or vm")
+        self.failure_mode = failure_mode
         super().__init__(state_file, workdir)
         self.mapping = dict(zip(("safe", "spot_a", "spot_b"), self.names[1:4]))
         self.source = Path(__file__).resolve().parents[1]
@@ -63,7 +68,18 @@ class GCPStudy(HeadVMLoss):
 
     def prepare(self, install_missing_dependencies=False):
         print(json.dumps(self.inventory(), indent=2), flush=True)
-        self.stop_command = stop_command()
+        self.stop_command = stop_command() if self.failure_mode == "vm" else None
+        # Refresh the process-fencing helper even when reusing an active session.
+        for name in self.names:
+            self.describe(name)
+            self.scp(
+                self.source / "gcp/bootstrap/node_control.py",
+                name + ":/tmp/ray-node-control.py",
+            )
+            self.ssh(
+                name,
+                "sudo install -o root -g root -m 644 /tmp/ray-node-control.py /opt/ray-gcp/node_control.py",
+            )
         identities = []
         for name in self.names:
             obj = self.describe(name)
@@ -162,6 +178,7 @@ class GCPStudy(HeadVMLoss):
             identities=identities,
             helper_sha256=hashes,
             stop_command=self.stop_command,
+            failure_mode=self.failure_mode,
         )
         write_json(self.local / "environment.json", self.manifest)
         self.prepared = True
@@ -220,6 +237,35 @@ class GCPStudy(HeadVMLoss):
             timeout=120,
         )
 
+    def kill_worker(self, machine, request, control):
+        if self.failure_mode == "vm":
+            return self.stop_vm(machine, request, control)
+        name = self.mapping[machine]
+        record = dict(machine=machine, vm=name, request=request, failure_mode="process")
+        before = time.monotonic()
+        try:
+            obj = self.describe(name)
+            if obj["status"] != "RUNNING":
+                raise RuntimeError("Process-loss target VM must be running")
+            record["instance_id"] = str(obj["id"])
+            record["dispatch_unix_s"] = time.time()
+            evidence = json.loads(self.node(name, "kill").stdout)
+            if not evidence.get("unit_empty") or evidence.get("signal") != "SIGKILL":
+                raise RuntimeError("Missing process-group kill evidence")
+            record.update(
+                status="PROCESSES_KILLED",
+                unit_empty=True,
+                signal="SIGKILL",
+                process_evidence=evidence,
+                kill_and_confirm_s=time.monotonic() - before,
+            )
+        except Exception as exc:
+            record["error"] = str(exc)
+        write_json(
+            self.local / (Path(control).name + "-" + machine + "-process.json"), record
+        )
+        return record
+
     def stop_vm(self, machine, request, control):
         """Executed concurrently for correlated loss; save evidence on the host first."""
         name = self.mapping[machine]
@@ -253,6 +299,7 @@ class GCPStudy(HeadVMLoss):
         return record
 
     def execute(self, request):
+        request = dict(request, failure_mode=self.failure_mode)
         free = int(
             self.ssh(
                 self.head,
@@ -312,7 +359,7 @@ class GCPStudy(HeadVMLoss):
                             raise RuntimeError("Unexpected fault request")
                         sent.add(machine)
                         pending[machine] = executor.submit(
-                            self.stop_vm, machine, files[key], control
+                            self.kill_worker, machine, files[key], control
                         )
                 for machine, future in list(pending.items()):
                     if future.done():
@@ -411,12 +458,18 @@ class GCPStudy(HeadVMLoss):
             raise ValueError("Observation IDs must be unique run-N identifiers")
         if smoke_gate is not None:
             gate = json.loads((self.local / smoke_gate / "summary.json").read_text())
+            if gate.get("failure_modes") != [self.failure_mode]:
+                raise RuntimeError(
+                    "Smoke failure mode differs: run smoke for the current mode"
+                )
             if not gate["valid"]:
                 raise RuntimeError("Smoke suite did not pass the evidence gates")
         root, local = SHARED + "/" + name, self.local / name
         manifest = json.loads((local / "manifest.json").read_text())
         if manifest["environment"]["helper_sha256"] != self.manifest["helper_sha256"]:
             raise RuntimeError("Helpers changed: create a fresh suite/profile")
+        if manifest["environment"].get("failure_mode", "vm") != self.failure_mode:
+            raise RuntimeError("Failure mode changed: create a new suite")
         plan_path = local / "jobs.json"
         if plan_path.exists() and json.loads(plan_path.read_text()) != planned:
             raise RuntimeError("Resume requires the identical matrix")
@@ -457,10 +510,19 @@ class GCPStudy(HeadVMLoss):
                     / 3600,
                 )
                 for machine in job["scenario"]["failures"]:
-                    if self.describe(self.mapping[machine])["status"] != "TERMINATED":
+                    if self.failure_mode == "process":
+                        evidence = json.loads(
+                            self.node(self.mapping[machine], "process_status").stdout
+                        )
+                        if not evidence["unit_empty"]:
+                            raise AssertionError(
+                                "Killed worker rejoined before observation ended"
+                            )
+                    elif self.describe(self.mapping[machine])["status"] != "TERMINATED":
                         raise AssertionError(
                             "Failed VM restarted before observation ended"
                         )
+                row["failure_mode"] = self.failure_mode
                 write_json(path, row)
                 rows.append(row)
                 write_json(local / "replay.json", dict(rows=rows))
