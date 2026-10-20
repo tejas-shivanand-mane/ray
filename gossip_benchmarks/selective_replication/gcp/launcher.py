@@ -55,6 +55,84 @@ class GCPStudy(HeadVMLoss):
     def get(self, remote):
         return json.loads(self.ssh(self.head, "cat " + shlex.quote(remote)).stdout)
 
+    def driver_state(self):
+        """An SSH error is not evidence that the controller has exited."""
+        for attempt in range(3):
+            result = self.ssh(self.head, "systemctl is-active " + UNIT, check=False)
+            state = result.stdout.strip()
+            if result.returncode == 0 and state in (
+                "active",
+                "activating",
+                "reloading",
+            ):
+                return "active"
+            if result.returncode in (3, 4) and state in (
+                "inactive",
+                "failed",
+                "unknown",
+            ):
+                return state
+            if attempt < 2:
+                time.sleep(1)
+        raise RuntimeError(
+            f"Cannot determine driver state: SSH/systemctl exit={result.returncode}; "
+            f"stdout={result.stdout!r}; stderr={result.stderr!r}"
+        )
+
+    def archive_interrupted(self, name, job_id):
+        """Preserve a failed attempt so the same matrix can resume explicitly."""
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name) or not re.fullmatch(
+            r"run-[0-9]+", job_id
+        ):
+            raise ValueError("Invalid suite/job name")
+        local = self.local / name
+        if (local / (job_id + ".json")).exists():
+            raise RuntimeError("Completed local result exists; do not retry")
+        control = SHARED + "/" + name + "/" + job_id
+        if self.driver_state() == "active":
+            raise RuntimeError("Driver is still running; cannot archive")
+        self.ssh(self.head, "sudo mkdir " + LOCK)
+        try:
+            if self.driver_state() == "active":
+                raise RuntimeError("Driver started; cannot archive")
+            status = json.loads(
+                self.ssh(
+                    self.head,
+                    f"if test -f {control}/status.json; then cat {control}/status.json; else printf null; fi",
+                ).stdout
+            )
+            if status and status.get("ok"):
+                raise RuntimeError(
+                    "Remote attempt succeeded; collect its result instead of repeating it"
+                )
+            archive = (
+                SHARED
+                + "/"
+                + name
+                + "/interrupted-"
+                + job_id
+                + "-"
+                + str(time.time_ns())
+            )
+            output = SHARED + "/" + name + "/study/" + job_id
+            self.ssh(
+                self.head,
+                f"set -e\nsudo -u raybench mkdir {archive}\n"
+                f"sudo -u raybench mv {control} {archive}/control\n"
+                f"if test -d {output}; then sudo -u raybench mv {output} {archive}/output; fi",
+            )
+            write_json(
+                local / (job_id + "-retry.json"),
+                dict(
+                    job_id=job_id,
+                    archived=archive,
+                    reason="Explicit retry after interrupted controller; original evidence retained",
+                ),
+            )
+            return archive
+        finally:
+            self.ssh(self.head, "sudo rmdir " + LOCK)
+
     def fence_driver(self):
         # --collect can remove a successfully completed transient unit. A missing
         # unit is safe; a failed SSH call or a still-running service is not.
@@ -378,13 +456,27 @@ class GCPStudy(HeadVMLoss):
                     raise TimeoutError(
                         "Controller exceeded observation limit; inspect service journal"
                     )
-                active = self.ssh(
-                    self.head, "systemctl is-active " + UNIT, check=False
-                ).stdout.strip()
-                if active not in ("active", "activating"):
-                    # One final status read on next poll avoids exit/write races.
+                active = self.driver_state()
+                if active != "active":
                     time.sleep(1)
-                    final = self.get(control + "/status.json")
+                    status_path = shlex.quote(control + "/status.json")
+                    final = json.loads(
+                        self.ssh(
+                            self.head,
+                            f"if test -f {status_path}; then cat {status_path}; else printf null; fi",
+                        ).stdout
+                    )
+                    if final is None:
+                        journal = self.ssh(
+                            self.head,
+                            "sudo journalctl -u " + UNIT + " --no-pager -n 100",
+                            check=False,
+                        )
+                        log = self.local / (Path(control).name + "-driver.log")
+                        log.write_text(journal.stdout + "\n" + journal.stderr)
+                        raise RuntimeError(
+                            f"Driver is {active} without status.json. Journal saved to {log}"
+                        )
                     if not final["ok"]:
                         raise RuntimeError(final["traceback"])
                 time.sleep(1)

@@ -468,3 +468,58 @@ def test_fencing_detects_descendant_processes_even_if_unit_inactive(
     assert not status["unit_empty"]
     (group / "cgroup.procs").write_text("")
     assert module.process_status("/ray-exp-node.service")["unit_empty"]
+
+
+def test_status_ssh_failure_is_retried_not_treated_as_driver_exit(monkeypatch):
+    from gcp import launcher
+
+    cloud = object.__new__(launcher.GCPStudy)
+    cloud.head = "head"
+    responses = iter(
+        [
+            SimpleNamespace(returncode=255, stdout="", stderr="IAP error"),
+            SimpleNamespace(returncode=0, stdout="active\n", stderr=""),
+        ]
+    )
+    cloud.ssh = lambda *a, **kw: next(responses)
+    monkeypatch.setattr(launcher.time, "sleep", lambda delay: None)
+    assert cloud.driver_state() == "active"
+    cloud.ssh = lambda *a, **kw: SimpleNamespace(
+        returncode=255, stdout="", stderr="IAP error"
+    )
+    with pytest.raises(RuntimeError, match="Cannot determine driver state"):
+        cloud.driver_state()
+
+
+def test_archive_interrupted_preserves_completed_results(tmp_path):
+    from gcp.launcher import GCPStudy
+
+    cloud = object.__new__(GCPStudy)
+    cloud.local = tmp_path
+    suite = tmp_path / "full-01"
+    suite.mkdir()
+    (suite / "run-0001.json").write_text("{}")
+    cloud.ssh = lambda *a, **kw: pytest.fail("Completed result must not be modified")
+    with pytest.raises(RuntimeError, match="Completed local result"):
+        cloud.archive_interrupted("full-01", "run-0001")
+
+
+def test_archive_interrupted_moves_evidence_without_deleting(tmp_path):
+    from gcp.launcher import GCPStudy
+
+    cloud = object.__new__(GCPStudy)
+    cloud.local, cloud.head = tmp_path, "head"
+    (tmp_path / "full-01").mkdir()
+    cloud.driver_state = lambda: "inactive"
+    commands = []
+
+    def ssh(name, command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(stdout="null", returncode=0)
+
+    cloud.ssh = ssh
+    archived = cloud.archive_interrupted("full-01", "run-0030")
+    assert "interrupted-run-0030-" in archived
+    assert any("mv /srv/ray-gcp/selective-vm/full-01/run-0030" in c for c in commands)
+    assert all("rm -" not in c for c in commands)
+    assert (tmp_path / "full-01/run-0030-retry.json").exists()

@@ -58,3 +58,12 @@ The cleanup cell deletes only this run's VMs, boot disks and two firewall rules.
 Download needed evidence first. The saved image and existing VPC/subnet survive.
 No live GCP execution was available during development; local tests are not cloud
 validation. The original GCP notebooks are unchanged.
+
+If a controller is interrupted, keep the existing kernel/cluster. The supervisor
+retries failed SSH service-status queries rather than treating them as service
+exit. Missing status after a confirmed exit saves the driver journal locally.
+`cloud.archive_interrupted(suite, job_id)` explicitly moves an unsuccessful
+attempt's control files and checkpoints into an archive before retrying. It
+refuses active controllers and completed results. Then rerun `run_suite` with the
+same matrix: completed local observations are skipped. An archived retry is
+recorded locally as `<job-id>-retry.json`; it must not be concealed in analysis.
