@@ -3,8 +3,9 @@
 Open `../../Selective_Replication_GCP.ipynb`. It imports visible Python files;
 the original GCP and local notebooks are unchanged. Each new notebook session
 creates a fresh five-VM cluster from `ray-built-v1`, with a unique state file and
-isolated network. No old instances or state files are required or auto-reused.
-Edit project, zone, image, machine type and experiment sizes in the first cell.
+an existing network/subnet (default: `default`). No old instances or state files
+are required or auto-reused. Fresh VMs do not require fresh VPCs.
+Edit project, zone, image, existing network/subnet, machine type and experiment sizes in the first cell.
 The notebook shows the actual gcloud create/SSH/SCP/NFS/delete commands in ordinary
 functions and loops; no provisioning class or original-notebook setup is needed.
 The small `node_control.py` helper starts/stops Ray, while `GCPStudy` retains the
@@ -91,9 +92,9 @@ leave failed VMs stopped. A notebook-host crash leaves the lock; inspect cloud
 status and `journalctl -u ray-selective-driver.service` on the head, stop that
 service, collect evidence, then remove `/var/lib/raybench/ray-selective-lock` only
 when no supervisor is live. Start stopped recorded workers before preparing a
-new session. The optional final cleanup cell deletes only this new cluster and its network,
+new session. The optional final cleanup cell deletes only this new cluster and its two firewall rules,
 including remote results on the head disk; download evidence first. The saved
-image is retained. Resources remain billable until explicitly stopped/deleted.
+image and existing network/subnet are retained. Resources remain billable until explicitly stopped/deleted.
 
 No live GCP execution was possible in the implementation environment. The smoke
 suite is mandatory before interpreting the larger experiment.

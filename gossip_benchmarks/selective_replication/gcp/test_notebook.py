@@ -64,6 +64,10 @@ def test_notebook_fresh_creation_and_no_duplicate_allocation(tmp_path, monkeypat
         calls.append(args)
         if args[:3] == ("compute", "images", "describe"):
             return json.dumps(dict(status="READY", diskSizeGb=150))
+        if args[:3] == ("compute", "networks", "describe"):
+            return "{}"
+        if args[:4] == ("compute", "networks", "subnets", "describe"):
+            return json.dumps(dict(network=ctx["NETWORK"]))
         assert ctx["STATE_FILE"].is_file()
         return "{}"
 
@@ -72,6 +76,8 @@ def test_notebook_fresh_creation_and_no_duplicate_allocation(tmp_path, monkeypat
     exec(cell("create"), ctx)
     created = [c for c in calls if c[:3] == ("compute", "instances", "create")]
     assert len(created) == 1
+    assert not any(c[:3] == ("compute", "networks", "create") for c in calls)
+    assert not any(c[:4] == ("compute", "networks", "subnets", "create") for c in calls)
     assert created[0][3:8] == tuple(ctx["NAMES"])
     assert "--boot-disk-size=150GB" in created[0]
 
@@ -123,3 +129,35 @@ def test_notebook_cleanup_rejects_foreign_instance_before_deleting(tmp_path):
             ctx,
         )
     assert all("delete" not in call for call in calls)
+
+
+def test_cleanup_preserves_shared_network_and_other_firewall_rules(tmp_path):
+    ctx = context(tmp_path)
+    calls = []
+
+    def gc(*args, **kw):
+        calls.append(args)
+        if args[:3] == ("compute", "instances", "list"):
+            return "[]"
+        if args[:3] == ("compute", "firewall-rules", "list"):
+            return json.dumps(
+                [
+                    dict(name=name, network=ctx["NETWORK"])
+                    for name in [
+                        ctx["RUN_ID"] + "-internal",
+                        ctx["RUN_ID"] + "-iap",
+                        "unrelated",
+                    ]
+                ]
+            )
+        return "{}"
+
+    ctx["gcloud"] = gc
+    exec(
+        cell("cleanup").replace("DELETE_INSTANCES = False", "DELETE_INSTANCES = True"),
+        ctx,
+    )
+    deleted = [c for c in calls if "delete" in c]
+    assert len(deleted) == 2
+    assert all(c[:3] == ("compute", "firewall-rules", "delete") for c in deleted)
+    assert all(c[3].startswith(ctx["RUN_ID"]) for c in deleted)
