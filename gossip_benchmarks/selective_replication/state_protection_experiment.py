@@ -60,7 +60,7 @@ def configuration(args):
         raise ValueError("Target seconds must be positive and finite; repeats >= 1")
     smoke = bool(args.smoke)
     return dict(
-        schema_version=1,
+        schema_version=2,
         presets=list(PRESETS) if args.preset in (None, "all") else [args.preset],
         target_seconds=0.12 if smoke else target,
         repeats=1 if smoke else repeats,
@@ -71,8 +71,8 @@ def configuration(args):
         success_target=0.95,
         deadline_multipliers=[1.25, 1.5, 2.0],
         replay_deadline_multiplier=1.5,
-        planning_fractions=[0.2, 0.5, 0.8],
-        replay_fractions=[0.35, 0.65],
+        planning_fractions=[0.2, 0.5, 0.8, 1.1],
+        replay_fractions=[0.35, 0.65, 1.05],
         limitations=[
             "Real deterministic digits MLP training, with a sequential fine-tuning dependency; not distributed SGD, Ray, or TorchFT.",
             "SIGKILL of local CPU workers; input data, controller and checkpoint storage survive. This is not VM/storage failure.",
@@ -391,7 +391,7 @@ def replay_case(root, config, preset):
         report_case(root, config, preset)
 
 
-def summarize_records(records, repeats):
+def summarize_records(records, repeats, protected_tasks=()):
     per_repeat = []
     for repeat in range(repeats):
         group = [r for r in records if r["job"]["repeat"] == repeat]
@@ -403,7 +403,34 @@ def summarize_records(records, repeats):
                 for k in METRICS
             }
         )
+    interrupted = {
+        t: sum(
+            e.get("active_task") == t
+            for r in records
+            for e in r["result"]["fault_evidence"].values()
+        )
+        for t in protected_tasks
+    }
+    restored = {
+        t: sum(
+            e["task"] == t and e["restored_epoch"] > 0
+            for r in records
+            for e in r["result"]["restorations"]
+        )
+        for t in protected_tasks
+    }
+    if not protected_tasks:
+        exposure = "no_intermediate_checkpoints"
+    elif any(restored.values()):
+        exposure = "checkpoint_restore_observed"
+    elif any(interrupted.values()):
+        exposure = "protected_task_interrupted_but_no_restore"
+    else:
+        exposure = "protected_tasks_not_interrupted"
     return dict(
+        protection_exposure=exposure,
+        protected_task_faults=interrupted,
+        protected_task_restores=restored,
         weighted={k: statistics.mean(r[k] for r in per_repeat) for k in METRICS},
         per_repeat=per_repeat,
         all_correct=all(r["result"]["correct"] for r in records),
@@ -483,7 +510,12 @@ def report_case(root, config, preset):
             complete=len(records) == len(jobs), observations=len(records), plan_id=key
         )
         if row["complete"]:
-            row.update(summarize_records(records, config["repeats"]))
+            protected = [
+                t
+                for t, interval in entry["plan"]["checkpoint_every"].items()
+                if interval < max(search["choices"][t])
+            ]
+            row.update(summarize_records(records, config["repeats"], protected))
         for name in entry["policies"]:
             policies[name] = {
                 **row,
@@ -531,6 +563,16 @@ def report_case(root, config, preset):
         lines.append(
             f"- {name}: {row['verdict']}; elapsed gain {100 * row['elapsed_gain_fraction']:.2f}%."
         )
+    lines += ["", "Protection coverage:", ""]
+    for name, row in policies.items():
+        if row["complete"]:
+            lines.append(
+                f"- {name}: {row['protection_exposure']}; restores by protected task: {row['protected_task_restores']}."
+            )
+    lines += [
+        "",
+        "A speed difference without an observed checkpoint restore does not demonstrate the recovery benefit of the protected state.",
+    ]
     lines += [
         "",
         "These are assumed-weight scenario summaries, not measured cloud reliability. Identical plans share observations. Five percent is a predeclared practical threshold, not statistical significance.",

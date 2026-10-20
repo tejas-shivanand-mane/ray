@@ -141,3 +141,40 @@ def test_native_has_no_artificial_delay_and_controls_share_work():
             ]
             == 0.15
         )
+
+
+def test_default_late_faults_and_protected_task_coverage():
+    c = config()
+    assert max(c["replay_fractions"]) > 1
+    assert set(c["replay_fractions"]).isdisjoint(c["planning_fractions"])
+    result = dict(
+        elapsed_s=1.0,
+        worker_busy_s=2.0,
+        assumed_cost=1.0,
+        met_deadline=True,
+        correct=True,
+        checkpoint_bytes=100,
+        fault_evidence={"spot_a": dict(active_task="t3")},
+        restorations=[dict(task="t3", restored_epoch=0)],
+    )
+    record = dict(
+        job=dict(
+            repeat=0,
+            scenario=dict(name="late", probability=1.0, failures={"spot_a": 1.05}),
+        ),
+        result=result,
+    )
+    summary = study.summarize_records([record], 1, ["t3"])
+    assert summary["protection_exposure"] == "protected_task_interrupted_but_no_restore"
+    result["restorations"][0]["restored_epoch"] = 2
+    summary = study.summarize_records([record], 1, ["t3"])
+    assert summary["protection_exposure"] == "checkpoint_restore_observed"
+    assert summary["protected_task_restores"] == {"t3": 1}
+    assert (
+        study.summarize_records([record], 1, ["t1"])["protection_exposure"]
+        == "protected_tasks_not_interrupted"
+    )
+    assert (
+        study.summarize_records([record], 1)["protection_exposure"]
+        == "no_intermediate_checkpoints"
+    )

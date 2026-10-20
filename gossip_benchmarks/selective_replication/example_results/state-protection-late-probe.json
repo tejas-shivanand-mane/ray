@@ -1,0 +1,128 @@
+{
+  "purpose": "Coverage probe only, not a policy performance comparison",
+  "original_plan_commit": "abf7e385cc7b86427fa17933d6c008d20992bd89",
+  "plan": {
+    "copies": {
+      "t1": [
+        "safe"
+      ],
+      "t2": [
+        "spot_b"
+      ],
+      "t3": [
+        "spot_b"
+      ]
+    },
+    "order": [
+      "t2",
+      "t1",
+      "t3"
+    ],
+    "checkpoint_every": {
+      "t1": 94,
+      "t2": 47,
+      "t3": 23
+    }
+  },
+  "scenario": {
+    "name": "late-stage-coverage-probe",
+    "probability": 1.0,
+    "failures": {
+      "spot_b": 2.044326904095615
+    }
+  },
+  "result": {
+    "correct": true,
+    "elapsed_s": 2.859087241005909,
+    "met_deadline": true,
+    "fault_evidence": {
+      "spot_b": {
+        "requested_s": 2.044326904095615,
+        "observed_s": 2.0445633950002957,
+        "signal_call_s": 3.9278995245695114e-05,
+        "pid": 8,
+        "active_task": "t3",
+        "exitcode": -9
+      }
+    },
+    "max_abs_error": {
+      "t2": 0.0,
+      "t1": 0.0,
+      "t3": 0.0
+    },
+    "restorations": [
+      {
+        "kind": "start",
+        "restored_epoch": 0,
+        "initialization_s": 0.0018571230029920116,
+        "restore_init_s": 0.0,
+        "parent_count": 0,
+        "dtype": "float64",
+        "threads": 1,
+        "deterministic_algorithms": true,
+        "cpu_capability": "AVX512",
+        "execution_pacing": {
+          "compute_scale": 1.0,
+          "checkpoint_delay_s": 0.15
+        },
+        "generation": 1,
+        "task": "t2",
+        "machine": "spot_b"
+      },
+      {
+        "kind": "start",
+        "restored_epoch": 0,
+        "initialization_s": 0.002630078997754026,
+        "restore_init_s": 0.0,
+        "parent_count": 0,
+        "dtype": "float64",
+        "threads": 1,
+        "deterministic_algorithms": true,
+        "cpu_capability": "AVX512",
+        "execution_pacing": {
+          "compute_scale": 1.0,
+          "checkpoint_delay_s": 0.15
+        },
+        "generation": 1,
+        "task": "t1",
+        "machine": "safe"
+      },
+      {
+        "kind": "start",
+        "restored_epoch": 0,
+        "initialization_s": 0.004551179998088628,
+        "restore_init_s": 0.0,
+        "parent_count": 1,
+        "dtype": "float64",
+        "threads": 1,
+        "deterministic_algorithms": true,
+        "cpu_capability": "AVX512",
+        "execution_pacing": {
+          "compute_scale": 1.0,
+          "checkpoint_delay_s": 0.15
+        },
+        "generation": 3,
+        "task": "t3",
+        "machine": "spot_b"
+      },
+      {
+        "kind": "start",
+        "restored_epoch": 23,
+        "initialization_s": 0.004780946001119446,
+        "restore_init_s": 0.004780946001119446,
+        "parent_count": 1,
+        "dtype": "float64",
+        "threads": 1,
+        "deterministic_algorithms": true,
+        "cpu_capability": "AVX512",
+        "execution_pacing": {
+          "compute_scale": 1.0,
+          "checkpoint_delay_s": 0.15
+        },
+        "generation": 1,
+        "task": "t3",
+        "machine": "spot_a"
+      }
+    ]
+  }
+}

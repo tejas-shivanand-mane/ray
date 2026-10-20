@@ -17,6 +17,13 @@ per-task intervals and placement. Here that flexibility is called
 dependent workload. This isolates an existing mechanism; it does not introduce
 a new checkpoint protocol.
 
+The first one-repeat pilot completed 126 validated observations without an
+accepted time advantage under the deadline rule. Its results and coverage
+limitations are retained in
+[example_results/state-protection-exploratory.md](example_results/state-protection-exploratory.md).
+The revised default adds later failures; do not treat its weighted aggregates
+as direct repetitions of that earlier failure distribution.
+
 ## Run and resume
 
 Use Linux, at least three available CPU cores, and your existing Python
@@ -122,19 +129,30 @@ accounting model, not actual billing or an elastic provisioning experiment.
 
 ## Faults and evidence
 
-Planning uses failures at 20%, 50% and 80% of the healthy reference duration.
-Replay uses held-out 35% and 65% times. Each time tests safe loss, either spot
+Planning uses failures at 20%, 50%, 80% and 110% of the healthy reference duration.
+Replay uses held-out 35%, 65% and 105% times. Each time tests safe loss, either spot
 worker's loss, and both spot workers' correlated loss, plus a healthy control:
-nine scenarios per distinct plan per repetition. All plans within a preset
+13 scenarios per distinct plan per repetition. All plans within a preset
 receive identical wall-clock failure schedules. There is no per-policy retiming.
 The reference is profiled separately per preset, so cross-preset aggregates
 also reflect their different reference durations.
+
+The additional late times were added after the first exploratory pilot found
+that t3 could be protected but never resume from that checkpoint under the two
+earlier replay times. A time beyond the final-only reference can still interrupt
+a job with checkpoint overhead. Faster jobs may legitimately finish before it;
+we never move the fault earlier for an individual policy. The original pilot
+uses schema 1 and is retained separately; the revised default uses schema 2.
 
 Actual SIGKILL exits, active versus idle fault exposure, restored epochs,
 committed checkpoint bytes, completion time, worker busy time, assumed cost,
 deadline attainment and correctness are retained. Checkpoint bytes count
 committed files only, not partial writes killed before commit. Identical plans
 share observations and are reported as identical, not independent trials.
+Coverage is also reported per protected task, distinguishing no intermediate
+checkpoints, un-interrupted protected tasks, interruption without restoration,
+and an observed checkpoint restore. A speed difference without a restore does
+not demonstrate the recovery benefit of the protected state.
 
 An incorrect state stops the experiment. A correct but incomplete observation
 is retained as a failure rather than discarded. Only complete comparisons
