@@ -69,3 +69,10 @@ with their traceback. Lock operations tolerate lost SSH acknowledgements and
 recognize the same supervisor's token; another notebook's or an older unowned
 lock is never silently removed. Persistent GCP outages can still stop the run;
 no live GCP validation is implied by the local harness tests.
+
+Offline workload discovery is available in [offline_study](offline_study/README.md).
+From the repository root, run
+`python gossip_benchmarks/selective_replication/offline_study/run_offline.py`
+to reproduce the synthetic selective-protection candidate and its stronger
+sequential baseline. Add `--full-sweep` for all 1,968 discovery configurations.
+The runner uses no cloud resources and has a 28-minute total execution budget.

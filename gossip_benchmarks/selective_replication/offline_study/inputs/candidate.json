@@ -1,0 +1,59 @@
+{
+  "tasks": {
+    "trial-a": {
+      "epochs": 100,
+      "checkpoint_every": 25
+    },
+    "trial-b": {
+      "epochs": 100,
+      "checkpoint_every": 25
+    }
+  },
+  "machines": {
+    "safe": {
+      "cost_per_hour": 1
+    },
+    "spot_a": {
+      "cost_per_hour": 0.25
+    },
+    "spot_b": {
+      "cost_per_hour": 0.25
+    }
+  },
+  "profile": {
+    "trial-a": {
+      "safe": {
+        "epoch_s": 1.2,
+        "save_s": 5,
+        "init_s": 1
+      },
+      "spot_a": {
+        "epoch_s": 0.4,
+        "save_s": 5,
+        "init_s": 1
+      },
+      "spot_b": {
+        "epoch_s": 1.2,
+        "save_s": 5,
+        "init_s": 1
+      }
+    },
+    "trial-b": {
+      "safe": {
+        "epoch_s": 1.2,
+        "save_s": 5,
+        "init_s": 1
+      },
+      "spot_a": {
+        "epoch_s": 0.8,
+        "save_s": 5,
+        "init_s": 1
+      },
+      "spot_b": {
+        "epoch_s": 1.2,
+        "save_s": 5,
+        "init_s": 1
+      }
+    }
+  }
+}

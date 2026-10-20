@@ -1,0 +1,110 @@
+{
+  "tasks": {
+    "shard-a": {
+      "dtype": "float64",
+      "width": 256,
+      "epochs": 600,
+      "batch_size": 32,
+      "seed": 123,
+      "lr": 0.03,
+      "checkpoint_every": 100,
+      "shard": [
+        0,
+        2
+      ],
+      "dataset_sha256": "c53406bb36ed87d349e563d33fee793de16571c86cee115cfc38207378dbeb90"
+    },
+    "shard-b": {
+      "dtype": "float64",
+      "width": 256,
+      "epochs": 900,
+      "batch_size": 32,
+      "seed": 123,
+      "lr": 0.03,
+      "checkpoint_every": 100,
+      "shard": [
+        1,
+        2
+      ],
+      "dataset_sha256": "c53406bb36ed87d349e563d33fee793de16571c86cee115cfc38207378dbeb90"
+    },
+    "finetune": {
+      "dtype": "float64",
+      "width": 256,
+      "epochs": 300,
+      "batch_size": 32,
+      "seed": 123,
+      "lr": 0.03,
+      "checkpoint_every": 100,
+      "depends_on": [
+        "shard-a",
+        "shard-b"
+      ],
+      "dataset_sha256": "c53406bb36ed87d349e563d33fee793de16571c86cee115cfc38207378dbeb90"
+    }
+  },
+  "machines": {
+    "safe": {
+      "cost_per_hour": 1.0
+    },
+    "spot_a": {
+      "cost_per_hour": 1.0
+    },
+    "spot_b": {
+      "cost_per_hour": 1.0
+    }
+  },
+  "estimates": {
+    "shard-a": {
+      "safe": {
+        "epoch_s": 0.027930337168333874,
+        "save_s": 0.019697372999994894,
+        "init_s": 0.08133662499972161
+      },
+      "spot_a": {
+        "epoch_s": 0.04311246288333403,
+        "save_s": 0.023265274333330883,
+        "init_s": 0.0844945449995862
+      },
+      "spot_b": {
+        "epoch_s": 0.04094776192833346,
+        "save_s": 0.021685774666660034,
+        "init_s": 0.07762696399993274
+      }
+    },
+    "shard-b": {
+      "safe": {
+        "epoch_s": 0.02821267348444552,
+        "save_s": 0.0189778163333219,
+        "init_s": 0.021400915999095105
+      },
+      "spot_a": {
+        "epoch_s": 0.03993426935999985,
+        "save_s": 0.019326725333346277,
+        "init_s": 0.13426330200002212
+      },
+      "spot_b": {
+        "epoch_s": 0.03989277208111288,
+        "save_s": 0.019391291444460675,
+        "init_s": 0.12407856799825367
+      }
+    },
+    "finetune": {
+      "safe": {
+        "epoch_s": 0.055575454050000035,
+        "save_s": 0.017737524333294157,
+        "init_s": 0.04527860000007422
+      },
+      "spot_a": {
+        "epoch_s": 0.07556154743333385,
+        "save_s": 0.019460436999944857,
+        "init_s": 0.06103823099999772
+      },
+      "spot_b": {
+        "epoch_s": 0.07461962785666931,
+        "save_s": 0.020134397666690045,
+        "init_s": 0.06457110899907548
+      }
+    }
+  }
+}
