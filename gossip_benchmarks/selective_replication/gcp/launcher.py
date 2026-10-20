@@ -1,4 +1,4 @@
-"""Notebook-host supervisor. Reuses recorded VMs; never creates/deletes instances."""
+"""Notebook-host supervisor for the fresh cluster recorded by provision.py."""
 
 import copy
 import hashlib

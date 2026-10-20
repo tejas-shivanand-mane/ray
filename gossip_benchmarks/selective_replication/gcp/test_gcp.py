@@ -262,3 +262,76 @@ def test_injector_adapter_replays_actual_local_process_loss(tmp_path):
     assert row["max_abs_error"]["train"] == 0
     assert row["fault_evidence"]["spot_a"]["test_metadata"]
     assert row["fault_evidence"]["spot_a"]["exitcode"] == -9
+
+
+def test_fresh_cluster_never_loads_old_state_and_records_before_create(
+    tmp_path, monkeypatch
+):
+    from gcp import provision
+
+    (tmp_path / "old-state.json").write_text('{"ready": true}')
+    first = provision.FreshCluster(workdir=tmp_path)
+    second = provision.FreshCluster(workdir=tmp_path)
+    assert first.run_id != second.run_id
+    assert first.state_path != second.state_path
+    assert not first.state.get("ready")
+    calls = []
+    monkeypatch.setattr(provision.shutil, "which", lambda name: "/bin/" + name)
+
+    def gc(*args, **kwargs):
+        calls.append(args)
+        saved = json.loads(first.state_path.read_text())
+        assert saved["names"] == first.names
+        if args[:3] == ("compute", "images", "describe"):
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    dict(status="READY", id="1", selfLink="image", diskSizeGb="100")
+                )
+            )
+        assert saved["provision_started"]
+        return SimpleNamespace(stdout="{}")
+
+    first.gc = gc
+    first._check_owner = lambda name: dict(
+        networkInterfaces=[dict(networkIP="10.90.0.2")]
+    )
+    first.setup = lambda: calls.append(("setup",))
+    first.provision()
+    create = next(c for c in calls if c[:3] == ("compute", "instances", "create"))
+    assert create[3:8] == tuple(first.names)
+    assert "--image=ray-built-v1" in create
+    assert calls[-1] == ("setup",)
+    with pytest.raises(RuntimeError, match="already attempted"):
+        first.provision()
+
+
+def test_fresh_setup_installs_persistent_worker_mounts(tmp_path, monkeypatch):
+    from gcp import provision
+
+    cluster = provision.FreshCluster(workdir=tmp_path)
+    cluster.state["nodes"] = [
+        dict(name=n, ip=f"10.90.0.{i+2}", head=i == 0)
+        for i, n in enumerate(cluster.names)
+    ]
+    cluster.key.write_text("test-key")
+    cluster.key.with_suffix(".pub").write_text("ssh-ed25519 test-public-key")
+    cluster._check_owner = lambda name: dict(status="RUNNING")
+    cluster._wait_ssh = lambda name: None
+    cluster.scp = lambda *args: None
+    commands = []
+
+    def ssh(name, command, **kwargs):
+        commands.append((name, command))
+        if "print(json.dumps([command(n," in command:
+            return SimpleNamespace(
+                stdout=json.dumps([dict(git_commit=provision.SOURCE_COMMIT)] * 5)
+            )
+        return SimpleNamespace(stdout="ssh-ed25519 test-host-key")
+
+    cluster.ssh = ssh
+    cluster.setup()
+    assert cluster.state["ready"]
+    mounts = [(name, command) for name, command in commands if "/etc/fstab" in command]
+    assert {name for name, command in mounts} == set(cluster.names[1:])
+    assert all("10.90.0.2:/ /srv/ray-gcp nfs4" in command for name, command in mounts)
+    assert all("sudo mount /srv/ray-gcp" in command for name, command in mounts)

@@ -1,10 +1,17 @@
 # GCP selective replication
 
 Open `../../Selective_Replication_GCP.ipynb`. It imports visible Python files;
-the original GCP and local notebooks are unchanged. Use the existing five-VM
-state file, never `None`. The notebook host needs authenticated gcloud and must
-stay awake. Training uses `/opt/ray-env/ray-dev/bin/python` on the guests.
-The original worker harness's head-hosted NFS and node_control.py must exist.
+the original GCP and local notebooks are unchanged. Each new notebook session
+creates a fresh five-VM cluster from `ray-built-v1`, with a unique state file and
+isolated network. No old instances or state files are required or auto-reused.
+Edit project, zone and image in the first cell. The notebook host needs authenticated
+gcloud and SSH tools and must stay awake. Training uses
+`/opt/ray-env/ray-dev/bin/python` on the guests. Visible `provision.py` and
+`bootstrap/` helpers establish the dedicated user, node controller and head-hosted
+NFS. Worker mounts persist across the VM stop/start cycles.
+Rerunning the settings cell keeps the current session's cluster object; restart
+the kernel for a new cluster. A partial provisioning failure is not silently
+retried: keep the printed state file to inspect/clean up the recorded resources.
 The editable dependency-install switch installs `scikit-learn==1.7.2` only when
 missing, in the guest virtual environments. Package equality is checked across
 all five VMs. No system Python is modified.
@@ -75,9 +82,9 @@ leave failed VMs stopped. A notebook-host crash leaves the lock; inspect cloud
 status and `journalctl -u ray-selective-driver.service` on the head, stop that
 service, collect evidence, then remove `/var/lib/raybench/ray-selective-lock` only
 when no supervisor is live. Start stopped recorded workers before preparing a
-new session. No helper creates/deletes VMs or deletes results. Reusing the original
-GCP notebook later restarts its normal services. Resources remain billable until
-you explicitly stop/clean them up with your existing launcher.
+new session. The optional final cleanup cell deletes only this new cluster and its network,
+including remote results on the head disk; download evidence first. The saved
+image is retained. Resources remain billable until explicitly stopped/deleted.
 
 No live GCP execution was possible in the implementation environment. The smoke
 suite is mandatory before interpreting the larger experiment.
