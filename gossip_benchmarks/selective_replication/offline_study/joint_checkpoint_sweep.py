@@ -1,4 +1,4 @@
-"""Resumable model-only comparison of joint, sequential and alternating planning.
+"""Short model-only comparison of joint, sequential and alternating planning.
 
 Uses only the standard library and the existing deterministic planner. It never
 starts training, Ray, cloud instances or worker processes. See JOINT_PLANNING.md.
@@ -13,8 +13,10 @@ import hashlib
 import itertools
 import json
 import math
+import os
 from pathlib import Path
 import sys
+import threading
 import time
 from uuid import uuid4
 import zipfile
@@ -24,7 +26,7 @@ sys.path.insert(0, str(HERE.parent))
 import planner  # noqa: E402
 
 
-SCHEMA = 1
+SCHEMA = 2
 TASKS = ("t1", "t2", "t3")
 NODES = ("safe", "spot_a", "spot_b")
 DEADLINES = (1.2, 1.5, 2.0)
@@ -80,6 +82,18 @@ def source_hashes():
 
 def family_grid(suite):
     """Freeze the complete grid before any result is available."""
+    if suite == "short":
+        # Six fixed settings: cheap/expensive saves, each with asymmetric,
+        # equal-risk and correlated-loss conditions. No outcome-driven search.
+        return [
+            dict(
+                t1_units=2.0, save_fraction=save, spot_price=0.25,
+                failure_mass=0.50, spot_to_safe_risk_ratio=ratio,
+                correlated_share=correlated,
+            )
+            for save in (0.005, 0.10)
+            for ratio, correlated in ((20.0, 0.0), (1.0, 0.0), (20.0, 0.5))
+        ]
     axes = {
         "t1_units": [1.5, 2.0],
         "save_fraction": [0.005, 0.10],
@@ -125,7 +139,7 @@ def make_problem(spec):
     return tasks, machines, estimates
 
 
-def plan_space(tasks):
+def plan_space(tasks, divisors=(2, 4, 8)):
     orders = [
         list(order)
         for order in itertools.permutations(TASKS)
@@ -141,7 +155,7 @@ def plan_space(tasks):
     # final-only as an explicit option. Selective uses their Cartesian closure.
     uniform = [{t: tasks[t]["epochs"] for t in TASKS}]
     shortest = min(task["epochs"] for task in tasks.values())
-    for divisor in (2, 4, 8):
+    for divisor in divisors:
         uniform.append({t: max(1, shortest // divisor) for t in TASKS})
         uniform.append({t: max(1, tasks[t]["epochs"] // divisor) for t in TASKS})
     uniform = list({digest(c): c for c in uniform}.values())
@@ -365,7 +379,9 @@ def check_budget(end):
 
 def enumerate_family(root, family_id, spec, manifest, end, progress):
     problem = make_problem(spec)
-    schedules, checkpoints, uniform_ids = plan_space(problem[0])
+    schedules, checkpoints, uniform_ids = plan_space(
+        problem[0], manifest["checkpoint_divisors"]
+    )
     final = {t: problem[0][t]["epochs"] for t in TASKS}
     reference = min(
         planner.simulate(
@@ -632,11 +648,12 @@ def main():
     location = parser.add_mutually_exclusive_group()
     location.add_argument("--output", type=Path)
     location.add_argument("--resume", type=Path)
-    parser.add_argument("--suite", choices=("smoke", "screen", "full"))
-    parser.add_argument("--max-minutes", type=float, default=28)
+    parser.add_argument("--suite", choices=("short", "smoke", "screen", "full"))
+    parser.add_argument("--max-minutes", type=float, default=25,
+                        help="Computation budget (at most 25); total process limit is 29 minutes")
     args = parser.parse_args()
-    if not math.isfinite(args.max_minutes) or not 0 < args.max_minutes <= 28:
-        parser.error("--max-minutes must be finite, greater than zero and at most 28")
+    if not math.isfinite(args.max_minutes) or not 0 < args.max_minutes <= 25:
+        parser.error("--max-minutes must be finite, greater than zero and at most 25")
     if args.resume and args.suite is not None:
         parser.error("Resume uses the saved suite; only --max-minutes may change")
     if args.resume:
@@ -657,12 +674,14 @@ def main():
             if manifest["schema"] != SCHEMA or manifest["source_hashes"] != source_hashes():
                 parser.error("Source/schema changed; use the original commit to resume or start a new run")
         else:
-            suite = args.suite or "screen"
+            suite = args.suite or "short"
             manifest = dict(
                 schema=SCHEMA, run_id=uuid4().hex, suite=suite,
                 created_utc=datetime.now(timezone.utc).isoformat(),
                 source_hashes=source_hashes(), families=family_grid(suite),
-                deadline_multipliers=list(DEADLINES), targets=list(TARGETS),
+                deadline_multipliers=[1.2, 1.5] if suite == "short" else list(DEADLINES),
+                targets=[0.95] if suite == "short" else list(TARGETS),
+                checkpoint_divisors=[2, 4] if suite == "short" else [2, 4, 8],
                 planning_fractions=[0.2, 0.5, 0.8, 1.1],
                 held_out_fractions=[0.1, 0.35, 0.65, 0.95, 1.2],
                 objective="expected_cost", limitations=LIMITATIONS,
@@ -673,9 +692,14 @@ def main():
         status = dict(state="running", families_done=0, families_total=len(manifest["families"]))
         atomic_json(root / "status.json", status)
         print(f"Output: {root}", flush=True)
-        print(f"Resume: python {Path(__file__).relative_to(HERE.parents[2])} --resume {root}", flush=True)
+        print("Total process limit: 29 minutes, including reports. Watchdog exit code: 124.", flush=True)
+        if manifest["suite"] != "short":
+            print(f"Resume: python {Path(__file__).relative_to(HERE.parents[2])} --resume {root}", flush=True)
         exit_code = 0
         try:
+            # Keep an uploadable partial report even if the watchdog interrupts
+            # a later family or final report generation.
+            reports(root, manifest, status)
             for number, spec in enumerate(manifest["families"]):
                 family_id = f"family-{number:03d}"
                 path = root / "families" / f"{family_id}.json"
@@ -687,11 +711,13 @@ def main():
                     finish_family(root, family_id, spec, manifest, space, end)
                 status["families_done"] = number + 1
                 atomic_json(root / "status.json", status)
+                reports(root, manifest, status)
                 print(f"{family_id}: complete", flush=True)
             status["state"] = "complete"
         except BudgetExpired:
-            status["state"] = "paused_budget"
-            print("Budget reached. Completed candidates are saved; use the resume command.", flush=True)
+            status["state"] = "time_limit"
+            exit_code = 124
+            print("Time limit reached. Reporting partial results; this is not a completed benchmark.", flush=True)
         except KeyboardInterrupt:
             status["state"] = "interrupted"
             exit_code = 130
@@ -709,4 +735,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Independent of cooperative checks: also bounds simulation, selection,
+    # cache writes and ZIP generation. Daemon avoids delaying normal exit.
+    watchdog = threading.Timer(29 * 60, os._exit, args=(124,))
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        sys.exit(main())
+    finally:
+        watchdog.cancel()

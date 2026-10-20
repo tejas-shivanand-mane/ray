@@ -2,8 +2,9 @@
 
 For the new comparison of **joint checkpoint planning against strong sequential
 and multistart alternating optimization**, use [JOINT_PLANNING.md](JOINT_PLANNING.md).
-It has a separate resumable entry point, saves all wins/ties/losses, and requires
-no training run. The older commands below concern the replication study.
+Its default is a 12-case benchmark with a 29-minute total process limit. It saves
+all wins/ties/losses and requires no training run. The older commands below
+concern the replication study.
 
 Run from the repository root using Python 3.10 or newer. The study uses only the
 standard library and the existing parent `planner.py`; it needs no Ray cluster,

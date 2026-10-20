@@ -9,7 +9,7 @@ benchmarks, tests, linters or automatic validation on the owner's behalf unless
 explicitly requested. The code and the hand-constructed checks were prepared
 without executing them.
 
-## Run and resume
+## Short benchmark: one invocation, under 30 minutes
 
 From the repository root in the existing `ray-dev` environment:
 
@@ -17,30 +17,29 @@ From the repository root in the existing `ray-dev` environment:
 python gossip_benchmarks/selective_replication/offline_study/joint_checkpoint_sweep.py
 ```
 
-The default screen has **64 model families**, each evaluated at three deadline
-multipliers and two success targets: **384 comparison cases**. Each case compares
-five methods. There is no requirement to rerun the earlier training experiment.
+The default `short` benchmark has **six model families**, each evaluated at two
+deadlines and one success target: **12 comparison cases**, with five methods in
+each case. It enumerates 2,916 plans per family (17,496 total), using a smaller
+checkpoint menu shared by every method. No earlier training run is required.
 
-Each invocation has a 28-minute computation budget. No runtime estimate has been
-measured. It prints its output directory and an exact resume command. If it pauses:
+This is intended as a single short run, with no planned resume cycle. Computation
+has a **25-minute budget**; a separate watchdog terminates the process at
+**29 minutes**, including report writing. `--max-minutes` can lower the computation
+budget, but cannot raise it above 25. Runtime has not been measured, so finishing
+all cases before the cutoff is not guaranteed on every machine. A timeout exits
+with code 124 and does not count as a completed benchmark. Only
+`status.json: state=complete` means that all 12 cases completed.
 
-```bash
-python gossip_benchmarks/selective_replication/offline_study/joint_checkpoint_sweep.py --resume /absolute/path/to/run
-```
-
-Resume preserves all completely evaluated candidates, including an unfinished
-family. The cache is written every 128 candidates and on a caught timeout or
-Ctrl-C. An abrupt process/machine loss may require redoing the latest unsaved
-candidates. A run lock prevents concurrent writers. The saved suite and source
-hashes must match; only `--max-minutes` may change when resuming. A budget pause
-returns exit code 0, but **only `status.json: state=complete` means completion**.
-Final report generation/ZIP writing occurs after the computation budget.
+An uploadable partial report is written before enumeration and after each family.
+At the cooperative time limit, remaining completed cases are included in the
+final report. If the watchdog forces termination, the last saved archive remains
+available; its status may still say `running`, and must be treated as incomplete.
 
 Upload **`analysis.zip`** from the printed directory. It contains the manifest,
 status, all completed comparison cases, selected plans, scenario outcomes,
 alternating trajectories, `comparisons.csv`, and summaries. Both favorable and
 unfavorable results are included. Large enumeration caches stay in the run folder
-and are excluded from this analysis archive; retain that folder for resumption.
+and are excluded from this analysis archive.
 
 Optional smaller execution for the owner to check the harness:
 
@@ -48,10 +47,17 @@ Optional smaller execution for the owner to check the harness:
 python gossip_benchmarks/selective_replication/offline_study/joint_checkpoint_sweep.py --suite smoke
 ```
 
-That is one family / six cases, not a substitute for the screen. A separate
-`--suite full` run uses 192 families / 1,152 cases, adding a shorter t1 branch and
-zero/intermediate checkpoint costs. Do not start it merely to seek a win after
-the screen ties. The full range is specified now to keep that distinction clear.
+That is one family / six cases with the larger checkpoint menu, not a substitute
+for the short benchmark. The old `--suite screen` (64 families / 384 cases) and
+`--suite full` (192 families / 1,152 cases) remain explicit extended studies.
+They are not part of the requested short benchmark and may need multiple
+invocations. Each invocation still has the same hard time limit. Do not expand
+the study merely to seek a win after the short benchmark ties.
+
+Extended runs can use `--resume /absolute/path/to/run`. The cache is saved every
+128 candidates and on a cooperative timeout or Ctrl-C. A run lock prevents
+concurrent writers. Saved source hashes and schema must match; runs created by
+the earlier script version require that original version to resume.
 
 Optional hand-constructed checks, also for the owner to run:
 
@@ -103,24 +109,34 @@ always saves its final output; t3 starts only after t2 finishes. Intermediate
 checkpoints preserve completed work and survive node loss. Checkpoint saving
 blocks computation on that worker and can itself be interrupted.
 
-| Axis | Default screen values |
+The six short settings cross two save costs with three risk conditions:
+asymmetric single-node losses, equal-risk single-node losses, and asymmetric
+losses with half the loss mass assigned to simultaneous spot loss.
+
+| Axis | Default short benchmark values |
 | --- | --- |
-| t1 compute duration | 90 or 120 modeled seconds |
+| t1 compute duration | 120 modeled seconds |
 | t2 and t3 compute duration | 60 modeled seconds each |
 | Cost of each save, including final output | 0.3 or 6 modeled seconds |
 | Safe price | 1 assumed currency unit/hour |
-| Each spot price | 0.25 or 0.75 units/hour |
-| Total scenario mass with any node loss | 0.10 or 0.50 |
-| Ratio of each spot node's single-loss weight to safe single-loss weight | 1 or 20 |
-| Share of loss mass assigned to simultaneous loss of both spot nodes | 0 or 0.50 |
-| Deadline / fastest healthy final-only completion time | 1.2, 1.5, 2.0 |
-| Required weighted deadline success | 0.90, 0.95 |
+| Each spot price | 0.25 units/hour |
+| Total scenario mass with any node loss | 0.50 |
+| (Spot-to-safe single-loss weight ratio, correlated share) | (20, 0), (1, 0), (20, 0.50) |
+| Deadline / fastest healthy final-only completion time | 1.2, 1.5 |
+| Required weighted deadline success | 0.95 |
 
 All machines have identical compute speed. Task initialization/restoration costs
 0.3 modeled seconds per attempt. Per-task interval menus are the Cartesian
-closure of the uniform rules: final-only, approximately 2/4/8 chunks per task,
+closure of the uniform rules: final-only, approximately 2/4 chunks per task,
 and common epoch intervals based on the shortest task. The three-task dispatch
 order respects t2 before t3. All 27 placements and three legal orders are allowed.
+
+The short benchmark is a narrow diagnostic, not a broad workload survey. The
+explicit extended `screen` suite also varies t1 duration (90/120), spot price
+(0.25/0.75), loss mass (0.10/0.50), and all combinations of ratio (1/20) and
+correlated share (0/0.50), at both save costs. It adds deadline 2.0, target 0.90
+and 8-chunk checkpoint rules. The `full` suite also adds t1 duration 60 and
+save fractions 0 and 0.025 (0 and 1.5 seconds per save).
 
 Loss mass is divided into correlated loss and single-node loss. Single-node
 weights are proportional to `(1, ratio, ratio)` for `(safe, spot_a, spot_b)`.

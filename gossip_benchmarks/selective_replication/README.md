@@ -12,8 +12,8 @@ the owner explicitly requests it.
 
 The [joint-planning offline screen](offline_study/JOINT_PLANNING.md) compares
 joint placement/checkpoint selection with risk-aware sequential and multistart
-alternating optimization over a predeclared synthetic grid. It is resumable and
-does not execute training or use cloud resources.
+alternating optimization. Its default is a 12-case synthetic benchmark with a
+29-minute total process limit; it does not execute training or use cloud resources.
 
 Open `gossip_benchmarks/Selective_Replication_Audit.ipynb` with your `ray-dev`
 kernel (torch, numpy, scikit-learn, matplotlib). Run cells in order. It prints the
