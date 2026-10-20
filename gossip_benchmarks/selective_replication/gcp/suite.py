@@ -16,8 +16,9 @@ POLICIES = [
 ]
 
 
-def config(epochs=2400, checkpoint_every=200, profile_repeats=2):
+def config(epochs=2400, checkpoint_every=200, profile_repeats=2, dtype="float64"):
     task = dict(
+        dtype=dtype,
         width=256,
         epochs=epochs,
         batch_size=32,

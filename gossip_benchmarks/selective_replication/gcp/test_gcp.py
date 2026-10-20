@@ -114,6 +114,7 @@ def test_threaded_remote_actor_checkpoints_cancel_and_restore(tmp_path):
     actor = TrainingActor(data)
     task = dict(
         width=16,
+        dtype="float64",
         epochs=20,
         checkpoint_every=2,
         seed=123,
@@ -165,6 +166,9 @@ def test_threaded_remote_actor_checkpoints_cancel_and_restore(tmp_path):
         == 0
     )
     assert all(e["generation"] == 2 for e in resumed)
+    start = next(e for e in resumed if e["kind"] == "start")
+    assert start["threads"] == 1 and start["dtype"] == "float64"
+    assert start["deterministic_algorithms"]
 
 
 def test_cloud_stop_uses_vm_identity_and_never_a_service_kill(tmp_path):

@@ -48,6 +48,13 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
     import torch
     from torch import nn
 
+    # Apply inside the actual training thread, including Ray's background thread.
+    torch.set_num_threads(1)
+    torch.use_deterministic_algorithms(True)
+    precision = task.get("dtype", "float32")
+    if precision not in ("float32", "float64"):
+        raise ValueError("dtype must be float32 or float64")
+    dtype = getattr(torch, precision)
     start = time.monotonic()
     if task.get("shard") is not None:
         index, count = task["shard"]
@@ -60,7 +67,7 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
         nn.Linear(width, width),
         nn.ReLU(),
         nn.Linear(width, 10),
-    )
+    ).to(dtype=dtype)
     if parents and not resume:
         # One local-SGD round: average completed shard models in stable parent
         # order, reset momentum, then fine-tune on the full training split.
@@ -81,7 +88,7 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         completed, input_history = state["epoch"], state["input_history"]
-    x, y = torch.from_numpy(data["x"]), torch.from_numpy(data["y"])
+    x, y = torch.from_numpy(data["x"]).to(dtype=dtype), torch.from_numpy(data["y"])
     init_s = time.monotonic() - start
     checkpoint_load_s = init_s if resume else 0.0
     notify(
@@ -91,6 +98,10 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
             "initialization_s": init_s,
             "restore_init_s": checkpoint_load_s,
             "parent_count": len(parents or []),
+            "dtype": precision,
+            "threads": torch.get_num_threads(),
+            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "cpu_capability": torch.backends.cpu.get_cpu_capability(),
         }
     )
     epoch_times, save_times = [], []
@@ -130,7 +141,7 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
     with torch.no_grad():
         accuracy = float(
             (
-                model(torch.from_numpy(data["test_x"])).argmax(1)
+                model(torch.from_numpy(data["test_x"]).to(dtype=dtype)).argmax(1)
                 == torch.from_numpy(data["test_y"])
             )
             .float()
@@ -143,6 +154,9 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
             epoch=task["epochs"],
             input_history=input_history,
             accuracy=accuracy,
+            dtype=precision,
+            threads=torch.get_num_threads(),
+            cpu_capability=torch.backends.cpu.get_cpu_capability(),
             init_s=init_s,
             epoch_times=epoch_times,
             save_times=save_times,
@@ -279,27 +293,34 @@ def validate_state(actual, expected, tolerance=1e-5):
     right = torch.load(expected, map_location="cpu", weights_only=True)
     maximum = 0.0
 
-    def compare(a, b):
+    def compare(a, b, path="state"):
         nonlocal maximum
         if isinstance(a, torch.Tensor):
-            if a.shape != b.shape or a.dtype != b.dtype or not torch.isfinite(a).all():
-                raise AssertionError("Invalid tensor shape, dtype, or finite state")
+            if (
+                a.shape != b.shape
+                or a.dtype != b.dtype
+                or not torch.isfinite(a).all()
+                or not torch.isfinite(b).all()
+            ):
+                raise AssertionError(
+                    f"{path}: invalid tensor shape, dtype, or finite state"
+                )
             delta = float((a - b).abs().max()) if a.numel() else 0.0
             maximum = max(maximum, delta)
             if delta > tolerance:
                 raise AssertionError(
-                    f"State error {delta} exceeds absolute {tolerance}"
+                    f"{path}: State error {delta} exceeds absolute {tolerance} ({a.dtype})"
                 )
         elif isinstance(a, dict):
             if a.keys() != b.keys():
                 raise AssertionError("State keys differ")
             for key in a:
-                compare(a[key], b[key])
+                compare(a[key], b[key], f"{path}.{key}")
         elif isinstance(a, (list, tuple)):
             if len(a) != len(b):
                 raise AssertionError("State lengths differ")
-            for x, y in zip(a, b):
-                compare(x, y)
+            for index, (x, y) in enumerate(zip(a, b)):
+                compare(x, y, f"{path}[{index}]")
         elif a != b:
             raise AssertionError("State metadata/input alignment differs")
 

@@ -36,6 +36,8 @@ class TrainingActor:
         return dict(
             node_id=ray.get_runtime_context().get_node_id(),
             hostname=os.uname().nodename,
+            cpu_capability=torch.backends.cpu.get_cpu_capability(),
+            torch_build=torch.__config__.show(),
             threads=torch.get_num_threads(),
             versions={
                 p: importlib.metadata.version(p)

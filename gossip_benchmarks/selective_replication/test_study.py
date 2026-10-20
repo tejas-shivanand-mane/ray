@@ -124,7 +124,8 @@ def test_reject_invalid_failure_models(problem, scenarios):
         search(*problem, scenarios, 10)
 
 
-def test_real_checkpoint_restores_optimizer_and_input_state(tmp_path):
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_real_checkpoint_restores_optimizer_and_input_state(tmp_path, dtype):
     import numpy as np
     import torch
     from workload import train, validate_state
@@ -139,7 +140,15 @@ def test_real_checkpoint_restores_optimizer_and_input_state(tmp_path):
         test_x=rng.normal(size=(8, 64)).astype("float32"),
         test_y=np.arange(8, dtype="int64"),
     )
-    task = dict(width=8, seed=4, lr=0.01, epochs=4, checkpoint_every=2, batch_size=8)
+    task = dict(
+        width=8,
+        seed=4,
+        lr=0.01,
+        epochs=4,
+        checkpoint_every=2,
+        batch_size=8,
+        dtype=dtype,
+    )
     events = []
     train(task, data, None, tmp_path / "healthy", events.append, lambda: False)
     full = events[-1]["path"]

@@ -98,3 +98,15 @@ image and existing network/subnet are retained. Resources remain billable until 
 
 No live GCP execution was possible in the implementation environment. The smoke
 suite is mandatory before interpreting the larger experiment.
+
+## Numerical checks
+
+`TRAIN_DTYPE="float64"` is the default for GCP training across CPUs. All policies
+use the same precision and must be profiled again after changing it. The local
+benchmark still defaults to float32. Seeds, input ordering and single-thread
+settings are applied inside the training thread. Model/optimizer tolerance stays
+at absolute 1e-5; metadata/input history must match exactly. Float64 reduces
+rounding sensitivity but does not guarantee cross-hardware equality. Profiling
+still fails closed on mismatches and writes `study/profile-failure.json` with
+the mismatched tensor path, checkpoint paths and worker build/CPU details.
+Use a new suite name after a failed profile; preserve the failed evidence.

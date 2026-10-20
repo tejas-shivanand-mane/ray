@@ -57,7 +57,27 @@ def profile(config, folder, workers_factory=Workers):
                             continue
                         observed = time.monotonic() - begin
                         reference = references.setdefault(name, event["path"])
-                        error = validate_state(event["path"], reference)
+                        try:
+                            error = validate_state(event["path"], reference)
+                        except AssertionError as exc:
+                            write_json(
+                                folder / "profile-failure.json",
+                                dict(
+                                    task=name,
+                                    machine=machine,
+                                    repeat=repeat,
+                                    actual=event["path"],
+                                    reference=reference,
+                                    error=str(exc),
+                                    workers=workers.ready,
+                                    dtype=task.get("dtype", "float32"),
+                                    result=event,
+                                ),
+                            )
+                            raise AssertionError(
+                                f"Healthy profile mismatch for {name}/{machine}/{repeat}: {exc}. "
+                                f"Diagnostics: {folder / 'profile-failure.json'}"
+                            ) from exc
                         samples[name][machine].append(
                             {**event, "observed_s": observed, "max_abs_error": error}
                         )
