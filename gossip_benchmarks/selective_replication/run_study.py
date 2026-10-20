@@ -18,7 +18,7 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
-def profile(config, folder):
+def profile(config, folder, workers_factory=Workers):
     if config["profile_repeats"] < 1:
         raise ValueError("Need at least one profiling repeat")
     folder = Path(folder).resolve()
@@ -28,7 +28,7 @@ def profile(config, folder):
     tasks = copy.deepcopy(config["tasks"])
     for task in tasks.values():
         task["dataset_sha256"] = digest
-    workers = Workers(config["machines"], data_path)
+    workers = workers_factory(config["machines"], data_path)
     samples = {t: {m: [] for m in config["machines"]} for t in tasks}
     references = {}
     try:
@@ -48,7 +48,7 @@ def profile(config, folder):
                     )
                     while True:
                         connection = workers.connections[machine]
-                        if not connection.poll(120):
+                        if not connection.poll(config.get("profile_timeout_s", 120)):
                             raise TimeoutError("Profiling trial timed out")
                         event = connection.recv()
                         if event["kind"] == "error":
@@ -65,6 +65,15 @@ def profile(config, folder):
                             f"profile {name}/{machine}/{repeat}: {observed:.3f}s accuracy={event['accuracy']:.3f}",
                             flush=True,
                         )
+                        # A remote worker can deliver its result before its
+                        # training thread has acknowledged becoming idle.
+                        while True:
+                            if not connection.poll(30):
+                                raise TimeoutError(
+                                    "Worker did not settle after profiling"
+                                )
+                            if connection.recv()["kind"] == "idle":
+                                break
                         break
     finally:
         workers.close()

@@ -56,12 +56,31 @@ class FaultInjector:
         if self.thread.is_alive():
             raise RuntimeError("Fault injector did not stop")
 
+    def verify(self, evidence):
+        for machine, record in evidence.items():
+            self.workers.processes[machine].join(timeout=2)
+            record["exitcode"] = self.workers.processes[machine].exitcode
+            if record["exitcode"] != -signal.SIGKILL:
+                raise AssertionError("Injected process did not exit with SIGKILL")
 
-def replay_once(measured, case, plan, scenario, output):
+    def observe_loss(self, machine):
+        pass
+
+
+def replay_once(
+    measured,
+    case,
+    plan,
+    scenario,
+    output,
+    workers_factory=Workers,
+    injector_factory=FaultInjector,
+    kind="measured_local_process_replay",
+):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     tasks, machines = measured["tasks"], case["machines"]
-    workers = Workers(machines, measured["data_path"])
+    workers = workers_factory(machines, measured["data_path"])
     schedule = Schedule(plan, machines, tasks)
     checkpoints, committed, starts, tokens = {}, {}, {}, {}
     blocked, cancellations, restorations, events, evidence = {}, [], [], [], {}
@@ -69,7 +88,7 @@ def replay_once(measured, case, plan, scenario, output):
     attempts = 0
     complete_at = None
     begin = time.monotonic()
-    injector = FaultInjector(workers, scenario["failures"], begin, schedule)
+    injector = injector_factory(workers, scenario["failures"], begin, schedule)
 
     def log(event):
         events.append({"elapsed_s": time.monotonic() - begin, **event})
@@ -84,7 +103,7 @@ def replay_once(measured, case, plan, scenario, output):
                 busy_times.append(
                     max(0, record["observed_s"] - work_started.pop(machine))
                 )
-            log(dict(kind="process_killed", machine=machine, **evidence[machine]))
+            log({**evidence[machine], "kind": "worker_lost", "machine": machine})
             schedule.fail(machine)
             schedule.blocked.discard(machine)
             blocked.pop(machine, None)
@@ -187,6 +206,7 @@ def replay_once(measured, case, plan, scenario, output):
                             if len(committed) == len(tasks):
                                 complete_at = time.monotonic() - begin
                 except (EOFError, BrokenPipeError):
+                    injector.observe_loss(machine)
                     # Wait for the independent injector's evidence publication.
                     if (
                         machine not in scenario["failures"]
@@ -206,11 +226,7 @@ def replay_once(measured, case, plan, scenario, output):
         settled = time.monotonic() - begin
         injector.close()
         collect_faults()
-        for machine, record in evidence.items():
-            workers.processes[machine].join(timeout=2)
-            record["exitcode"] = workers.processes[machine].exitcode
-            if record["exitcode"] != -signal.SIGKILL:
-                raise AssertionError("Injected process did not exit with SIGKILL")
+        injector.verify(evidence)
         elapsed = complete_at if complete_at is not None else settled
         # No tensor validation, file logging, or plotting in the timed loop.
         write_json(output / "events.json", events)
@@ -238,7 +254,7 @@ def replay_once(measured, case, plan, scenario, output):
         }
         result = dict(
             schema_version=2,
-            kind="measured_local_process_replay",
+            kind=kind,
             scenario=scenario,
             plan=plan,
             complete=complete,
@@ -278,5 +294,8 @@ def replay_once(measured, case, plan, scenario, output):
         write_json(output / "result.json", result)
         return result
     finally:
-        injector.close()
-        workers.close()
+        try:
+            injector.close()
+        finally:
+            write_json(output / "events.json", events)
+            workers.close()
