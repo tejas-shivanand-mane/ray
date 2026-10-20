@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import multiprocessing as mp
 import os
 import time
@@ -43,11 +44,37 @@ def prepare_data(folder, seed=123):
     return str(path.resolve()), digest
 
 
-def train(task, data, resume, folder, notify, cancelled, parents=None):
+def execution_settings(settings=None):
+    """Validate optional, explicitly artificial worker and storage pacing."""
+    settings = settings or {}
+    result = {
+        "compute_scale": float(settings.get("compute_scale", 1)),
+        "checkpoint_delay_s": float(settings.get("checkpoint_delay_s", 0)),
+    }
+    if not all(math.isfinite(v) for v in result.values()):
+        raise ValueError("Execution pacing must be finite")
+    if result["compute_scale"] < 1 or result["checkpoint_delay_s"] < 0:
+        raise ValueError("Compute scale must be >= 1 and checkpoint delay >= 0")
+    return result
+
+
+def pause(seconds, cancelled):
+    """Keep controlled delays cancellable so a losing replica can settle."""
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        if cancelled():
+            return False
+        time.sleep(min(0.02, max(0, until - time.monotonic())))
+    return not cancelled()
+
+
+def train(task, data, resume, folder, notify, cancelled, parents=None, execution=None):
     import numpy as np
     import torch
     from torch import nn
 
+    pacing = execution_settings(execution)
+    compute_pacing_s = 0.0
     # Apply inside the actual training thread, including Ray's background thread.
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
@@ -104,6 +131,7 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
             "threads": torch.get_num_threads(),
             "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
             "cpu_capability": torch.backends.cpu.get_cpu_capability(),
+            "execution_pacing": pacing,
         }
     )
     epoch_times, save_times = [], []
@@ -117,9 +145,16 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
             if cancelled():
                 return
             indices = order[offset : offset + task["batch_size"]]
+            batch_start = time.monotonic()
             optimizer.zero_grad()
             nn.functional.cross_entropy(model(x[indices]), y[indices]).backward()
             optimizer.step()
+            if pacing["compute_scale"] > 1:
+                delay = (time.monotonic() - batch_start) * (pacing["compute_scale"] - 1)
+                pacing_start = time.monotonic()
+                if not pause(delay, cancelled):
+                    return
+                compute_pacing_s += time.monotonic() - pacing_start
         input_history.append(hashlib.sha256(data["ids"][order].tobytes()).hexdigest())
         epoch_times.append(time.monotonic() - before)
         if (epoch + 1) % task["checkpoint_every"] == 0 or epoch + 1 == task["epochs"]:
@@ -137,6 +172,10 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
                 torch.save(state, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
+            if pacing["checkpoint_delay_s"] and not pause(
+                pacing["checkpoint_delay_s"], cancelled
+            ):
+                return
             temporary.replace(path)
             save_times.append(time.monotonic() - before)
             notify({"kind": "checkpoint", "epoch": epoch + 1, "path": str(path)})
@@ -163,6 +202,8 @@ def train(task, data, resume, folder, notify, cancelled, parents=None):
             epoch_times=epoch_times,
             save_times=save_times,
             training_s=time.monotonic() - start,
+            execution_pacing=pacing,
+            compute_pacing_s=compute_pacing_s,
         )
     )
 
@@ -207,6 +248,7 @@ def worker(connection, generation, data_path, cpu):
                 notify,
                 lambda: generation.value != token,
                 job.get("parents"),
+                execution=job.get("execution"),
             )
             notify({"kind": "idle"})
     except (EOFError, BrokenPipeError):
@@ -217,6 +259,13 @@ def worker(connection, generation, data_path, cpu):
 
 class Workers:
     def __init__(self, machines, data_path):
+        self.execution = {
+            m: {
+                task: execution_settings(settings)
+                for task, settings in spec.get("execution_by_task", {}).items()
+            }
+            for m, spec in machines.items()
+        }
         context = mp.get_context("spawn")
         cpus = (
             sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else []
@@ -261,6 +310,7 @@ class Workers:
                 resume=resume,
                 folder=str(folder),
                 parents=parents or [],
+                execution=self.execution[machine].get(name),
             )
         )
         return token

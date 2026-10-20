@@ -76,3 +76,9 @@ From the repository root, run
 to reproduce the synthetic selective-protection candidate and its stronger
 sequential baseline. Add `--full-sweep` for all 1,968 discovery configurations.
 The runner uses no cloud resources and has a 28-minute total execution budget.
+
+For measured two-trial training with local worker-process failures, see
+[TRAINING_EXPERIMENT.md](TRAINING_EXPERIMENT.md). Run
+`python gossip_benchmarks/selective_replication/training_experiment.py` from the
+repository root. Worker pacing is explicit; checkpoint delay defaults to zero.
+The runner saves completed observations and supports `--resume`.
