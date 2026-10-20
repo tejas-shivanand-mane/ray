@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+from gcp.capabilities import stop_command
+
 SOURCE_COMMIT = "dc4703753c8f3d52e74c389c72449dacc27b41f3"
 PYTHON = "/opt/ray-env/ray-dev/bin/python"
 ROOT = "/opt/ray-gcp"
@@ -154,6 +156,7 @@ class FreshCluster:
                 raise RuntimeError(
                     "Install " + executable + " on the notebook host first"
                 )
+        self.state["stop_command"] = stop_command()
         image = json.loads(
             self.gc(
                 "compute", "images", "describe", self.state["image"], "--format=json"

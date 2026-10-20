@@ -13,8 +13,9 @@ from pathlib import Path
 
 # Reuse only the existing ownership-checked gcloud/SSH/SCP wrappers.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "head_vm_loss"))
+from gcp.capabilities import stop_command  # noqa: E402
 from gcp.suite import assess, jobs, smoke_jobs  # noqa: E402
-from launcher import PYTHON, HeadVMLoss, parallel, run  # noqa: E402
+from launcher import PYTHON, HeadVMLoss, parallel  # noqa: E402
 from workload import write_json  # noqa: E402
 
 SHARED = "/srv/ray-gcp/selective-vm"
@@ -62,13 +63,7 @@ class GCPStudy(HeadVMLoss):
 
     def prepare(self, install_missing_dependencies=False):
         print(json.dumps(self.inventory(), indent=2), flush=True)
-        if (
-            "--no-graceful-shutdown"
-            not in run(["gcloud", "compute", "instances", "stop", "--help"]).stdout
-        ):
-            raise RuntimeError(
-                "Update gcloud: no service-kill or graceful-stop fallback is allowed"
-            )
+        self.stop_command = stop_command()
         identities = []
         for name in self.names:
             obj = self.describe(name)
@@ -163,7 +158,10 @@ class GCPStudy(HeadVMLoss):
             )
         self.identities = identities
         self.manifest = dict(
-            nodes=self.nodes, identities=identities, helper_sha256=hashes
+            nodes=self.nodes,
+            identities=identities,
+            helper_sha256=hashes,
+            stop_command=self.stop_command,
         )
         write_json(self.local / "environment.json", self.manifest)
         self.prepared = True
@@ -234,9 +232,7 @@ class GCPStudy(HeadVMLoss):
             record["instance_id"] = str(obj["id"])
             record["dispatch_unix_s"] = time.time()
             operation = self.gc(
-                "compute",
-                "instances",
-                "stop",
+                *self.stop_command,
                 name,
                 "--zone=" + self.zone,
                 "--no-graceful-shutdown",

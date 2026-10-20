@@ -172,6 +172,7 @@ def test_cloud_stop_uses_vm_identity_and_never_a_service_kill(tmp_path):
 
     cloud = object.__new__(GCPStudy)
     cloud.mapping = {"spot_a": "owned-worker"}
+    cloud.stop_command = ["compute", "instances", "stop"]
     cloud.local, cloud.zone = tmp_path, "us-central1-a"
     states = iter(
         [dict(id="123", status="RUNNING"), dict(id="123", status="TERMINATED")]
@@ -291,6 +292,9 @@ def test_fresh_cluster_never_loads_old_state_and_records_before_create(
         assert saved["provision_started"]
         return SimpleNamespace(stdout="{}")
 
+    monkeypatch.setattr(
+        provision, "stop_command", lambda: ["compute", "instances", "stop"]
+    )
     first.gc = gc
     first._check_owner = lambda name: dict(
         networkInterfaces=[dict(networkIP="10.90.0.2")]
@@ -335,3 +339,67 @@ def test_fresh_setup_installs_persistent_worker_mounts(tmp_path, monkeypatch):
     assert {name for name, command in mounts} == set(cluster.names[1:])
     assert all("10.90.0.2:/ /srv/ray-gcp nfs4" in command for name, command in mounts)
     assert all("sudo mount /srv/ray-gcp" in command for name, command in mounts)
+
+
+@pytest.mark.parametrize("formatting", ["plain", "overstrike", "stderr", "unicode"])
+def test_stop_capability_accepts_rendered_help(monkeypatch, formatting):
+    from gcp import capabilities
+
+    flag = "--no-graceful-shutdown"
+    if formatting == "overstrike":
+        flag = "".join(c + "\b" + c for c in flag)
+    if formatting == "unicode":
+        flag = flag.replace("-", "\u2010")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs["env"]["CLOUDSDK_PAGER"] == "cat"
+        return SimpleNamespace(
+            returncode=0,
+            stdout="" if formatting == "stderr" else flag,
+            stderr=flag if formatting == "stderr" else "",
+        )
+
+    monkeypatch.setattr(capabilities.subprocess, "run", run)
+    assert capabilities.stop_command() == ["compute", "instances", "stop"]
+    assert len(calls) == 1 and "--help" in calls[0]
+
+
+def test_stop_capability_beta_fallback_and_missing_support(monkeypatch):
+    from gcp import capabilities
+
+    def run(command, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="--no-graceful-shutdown" if "beta" in command else "stop help",
+            stderr="",
+        )
+
+    monkeypatch.setattr(capabilities.subprocess, "run", run)
+    assert capabilities.stop_command() == ["beta", "compute", "instances", "stop"]
+    monkeypatch.setattr(
+        capabilities.subprocess,
+        "run",
+        lambda *a, **kw: SimpleNamespace(
+            returncode=1, stdout="", stderr="missing component"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="missing component"):
+        capabilities.stop_command()
+
+
+def test_preflight_failure_does_not_create_resources(tmp_path, monkeypatch):
+    from gcp import provision
+
+    cluster = provision.FreshCluster(workdir=tmp_path)
+    monkeypatch.setattr(provision.shutil, "which", lambda name: "/bin/" + name)
+
+    def unavailable():
+        raise RuntimeError("unsupported CLI")
+
+    monkeypatch.setattr(provision, "stop_command", unavailable)
+    cluster.gc = lambda *a, **kw: pytest.fail("Cloud creation must not be attempted")
+    with pytest.raises(RuntimeError, match="unsupported CLI"):
+        cluster.provision()
+    assert not cluster.state.get("provision_started")

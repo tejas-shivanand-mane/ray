@@ -8,7 +8,11 @@ Edit project, zone and image in the first cell. The notebook host needs authenti
 gcloud and SSH tools and must stay awake. Training uses
 `/opt/ray-env/ray-dev/bin/python` on the guests. Visible `provision.py` and
 `bootstrap/` helpers establish the dedicated user, node controller and head-hosted
-NFS. Worker mounts persist across the VM stop/start cycles.
+NFS. Worker mounts persist across the VM stop/start cycles. Before allocation, a read-only
+CLI check selects stable or beta `compute instances stop` with
+`--no-graceful-shutdown`, handling terminal-formatted help. Preparation repeats
+that check and records the selected command. Unsupported hosts must update their
+Google Cloud CLI; no ordinary-stop fallback is used.
 Rerunning the settings cell keeps the current session's cluster object; restart
 the kernel for a new cluster. A partial provisioning failure is not silently
 retried: keep the printed state file to inspect/clean up the recorded resources.
@@ -37,7 +41,10 @@ checkpoints. Keep the smoke workload long enough that a VM stop can hit training
   w1/w2/w3: one training actor each; w4 remains idle and unavailable to the scheduler.
 - Notebook host: independent cloud fault supervisor. GCP `instances stop
   --no-graceful-shutdown` targets only recorded, label- and ID-checked worker VMs.
-  A failed VM stays stopped through completion and validation; its local disk is
+  This bypasses GCP's optional graceful-shutdown period; it does not independently
+  establish that the guest received no OS shutdown notification. The experiment
+  establishes recovery from a stopped, unavailable VM, not an instantaneous
+  power-cut model. A failed VM stays stopped through completion and validation; its local disk is
   never consulted during recovery. Only between observations is it restarted.
 - Recovery begins after cloud `TERMINATED` evidence reaches the controller. Actor
   loss observations, request handoff, stop/confirmation duration and dispatch
