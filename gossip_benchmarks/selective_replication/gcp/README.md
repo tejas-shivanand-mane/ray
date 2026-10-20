@@ -74,3 +74,11 @@ cells, and run focused preparation/execution. The runner accepts
 Correctness and fault-verification checks remain enabled; smoke-specific active
 failure/restoration coverage is reported but does not gate validity. The summary
 explicitly records `smoke_skipped=true`. This does not claim smoke was passed.
+
+Read-only result polling retries SSH exit 255 and timeouts up to four attempts
+with bounded backoff. Successful rows record `supervisor_transport_retries` so
+communication delays are visible. Remote program errors are not retried, and
+mutation commands are not automatically replayed. Before archiving an interrupted
+attempt, all experiment Ray services are stopped to fence surviving training
+actors. A retry uses a fresh output-directory suffix while retaining the logical
+matrix ID; prior retry records and remote evidence remain archived.

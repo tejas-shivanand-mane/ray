@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shlex
+import subprocess
 import sys
 import tarfile
 import time
@@ -52,8 +53,35 @@ class GCPStudy(HeadVMLoss):
             "/tmp/ray-selective-transfer.json " + shlex.quote(remote),
         )
 
+    def read_ssh(self, name, command, **kwargs):
+        """Retry read-only SSH queries; never replay a mutation after a timeout."""
+        for attempt in range(4):
+            try:
+                result = self.ssh(name, command, check=False, **kwargs)
+                if result.returncode == 0:
+                    return result
+                if result.returncode != 255:
+                    raise RuntimeError(
+                        f"Remote read failed ({result.returncode}): {result.stderr} {result.stdout}"
+                    )
+                error = result.stderr
+            except subprocess.TimeoutExpired as exc:
+                error = str(exc)
+            event = dict(
+                unix_s=time.time(), host=name, attempt=attempt + 1, error=error
+            )
+            if not hasattr(self, "transport_retries"):
+                self.transport_retries = []
+            self.transport_retries.append(event)
+            print(
+                f"SSH read interrupted on {name}; attempt {attempt + 1}/4", flush=True
+            )
+            if attempt < 3:
+                time.sleep(2 ** (attempt + 1))
+        raise RuntimeError("SSH read unavailable after four attempts: " + error)
+
     def get(self, remote):
-        return json.loads(self.ssh(self.head, "cat " + shlex.quote(remote)).stdout)
+        return json.loads(self.read_ssh(self.head, "cat " + shlex.quote(remote)).stdout)
 
     def driver_state(self):
         """An SSH error is not evidence that the controller has exited."""
@@ -105,27 +133,35 @@ class GCPStudy(HeadVMLoss):
                 raise RuntimeError(
                     "Remote attempt succeeded; collect its result instead of repeating it"
                 )
-            archive = (
-                SHARED
-                + "/"
-                + name
-                + "/interrupted-"
-                + job_id
-                + "-"
-                + str(time.time_ns())
+            for vm in self.names:
+                state = self.describe(vm)["status"]
+                if state == "RUNNING":
+                    self.node(vm, "stop")
+                elif state != "TERMINATED":
+                    raise RuntimeError("Cannot fence worker in state " + state)
+            token = str(time.time_ns())
+            retry_file = local / (job_id + "-retry.json")
+            previous = json.loads(retry_file.read_text()) if retry_file.exists() else {}
+            archive = SHARED + "/" + name + "/interrupted-" + job_id + "-" + token
+            output = (
+                SHARED + "/" + name + "/study/" + previous.get("output_name", job_id)
             )
-            output = SHARED + "/" + name + "/study/" + job_id
             self.ssh(
                 self.head,
                 f"set -e\nsudo -u raybench mkdir {archive}\n"
                 f"sudo -u raybench mv {control} {archive}/control\n"
                 f"if test -d {output}; then sudo -u raybench mv {output} {archive}/output; fi",
             )
+            if previous:
+                write_json(
+                    local / (job_id + "-retry-history-" + token + ".json"), previous
+                )
             write_json(
-                local / (job_id + "-retry.json"),
+                retry_file,
                 dict(
                     job_id=job_id,
                     archived=archive,
+                    output_name=job_id + "-retry-" + token,
                     reason="Explicit retry after interrupted controller; original evidence retained",
                 ),
             )
@@ -416,6 +452,7 @@ class GCPStudy(HeadVMLoss):
         ]
         self.ssh(self.head, shlex.join(command))
         pending, sent = {}, set()
+        self.transport_retries = []
         timeout = request.get("case", {}).get("horizon_s", 21600) + 900
         deadline = time.monotonic() + timeout
         read_code = (
@@ -426,7 +463,7 @@ class GCPStudy(HeadVMLoss):
         with ThreadPoolExecutor(max_workers=2) as executor:
             while True:
                 files = json.loads(
-                    self.ssh(
+                    self.read_ssh(
                         self.head, PYTHON + " -c " + shlex.quote(read_code), timeout=60
                     ).stdout
                 )
@@ -451,7 +488,12 @@ class GCPStudy(HeadVMLoss):
                         )
                     if not status["ok"]:
                         raise RuntimeError(status["traceback"])
-                    return files.get("result.json")
+                    result = files.get("result.json")
+                    if isinstance(result, dict):
+                        result["supervisor_transport_retries"] = list(
+                            self.transport_retries
+                        )
+                    return result
                 if time.monotonic() > deadline:
                     raise TimeoutError(
                         "Controller exceeded observation limit; inspect service journal"
@@ -461,7 +503,7 @@ class GCPStudy(HeadVMLoss):
                     time.sleep(1)
                     status_path = shlex.quote(control + "/status.json")
                     final = json.loads(
-                        self.ssh(
+                        self.read_ssh(
                             self.head,
                             f"if test -f {status_path}; then cat {status_path}; else printf null; fi",
                         ).stdout
@@ -584,6 +626,13 @@ class GCPStudy(HeadVMLoss):
                     raise RuntimeError(
                         "Interrupted observation: download evidence; use a new suite name"
                     )
+                retry_file = local / (job["id"] + "-retry.json")
+                retry = (
+                    json.loads(retry_file.read_text()) if retry_file.exists() else {}
+                )
+                output_name = retry.get("output_name", job["id"])
+                if not re.fullmatch(r"run-[0-9]+(?:-retry-[0-9]+)?", output_name):
+                    raise ValueError("Invalid retry output directory")
                 before = time.monotonic()
                 self.reset()
                 row = self.execute(
@@ -591,11 +640,12 @@ class GCPStudy(HeadVMLoss):
                         action="replay",
                         folder=root + "/study",
                         control=control,
-                        output=root + "/study/" + job["id"],
+                        output=root + "/study/" + output_name,
                         **job,
                     )
                 )
                 row.update(
+                    retry=retry or None,
                     case_index=job["case_index"],
                     policies=job["policies"],
                     repeat=job["repeat"],

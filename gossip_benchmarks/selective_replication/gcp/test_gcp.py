@@ -511,6 +511,10 @@ def test_archive_interrupted_moves_evidence_without_deleting(tmp_path):
     cloud.local, cloud.head = tmp_path, "head"
     (tmp_path / "full-01").mkdir()
     cloud.driver_state = lambda: "inactive"
+    cloud.names = ["head", "worker"]
+    cloud.describe = lambda name: dict(status="RUNNING")
+    fenced = []
+    cloud.node = lambda name, action: fenced.append((name, action))
     commands = []
 
     def ssh(name, command, **kwargs):
@@ -520,9 +524,11 @@ def test_archive_interrupted_moves_evidence_without_deleting(tmp_path):
     cloud.ssh = ssh
     archived = cloud.archive_interrupted("full-01", "run-0030")
     assert "interrupted-run-0030-" in archived
+    assert fenced == [("head", "stop"), ("worker", "stop")]
     assert any("mv /srv/ray-gcp/selective-vm/full-01/run-0030" in c for c in commands)
     assert all("rm -" not in c for c in commands)
-    assert (tmp_path / "full-01/run-0030-retry.json").exists()
+    retry = json.loads((tmp_path / "full-01/run-0030-retry.json").read_text())
+    assert retry["output_name"].startswith("run-0030-retry-")
 
 
 def test_explicit_smoke_skip_preserves_correctness_checks(tmp_path):
@@ -564,3 +570,39 @@ def test_explicit_smoke_skip_preserves_correctness_checks(tmp_path):
     assert not cloud.run_suite("focused", plan, skip_smoke=True)["valid"]
     with pytest.raises(ValueError, match="not both"):
         cloud.run_suite("focused", plan, smoke_gate="smoke", skip_smoke=True)
+
+
+def test_read_poll_retries_iap_and_timeout_but_not_remote_errors(monkeypatch):
+    import subprocess
+
+    from gcp import launcher
+
+    cloud = object.__new__(launcher.GCPStudy)
+    responses = iter(
+        [
+            SimpleNamespace(returncode=255, stdout="", stderr="4003 failed to connect"),
+            subprocess.TimeoutExpired("ssh", 60),
+            SimpleNamespace(returncode=0, stdout="{}", stderr=""),
+        ]
+    )
+
+    def ssh(*args, **kw):
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    cloud.ssh = ssh
+    monkeypatch.setattr(launcher.time, "sleep", lambda seconds: None)
+    assert cloud.read_ssh("head", "read-only").stdout == "{}"
+    assert len(cloud.transport_retries) == 2
+    cloud.ssh = lambda *a, **kw: SimpleNamespace(
+        returncode=1, stdout="", stderr="bad file"
+    )
+    with pytest.raises(RuntimeError, match="Remote read failed"):
+        cloud.read_ssh("head", "read-only")
+    cloud.ssh = lambda *a, **kw: SimpleNamespace(
+        returncode=255, stdout="", stderr="IAP"
+    )
+    with pytest.raises(RuntimeError, match="four attempts"):
+        cloud.read_ssh("head", "read-only")
