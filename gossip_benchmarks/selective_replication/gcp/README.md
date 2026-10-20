@@ -4,18 +4,19 @@ Open `../../Selective_Replication_GCP.ipynb`. It imports visible Python files;
 the original GCP and local notebooks are unchanged. Each new notebook session
 creates a fresh five-VM cluster from `ray-built-v1`, with a unique state file and
 isolated network. No old instances or state files are required or auto-reused.
-Edit project, zone and image in the first cell. The notebook host needs authenticated
-gcloud and SSH tools and must stay awake. Training uses
-`/opt/ray-env/ray-dev/bin/python` on the guests. Visible `provision.py` and
-`bootstrap/` helpers establish the dedicated user, node controller and head-hosted
-NFS. Worker mounts persist across the VM stop/start cycles. Before allocation, a read-only
-CLI check selects stable or beta `compute instances stop` with
-`--no-graceful-shutdown`, handling terminal-formatted help. Preparation repeats
-that check and records the selected command. Unsupported hosts must update their
-Google Cloud CLI; no ordinary-stop fallback is used.
-Rerunning the settings cell keeps the current session's cluster object; restart
-the kernel for a new cluster. A partial provisioning failure is not silently
-retried: keep the printed state file to inspect/clean up the recorded resources.
+Edit project, zone, image, machine type and experiment sizes in the first cell.
+The notebook shows the actual gcloud create/SSH/SCP/NFS/delete commands in ordinary
+functions and loops; no provisioning class or original-notebook setup is needed.
+The small `node_control.py` helper starts/stops Ray, while `GCPStudy` retains the
+training, fault injection and correctness logic. The notebook host needs
+authenticated gcloud and SSH tools and must stay awake. Guests use
+`/opt/ray-env/ray-dev/bin/python`. No Ray rebuild is needed.
+A read-only CLI check selects stable or beta `compute instances stop` with
+`--no-graceful-shutdown` before allocation. Worker NFS mounts persist across stops.
+Names stay fixed if cells are rerun in one kernel; a new kernel creates new names.
+A partial create leaves its state file for inspection/cleanup rather than silently
+allocating another cluster. `provision.py` remains available for older notebook
+sessions; the simplified notebook does not call it.
 The editable dependency-install switch installs `scikit-learn==1.7.2` only when
 missing, in the guest virtual environments. Package equality is checked across
 all five VMs. No system Python is modified.
@@ -32,8 +33,8 @@ healthy + early/late single/correlated failures and two held-out failure scenari
 with five randomized repetitions. Identical plans within a case share runs.
 There can be up to 1,800 observations. Preview the count and conservative runtime
 limit before running; reducing editable settings also reduces claim scope.
-The checkpoint-interval sensitivity cell repeats the matrix with less frequent
-checkpoints. Keep the smoke workload long enough that a VM stop can hit training.
+To test checkpoint sensitivity, change `FULL_CHECKPOINT_EVERY` and use a new
+`FULL` suite name before profiling/replaying the same matrix. Keep the smoke workload long enough that a VM stop can hit training.
 
 ## Contract
 
@@ -70,7 +71,8 @@ checkpoints. Keep the smoke workload long enough that a VM stop can hit training
 
 ## Results and interruption
 
-Results live in `ray_gcp_results/selective-vm/<run-id>/<suite>` locally and
+Cluster metadata lives in `ray_gcp_results/<run-id>/state.json`. Results live in
+`ray_gcp_results/selective-vm/<run-id>/<suite>` locally and
 `/srv/ray-gcp/selective-vm/<suite>` on the head. Send `profile.json`, `search.json`,
 `jobs.json`, `replay.json`, `summary.json` and `manifest.json` for analysis.
 `download(name)` additionally collects checkpoint/event/control evidence; it may
