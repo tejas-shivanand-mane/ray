@@ -36,6 +36,8 @@ POLICIES = (
     "risk_aware_sequential",
     "joint_checkpoint",
 )
+MATCHED_POLICIES = ("matched_restart", "matched_uniform", "matched_selective")
+MECHANISM_POLICIES = (*MATCHED_POLICIES, "uniform_checkpoint")
 METRICS = ("elapsed_s", "worker_busy_s", "assumed_cost", "met_deadline")
 
 
@@ -54,25 +56,63 @@ def sources():
 
 
 def configuration(args):
-    target = args.target_seconds if args.target_seconds is not None else 2.0
+    design = getattr(args, "design", None) or "original"
+    asymmetric = design == "asymmetric"
+    target = args.target_seconds
+    if target is None:
+        target = 6.0 if asymmetric else 2.0
     repeats = args.repeats if args.repeats is not None else 3
     if not math.isfinite(target) or target <= 0 or repeats < 1:
         raise ValueError("Target seconds must be positive and finite; repeats >= 1")
     smoke = bool(args.smoke)
+    delay = getattr(args, "checkpoint_delay_s", None)
+    if delay is None:
+        delay = 0.5 if asymmetric else target * 0.15
+    if not math.isfinite(delay) or delay < 0:
+        raise ValueError("Checkpoint delay must be finite and nonnegative")
+    scope = getattr(args, "comparison", None) or ("mechanism" if asymmetric else "all")
+    if scope == "mechanism" and not asymmetric:
+        raise ValueError("The mechanism comparison requires --design asymmetric")
+    presets = list(PRESETS) if args.preset == "all" else [args.preset]
+    if args.preset is None:
+        presets = ["native", "storage"] if asymmetric else list(PRESETS)
     return dict(
-        schema_version=2,
-        presets=list(PRESETS) if args.preset in (None, "all") else [args.preset],
+        schema_version=3,
+        design=design,
+        comparison_scope=scope,
+        reference_policy="matched_selective"
+        if scope == "mechanism"
+        else "joint_checkpoint",
+        replayed_policies=list(MECHANISM_POLICIES)
+        if scope == "mechanism"
+        else list(
+            (*POLICIES, *MATCHED_POLICIES) if asymmetric else POLICIES
+        ),
+        presets=presets,
         target_seconds=0.12 if smoke else target,
+        # Smoke uses a small explicit latency; real-run delay is independent
+        # of --target-seconds in the asymmetric design.
+        checkpoint_delay_s=0.018 if smoke else delay,
         repeats=1 if smoke else repeats,
         profile_repeats=1 if smoke else 2,
         smoke=smoke,
-        width=16 if smoke else 128,
+        width=16 if smoke else (256 if asymmetric else 128),
         source_hashes=sources(),
         success_target=0.95,
-        deadline_multipliers=[1.25, 1.5, 2.0],
-        replay_deadline_multiplier=1.5,
-        planning_fractions=[0.2, 0.5, 0.8, 1.1],
-        replay_fractions=[0.35, 0.65, 1.05],
+        deadline_multipliers=[1.2, 1.5, 2.0] if asymmetric else [1.25, 1.5, 2.0],
+        replay_deadline_multiplier=1.2 if asymmetric else 1.5,
+        planning_fractions=[0.8, 1.1] if asymmetric else [0.2, 0.5, 0.8, 1.1],
+        replay_fractions=[1.05] if asymmetric else [0.35, 0.65, 1.05],
+        risk_planning_fractions=[0.25, 0.55, 0.85] if asymmetric else [],
+        risk_replay_fractions=[0.4, 0.8, 0.95] if asymmetric else [],
+        failure_weights={
+            "native": [0.005, 0.24, 0.24, 0.015],
+            "storage": [0.005, 0.24, 0.24, 0.015],
+            "homogeneous": [0.15, 0.15, 0.15, 0.05],
+            "correlated": [0.005, 0.0725, 0.0725, 0.35],
+        }
+        if asymmetric
+        else {},
         limitations=[
             "Real deterministic digits MLP training, with a sequential fine-tuning dependency; not distributed SGD, Ray, or TorchFT.",
             "SIGKILL of local CPU workers; input data, controller and checkpoint storage survive. This is not VM/storage failure.",
@@ -85,14 +125,30 @@ def configuration(args):
             "Final task outputs are always durable. Selectivity concerns intermediate model/optimizer/progress checkpoints, not permission to recover.",
             "Time excludes common warm-pool startup and post-run validation, includes task initialization, checkpoint writes and recovery.",
             "Weighted deadline fractions are scenario summaries, not empirical reliability guarantees. Repeats quantify timing variation only.",
+            "The asymmetric design deliberately supplies a shorter risky branch and a longer reliable branch. A win is conditional on that workload structure.",
+            "Mechanism comparisons hold placement and dispatch order fixed; optimized uniform placement is also replayed. Joint-planning claims require the all comparison.",
         ],
     )
 
 
+def checkpoint_delay(config, preset):
+    if preset == "native":
+        return 0.0
+    return config.get("checkpoint_delay_s", config["target_seconds"] * 0.15)
+
+
+def epoch_counts(config, unit):
+    if config.get("design") == "asymmetric":
+        # A 3:2:2 ratio leaves roughly one quarter of the serial branch's compute
+        # duration available for t1 checkpoint/recovery work.
+        half = math.ceil(unit / 2)
+        return dict(t1=3 * half, t2=2 * half, t3=2 * half)
+    return dict(t1=2 * unit, t2=unit, t3=unit)
+
+
 def case_config(config, preset, tasks):
-    # Controlled checkpoint latency is tied to workload scale and applied to
-    # every save, including mandatory final saves and profiling.
-    delay = 0.0 if preset == "native" else config["target_seconds"] * 0.15
+    # Apply the same configured latency to every save, including final outputs.
+    delay = checkpoint_delay(config, preset)
     return dict(
         tasks=tasks,
         final_tasks=["t1", "t3"],
@@ -129,24 +185,32 @@ def calibrate(root, config):
     pilot_config["machines"] = {"safe": pilot_config["machines"]["safe"]}
     pilot_config["profile_repeats"] = 1
     pilot = profile(pilot_config, root / f"pilot-{uuid4().hex[:8]}")
-    # Same architecture, batch count and epochs per unit across every task and
-    # preset. t1 is twice as long as either task in the sequential branch.
+    # Same architecture and batches across tasks and presets. Epoch counts
+    # establish the predeclared branch-duration ratio before any planning.
     epoch_s = statistics.median(pilot["estimates"][t]["safe"]["epoch_s"] for t in tasks)
     unit = max(8, min(2000, math.ceil(config["target_seconds"] / epoch_s)))
+    counts = epoch_counts(config, unit)
     for name, task in tasks.items():
-        task.update(epochs=unit * (2 if name == "t1" else 1))
+        task.update(epochs=counts[name])
         task["checkpoint_every"] = max(1, unit // 4)
     write_json(root / "calibration.json", dict(tasks=tasks, epoch_s=epoch_s))
 
 
-def failure_scenarios(preset, fractions, window):
+def failure_scenarios(preset, fractions, window, weights=None):
     # The total probability of any failure is held at 0.5 in all presets.
-    weights = {
+    default_weights = {
         "native": (0.01, 0.22, 0.22, 0.05),
         "storage": (0.01, 0.22, 0.22, 0.05),
         "homogeneous": (0.15, 0.15, 0.15, 0.05),
         "correlated": (0.01, 0.07, 0.07, 0.35),
     }[preset]
+    weights = default_weights if weights is None else weights
+    if (
+        len(weights) != 4
+        or any(not math.isfinite(w) or w < 0 for w in weights)
+        or not math.isclose(sum(weights), 0.5, abs_tol=1e-12)
+    ):
+        raise ValueError("Four nonnegative failure weights must sum to 0.5")
     rows = [dict(name="healthy", probability=0.5, failures={})]
     for label, nodes, probability in zip(
         ("safe", "spot_a", "spot_b", "correlated"),
@@ -156,12 +220,34 @@ def failure_scenarios(preset, fractions, window):
         for fraction in fractions:
             rows.append(
                 dict(
-                    name=f"{label}-{fraction:g}",
+                    name=f"{label}-{fraction:.12g}",
                     probability=probability / len(fractions),
                     failures=dict.fromkeys(nodes, window * fraction),
                 )
             )
     return rows
+
+
+def failure_timing(config, measured, window):
+    result = dict(reference_s=window)
+    risk_reference = None
+    if config.get("design") == "asymmetric":
+        p = measured["estimates"]["t1"]["spot_a"]
+        risk_reference = (
+            p["init_s"]
+            + measured["tasks"]["t1"]["epochs"] * p["epoch_s"]
+            + p["save_s"]
+        )
+        result["risk_reference_s"] = risk_reference
+    for phase in ("planning", "replay"):
+        fractions = list(config[f"{phase}_fractions"])
+        if risk_reference is not None:
+            fractions += [
+                f * risk_reference / window
+                for f in config[f"risk_{phase}_fractions"]
+            ]
+        result[f"{phase}_fractions"] = sorted(set(fractions))
+    return result
 
 
 def menus(tasks):
@@ -235,8 +321,10 @@ def plan_case(root, config, preset):
     best_nominal = min(nominal)
     window = best_nominal[0]
     fixed_copies = best_nominal[3]["copies"]
-    planning = failure_scenarios(preset, config["planning_fractions"], window)
-    replay = failure_scenarios(preset, config["replay_fractions"], window)
+    weights = config.get("failure_weights", {}).get(preset)
+    timing = failure_timing(config, measured, window)
+    planning = failure_scenarios(preset, timing["planning_fractions"], window, weights)
+    replay = failure_scenarios(preset, timing["replay_fractions"], window, weights)
     horizon = max(30.0, window * 8)
     rows = []
     # Simulate each plan once, then evaluate all predeclared deadlines against
@@ -292,8 +380,25 @@ def plan_case(root, config, preset):
             for r in candidates
             if r["plan"]["copies"] == uniform_best["plan"]["copies"]
         ]
+        if config.get("design") == "asymmetric":
+            matched = [
+                r
+                for r in candidates
+                if r["plan"]["copies"]
+                == {"t1": ["spot_a"], "t2": ["safe"], "t3": ["safe"]}
+                and tuple(r["plan"]["order"]) == ("t1", "t2", "t3")
+            ]
+            groups["matched_restart"] = [
+                r for r in matched if r["plan"]["checkpoint_every"] == final
+            ]
+            groups["matched_uniform"] = [
+                r
+                for r in matched
+                if fingerprint(r["plan"]["checkpoint_every"]) in uniform_keys
+            ]
+            groups["matched_selective"] = matched
         policies = {}
-        for name in POLICIES:
+        for name in groups:
             best, feasible = select(groups[name], config["success_target"])
             policies[name] = dict(row=best, feasible=feasible)
         deadline_cases.append(
@@ -314,6 +419,8 @@ def plan_case(root, config, preset):
     )
     plans = {}
     for name, entry in chosen["policies"].items():
+        if name not in config.get("replayed_policies", POLICIES):
+            continue
         plan = entry["row"]["plan"]
         key = fingerprint(plan)
         record = plans.setdefault(
@@ -341,11 +448,17 @@ def plan_case(root, config, preset):
         window_s=window,
         scenarios=replay,
         planning_scenarios=planning,
+        failure_timing=timing,
         choices=choices,
         uniform_choices=uniform,
         enumerated_plans=len(rows),
         nominal_plan=best_nominal[3],
-        selection_rule="Fixed 1.5x healthy reference deadline; minimize expected elapsed time, then cost. No replay-driven selection.",
+        selection_rule=(
+            f"Fixed {config['replay_deadline_multiplier']}x healthy reference deadline; "
+            "minimize expected elapsed time, then cost. No replay-driven selection."
+        ),
+        reference_policy=config.get("reference_policy", "joint_checkpoint"),
+        replayed_policies=config.get("replayed_policies", list(POLICIES)),
     )
     write_json(root / preset / "search.json", result)
     print(
@@ -521,12 +634,13 @@ def report_case(root, config, preset):
                 **row,
                 "modeled_feasible": entry["modeled_feasible"][name],
             }
+    reference = config.get("reference_policy", "joint_checkpoint")
     comparisons = {}
     if all(r["complete"] for r in policies.values()):
         comparisons = {
-            name: comparison(policies["joint_checkpoint"], row, config)
+            name: comparison(policies[reference], row, config)
             for name, row in policies.items()
-            if name != "joint_checkpoint"
+            if name != reference
         }
     result = dict(
         preset=preset,
@@ -534,10 +648,10 @@ def report_case(root, config, preset):
         completed_observations=len(available),
         expected_observations=len(search["jobs"]),
         policies=policies,
-        joint_comparisons=comparisons,
-        artificial_checkpoint_delay_s=0
-        if preset == "native"
-        else config["target_seconds"] * 0.15,
+        reference_policy=reference,
+        comparisons=comparisons,
+        joint_comparisons=comparisons if reference == "joint_checkpoint" else {},
+        artificial_checkpoint_delay_s=checkpoint_delay(config, preset),
         limitations=config["limitations"],
         smoke=config["smoke"],
     )
@@ -558,7 +672,7 @@ def report_case(root, config, preset):
         lines.append(
             f"| {name} | {v['elapsed_s']:.3f} | {v['worker_busy_s']:.3f} | {v['assumed_cost']:.6f} | {v['met_deadline']:.4f} | {row['active_faults']} | {row['restored_attempts']} |"
         )
-    lines += ["", "Joint versus each baseline:", ""]
+    lines += ["", f"{reference} versus each baseline:", ""]
     for name, row in comparisons.items():
         lines.append(
             f"- {name}: {row['verdict']}; elapsed gain {100 * row['elapsed_gain_fraction']:.2f}%."
@@ -631,6 +745,9 @@ def main():
     location.add_argument("--output", type=Path)
     location.add_argument("--resume", type=Path)
     parser.add_argument("--preset", choices=("all", *PRESETS))
+    parser.add_argument("--design", choices=("original", "asymmetric"))
+    parser.add_argument("--comparison", choices=("mechanism", "all"))
+    parser.add_argument("--checkpoint-delay-s", type=float)
     parser.add_argument("--smoke", action="store_true", default=None)
     parser.add_argument("--target-seconds", type=float)
     parser.add_argument("--repeats", type=int)
@@ -653,7 +770,15 @@ def main():
     if args.resume:
         if any(
             getattr(args, k) is not None
-            for k in ("preset", "smoke", "target_seconds", "repeats")
+            for k in (
+                "preset",
+                "smoke",
+                "target_seconds",
+                "repeats",
+                "design",
+                "comparison",
+                "checkpoint_delay_s",
+            )
         ):
             parser.error("Resume uses saved settings; only --max-minutes may change")
         root = args.resume.resolve()

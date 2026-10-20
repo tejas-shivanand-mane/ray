@@ -1,5 +1,11 @@
 # Selective state protection: measured DAG experiment
 
+For the newer hypothesis with a shorter risky branch, a longer reliable branch,
+and independently configured checkpoint latency, see
+[ASYMMETRIC_STATE_EXPERIMENT.md](ASYMMETRIC_STATE_EXPERIMENT.md).
+The commands below describe the original design unless `--design asymmetric`
+is explicitly supplied.
+
 This tests the professor's `t1 || (t2; t3)` idea using intermediate checkpoints
 instead of redundant task execution. It asks two separate questions:
 

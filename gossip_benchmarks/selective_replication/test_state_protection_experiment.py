@@ -14,6 +14,14 @@ def config():
     )
 
 
+def asymmetric_config(**overrides):
+    options = dict(
+        target_seconds=None, repeats=1, smoke=False, preset=None,
+        design="asymmetric", comparison=None, checkpoint_delay_s=None,
+    )
+    return study.configuration(argparse.Namespace(**{**options, **overrides}))
+
+
 @pytest.mark.parametrize("preset", study.PRESETS)
 def test_failure_distribution_and_held_out_times(preset):
     planning = study.failure_scenarios(preset, [0.2, 0.5, 0.8], 10)
@@ -71,10 +79,13 @@ def test_no_speed_claim_for_reliability_loss_or_reused_plan():
     )
 
 
-def test_small_search_has_nested_baselines_and_frozen_replay(tmp_path):
+@pytest.mark.parametrize("design", ["original", "asymmetric"])
+def test_small_search_has_nested_baselines_and_frozen_replay(tmp_path, design):
+    c = config() if design == "original" else asymmetric_config()
+    counts = study.epoch_counts(c, 8)
     tasks = {
         name: dict(
-            epochs=16 if name == "t1" else 8,
+            epochs=counts[name],
             checkpoint_every=2,
             depends_on=["t2"] if name == "t3" else [],
         )
@@ -94,10 +105,12 @@ def test_small_search_has_nested_baselines_and_frozen_replay(tmp_path):
         folder / "profile.json",
         dict(tasks=tasks, machines=machines, estimates=estimates),
     )
-    study.plan_case(tmp_path, config(), "native")
+    study.plan_case(tmp_path, c, "native")
     search = study.read(folder / "search.json")
-    assert [c["multiplier"] for c in search["deadline_cases"]] == [1.25, 1.5, 2.0]
-    assert search["case"]["deadline_s"] == pytest.approx(1.5 * search["window_s"])
+    assert [entry["multiplier"] for entry in search["deadline_cases"]] == c["deadline_multipliers"]
+    assert search["case"]["deadline_s"] == pytest.approx(
+        c["replay_deadline_multiplier"] * search["window_s"]
+    )
     uniform, choices = study.menus(tasks)
     for intervals in uniform:
         assert all(intervals[t] in choices[t] for t in tasks)
@@ -113,6 +126,16 @@ def test_small_search_has_nested_baselines_and_frozen_replay(tmp_path):
     for entry in search["plans"].values():
         assert all(len(ms) == 1 for ms in entry["plan"]["copies"].values())
         assert entry["plan"]["order"].index("t2") < entry["plan"]["order"].index("t3")
+        if any(name in study.MATCHED_POLICIES for name in entry["policies"]):
+            assert entry["plan"]["copies"] == {
+                "t1": ["spot_a"], "t2": ["safe"], "t3": ["safe"]
+            }
+            assert entry["plan"]["order"] == ["t1", "t2", "t3"]
+    if design == "asymmetric":
+        assert {
+            name for entry in search["plans"].values() for name in entry["policies"]
+        } == set(study.MECHANISM_POLICIES)
+        assert search["reference_policy"] == "matched_selective"
     schedules = []
     for plan_id in search["plans"]:
         schedules.append(
@@ -178,3 +201,35 @@ def test_default_late_faults_and_protected_task_coverage():
         study.summarize_records([record], 1)["protection_exposure"]
         == "no_intermediate_checkpoints"
     )
+
+
+def test_asymmetric_compute_and_checkpoint_cost_are_independent():
+    small = asymmetric_config(target_seconds=6)
+    large = asymmetric_config(target_seconds=12)
+    assert study.checkpoint_delay(small, "storage") == 0.5
+    assert study.checkpoint_delay(large, "storage") == 0.5
+    assert study.checkpoint_delay(small, "native") == 0
+    assert study.epoch_counts(small, 6) == dict(t1=9, t2=6, t3=6)
+    assert small["presets"] == ["native", "storage"]
+    assert small["width"] == 256
+    for preset in study.PRESETS:
+        rows = study.failure_scenarios(
+            preset, [0.3, 0.7], 10, small["failure_weights"][preset]
+        )
+        assert sum(r["probability"] for r in rows) == pytest.approx(1)
+    with pytest.raises(ValueError):
+        asymmetric_config(checkpoint_delay_s=-1)
+
+
+def test_risky_task_has_its_own_shared_held_out_failure_clock():
+    c = asymmetric_config()
+    measured = dict(
+        tasks={"t1": dict(epochs=9)},
+        estimates={"t1": {"spot_a": dict(init_s=0, epoch_s=1, save_s=0.5)}},
+    )
+    timing = study.failure_timing(c, measured, 13)
+    assert timing["risk_reference_s"] == 9.5
+    replay_times = [f * 13 for f in timing["replay_fractions"]]
+    assert replay_times == pytest.approx([3.8, 7.6, 9.025, 13.65])
+    assert set(timing["replay_fractions"]).isdisjoint(timing["planning_fractions"])
+    assert study.failure_timing(c, measured, 13) == timing
