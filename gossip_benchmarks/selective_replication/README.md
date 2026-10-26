@@ -1,5 +1,11 @@
 # Selective replication feasibility
 
+For the first measured **data-processing selective recovery** experiment, see
+[data_processing/README.md](data_processing/README.md). It compares recomputation,
+checkpoint-all, greedy selective checkpoints, and exhaustive subset selection
+on three local pipelines, with real worker-process loss and three repetitions.
+It uses a 28-minute controller budget and requires only Python's standard library.
+
 For the separate experiment that selectively saves **training state** on
 `t1 || (t2; t3)`, see [STATE_PROTECTION_EXPERIMENT.md](STATE_PROTECTION_EXPERIMENT.md).
 It compares optimized uniform checkpoints, selective checkpoints, and
