@@ -1,5 +1,10 @@
 # Does selective recovery help data processing?
 
+For **real public data, branching pipelines, storage budgets, stronger greedy
+controls, Z3 optimization, and resumable measured replays**, use
+[COMPREHENSIVE.md](COMPREHENSIVE.md). The original small generated-data experiment
+below remains available unchanged.
+
 This is a small **measured mechanism experiment**, not a claim of research
 novelty or a distributed Ray benchmark. It executes real data-processing
 operators on generated records, commits selected intermediate outputs, abruptly

@@ -6,6 +6,12 @@ checkpoint-all, greedy selective checkpoints, and exhaustive subset selection
 on three local pipelines, with real worker-process loss and three repetitions.
 It uses a 28-minute controller budget and requires only Python's standard library.
 
+The [comprehensive real-data benchmark](data_processing/COMPREHENSIVE.md) adds NYC
+taxi analytics and 20 Newsgroups indexing, storage constraints, strong greedy and
+Z3 policies, a 63-case predefined model grid, separately labeled gap discovery,
+and five-repeat measured validation with resume support. Downloads and execution
+share a 28-minute controller budget; no solver benefit is presumed.
+
 For the separate experiment that selectively saves **training state** on
 `t1 || (t2; t3)`, see [STATE_PROTECTION_EXPERIMENT.md](STATE_PROTECTION_EXPERIMENT.md).
 It compares optimized uniform checkpoints, selective checkpoints, and
