@@ -81,12 +81,17 @@ class NativePilot(HeadVMLoss):
 
     def head_start(self, host, config, infrastructure):
         env = ['RAY_gcs_rpc_server_reconnect_timeout_s=600']
-        if infrastructure:
-            env += ['RAY_REDIS_ADDRESS='+self.nodes[self.support]['ip']+':6380']
-        self.service(host, NODE_UNIT, [BIN+'/ray', 'start', '--block', '--head',
+        command = [BIN+'/ray', 'start', '--block', '--head',
             '--port=6379', '--num-cpus=0', '--include-dashboard=false',
             '--node-ip-address='+self.nodes[host]['ip'], '--object-store-memory=536870912',
-            '--system-config='+json.dumps(config)], env)
+            '--system-config='+json.dumps(config)]
+        if infrastructure:
+            env += ['RAY_REDIS_ADDRESS='+self.nodes[self.support]['ip']+':6380']
+            env += ['REDIS_PASSWORD_FILE='+self.redis_password_file]
+            command = ['bash', '-c',
+                'set -e; password=$(cat "$REDIS_PASSWORD_FILE"); exec "$@" --redis-password="$password"',
+                'ray-native-head', *command]
+        self.service(host, NODE_UNIT, command, env)
         # Probe direct GCS identity before redirecting clients.
         end = time.monotonic()+70
         while time.monotonic() < end:
@@ -139,18 +144,40 @@ class NativePilot(HeadVMLoss):
             health_check_period_ms=1000, health_check_timeout_ms=3000,
             health_check_failure_threshold=3)
         if infrastructure:
-            self.service(self.support, REDIS, ['redis-server', '--bind', self.nodes[self.support]['ip'],
+            # Keep credentials outside the downloadable suite directory. Both
+            # heads read the same owner-only file from surviving w4-backed NFS.
+            credentials = SHARED+'/credentials'
+            self.redis_password_file = credentials+'/'+hashlib.sha256(folder.encode()).hexdigest()
+            self.ssh(self.support, f'sudo install -d -m 700 -o raybench -g raybench {credentials}')
+            generate = (
+                'import os,secrets; fd=os.open('+repr(self.redis_password_file)+
+                ',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); '
+                'f=os.fdopen(fd,"w"); f.write(secrets.token_hex(32)); '
+                'f.flush(); os.fsync(f.fileno()); f.close()')
+            self.ssh(self.support, 'sudo -u raybench '+PYTHON+' -c '+shlex.quote(generate))
+            self.service(self.support, REDIS, ['bash', '-c',
+                'set -e; password=$(cat "$REDIS_PASSWORD_FILE"); exec "$@" --requirepass "$password"',
+                'ray-native-redis', 'redis-server', '--bind', self.nodes[self.support]['ip'],
                 '--port', '6380', '--protected-mode', 'yes', '--save', '', '--appendonly', 'yes',
-                '--appendfsync', 'always', '--dir', folder])
-            # Explicit bind restricts Redis to the internal interface. Trusted VPC only.
+                '--appendfsync', 'always', '--dir', folder],
+                env=['REDIS_PASSWORD_FILE='+self.redis_password_file])
+            # Private bind alone does not bypass modern Redis protected mode.
+            ping_command = ('set -e; export REDISCLI_AUTH="$(cat '+
+                shlex.quote(self.redis_password_file)+')"; exec redis-cli -h '+
+                shlex.quote(self.nodes[self.support]['ip'])+' -p 6380 ping')
             end = time.monotonic()+30
             while True:
-                ping = self.ssh(self.support, 'redis-cli -h '+self.nodes[self.support]['ip']+
-                    ' -p 6380 ping', check=False, timeout=10)
+                ping = self.ssh(self.support, 'sudo -u raybench bash -c '+
+                    shlex.quote(ping_command), check=False, timeout=10)
+                sample['redis_probe'] = dict(returncode=ping.returncode,
+                    stdout=ping.stdout[-4000:], stderr=ping.stderr[-4000:])
+                save()
                 if ping.returncode == 0 and ping.stdout.strip() == 'PONG':
                     break
+                if any(word in ping.stdout+ping.stderr for word in ('DENIED', 'WRONGPASS', 'NOAUTH')):
+                    raise RuntimeError('Redis authentication/protected-mode failure: '+ping.stdout+ping.stderr)
                 if time.monotonic() > end:
-                    raise TimeoutError('Dedicated Redis did not become ready')
+                    raise TimeoutError('Dedicated Redis did not become ready; last probe: '+repr(sample['redis_probe']))
                 time.sleep(1)
         before = self.head_start(self.head, config, infrastructure)
         if infrastructure:
@@ -324,6 +351,17 @@ class NativePilot(HeadVMLoss):
                     self.run_one(f'{SHARED}/{self.run_id}/{name}/{label}', enabled, fault, infra, save, sample, workload)
                 except Exception as exc:
                     sample.update(status='infrastructure_or_setup_error', error=str(exc))
+                    save()
+                    try:
+                        log = self.ssh(self.support,
+                            f'sudo journalctl -u {REDIS} -u {NODE_UNIT} -u {DRIVER_UNIT} '
+                            '--no-pager -n 200', timeout=15)
+                        log_path = directory/(label+'-startup-failure.log')
+                        log_path.write_text(log.stdout)
+                        sample['failure_journal'] = str(log_path)
+                        print(log.stdout, flush=True)
+                    except Exception as diagnostic_error:
+                        sample['diagnostic_error'] = str(diagnostic_error)
                     save()
                     # Unknown cloud/start outcomes must be inspected, not automatically retried.
                     raise

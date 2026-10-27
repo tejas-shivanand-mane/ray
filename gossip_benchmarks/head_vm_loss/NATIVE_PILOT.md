@@ -58,6 +58,12 @@ and surviving node IDs at completion. This is injected-fault supervision, not a
 production automatic failure detector. Redis and the proxy are single failure
 points outside the selected fault domain. Redis is bound only to w4's private IP;
 use the existing trusted experiment VPC, not an untrusted shared network.
+Protected mode stays enabled. Each observation generates a password in an
+owner-only file under `/srv/ray-headloss/credentials`, outside the downloadable
+suite. The readiness probe and both heads authenticate with that password;
+binding to a private IP alone is insufficient for modern Redis protected mode.
+Probe output is saved in `redis_probe`; setup failures also collect a service
+journal into `<label>-startup-failure.log` before cleanup when transport is available.
 
 Five observations, one replicate each:
 
