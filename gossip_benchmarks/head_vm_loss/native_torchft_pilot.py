@@ -12,6 +12,13 @@ class NativeTorchFTPilot(NativeMLPilot):
     driver_script = 'native_torchft_workload.py'
     max_observation_timeout_s = 600
 
+    def stop_after_observation(self, sample):
+        if sample.get('result', {}).get('failure_phase') == 'startup':
+            return ('TorchFT failed before its first recorded optimizer step. '
+                    'Remaining cases were not run. Inspect the saved error, fix setup, '
+                    'then prepare a NEW suite; this failed outcome is preserved.')
+        return None
+
     def prepare(self):
         end = time.monotonic()+1680
         super().prepare()

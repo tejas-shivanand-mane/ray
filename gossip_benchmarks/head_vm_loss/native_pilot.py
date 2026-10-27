@@ -31,6 +31,9 @@ class NativePilot(HeadVMLoss):
     def report_metadata(self):
         return {}
 
+    def stop_after_observation(self, sample):
+        return None
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.transport_events = []
@@ -432,6 +435,8 @@ class NativePilot(HeadVMLoss):
             raise ValueError('Preparation is missing/stale; prepare the current helpers first')
         if report.get('helper_hashes', hashes) != hashes:
             raise ValueError('Helpers changed; use a new suite name')
+        if report.get('blocked_reason'):
+            raise ValueError(report['blocked_reason'])
         report['helper_hashes'] = hashes
         def save():
             write_json(report_path, report)
@@ -490,6 +495,12 @@ class NativePilot(HeadVMLoss):
                     sample['transport_events'] = self.transport_events[transport_start:]
                     save()
                 print(label+': '+sample['status'], flush=True)
+                stop_reason = self.stop_after_observation(sample)
+                if stop_reason:
+                    report['blocked_reason'] = report['paused_reason'] = stop_reason
+                    save()
+                    print(stop_reason, flush=True)
+                    break
             report['finished_matrix'] = len(report['samples']) == len(observations) and all(r['status'] != 'running' for r in report['samples'])
         finally:
             # Reserve at most 90 seconds beyond the work budget for fencing. If it

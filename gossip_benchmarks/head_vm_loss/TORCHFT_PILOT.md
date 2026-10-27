@@ -118,3 +118,24 @@ Sources used for API review (the installed image version is recorded at prefligh
 - https://meta-pytorch.org/torchft/manager.html
 - https://meta-pytorch.org/torchft/assumptions_and_recommendations.html
 - https://github.com/meta-pytorch/torchft
+
+## Repairing the initial MASTER_PORT startup failure
+
+The initial pilot passed `store_addr="host:port"` without `store_port`. The installed
+TorchFT Manager requires separate host and port arguments and therefore tried to
+read an unset MASTER_PORT. The corrected runner passes the already-bound TCPStore's
+host/port separately and sets the matching replica-local torchrun environment.
+The imports/API preflight now checks store_port and binds the same rendezvous
+argument dictionary used by the workload. This is still static API validation,
+not a successful runtime or training claim.
+
+The uploaded first four observations failed before any training progress and before
+any head-VM stop. They are startup failures, not evidence against Fixed-R recovery.
+A new startup failure now halts the matrix and blocks automatic continuation of that
+suite, retaining its result and diagnostics. Fix setup and use a new suite afterward.
+
+After pulling this repair, restart the kernel, keep the same EXISTING_STATE_FILE,
+set `SUITE = "torchft-fixedr-head-v2"`, run settings and section 6 to upload the fixed
+helpers and prepare the new suite, then section 8. The VMs need not be recreated.
+If they were stopped manually, run sections 1, 3 and 4 before section 6. Do not use
+section 7 to reuse the old preparation: its remote workload still has the bug.

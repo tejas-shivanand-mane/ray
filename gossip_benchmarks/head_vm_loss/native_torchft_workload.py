@@ -30,13 +30,20 @@ def preflight():
     from torchft import Manager, Optimizer, DistributedDataParallel, ProcessGroupGloo
     from torchft.checkpointing.pg_transport import PGTransport
     from torchft.coordination import LighthouseServer
-    required = {'store_addr', 'hostname', 'lighthouse_addr', 'use_async_quorum'}
+    required = {'store_addr', 'store_port', 'hostname', 'lighthouse_addr', 'use_async_quorum'}
     if not required <= set(inspect.signature(Manager).parameters):
         raise RuntimeError('Installed TorchFT Manager API differs from this pilot')
+    inspect.signature(Manager).bind_partial(**manager_rendezvous('127.0.0.1', 29500))
     distributions = importlib.metadata.packages_distributions().get('torchft', [])
     return dict(torch=torch.__version__, ray=ray.__version__, psutil=psutil.__version__,
                 torchft={name: importlib.metadata.version(name) for name in distributions},
                 manager_api=sorted(required), checked='imports/API only; no training')
+
+
+def manager_rendezvous(ip, port):
+    # Manager expects a host and an integer port separately. A host:port string
+    # does not supply store_port and makes it fall back to MASTER_PORT.
+    return dict(hostname=ip, store_addr=ip, store_port=int(port), rank=0, world_size=1)
 
 
 @ray.remote(max_retries=2)
@@ -134,6 +141,11 @@ class Replica:
         try:
             # One rank per replica group; two groups participate in TorchFT DDP.
             store = dist.TCPStore(ip, 0, 1, True, timeout=timeout)
+            # Match torchrun's replica-local rendezvous environment for any
+            # TorchFT/PyTorch helpers that consult it. Each replica has its own
+            # already-bound store; neither store runs on the failed head.
+            os.environ.update(MASTER_ADDR=ip, MASTER_PORT=str(store.port),
+                              RANK='0', WORLD_SIZE='1', LOCAL_RANK='0')
             dist.init_process_group('gloo', store=store, rank=0, world_size=1,
                                     timeout=timeout)
             raw_model = nn.Sequential(
@@ -154,8 +166,8 @@ class Replica:
 
             pg = ProcessGroupGloo(timeout=timeout)
             transport = PGTransport(pg, timeout=timeout, device=torch.device('cpu'))
-            manager = Manager(pg=pg, min_replica_size=2, rank=0, world_size=1,
-                replica_id=f'headloss_{rank}', hostname=ip, store_addr=f'{ip}:{store.port}',
+            manager = Manager(pg=pg, min_replica_size=2,
+                replica_id=f'headloss_{rank}', **manager_rendezvous(ip, store.port),
                 lighthouse_addr=lighthouse, state_dict=get_state, load_state_dict=load_state,
                 checkpoint_transport=transport, use_async_quorum=False, timeout=timeout,
                 quorum_timeout=timeout)
@@ -350,6 +362,10 @@ def main(cfg):
     finally:
         result['elapsed_s'] = time.monotonic()-start
         result['events'] = events(root)
+        if result['status'] == 'failed':
+            started_training = any(e['kind'] == 'progress' and e.get('step', 0) > 0
+                                   for history in result['events'] for e in history)
+            result['failure_phase'] = 'training_or_validation' if started_training else 'startup'
         result['starts'] = [json.loads(p.read_text()) for p in root.glob('start-*.json')]
         result['reexecutions'] = sum(s['replay'] for s in result['starts'])
         result['checkpoint_bytes'] = 0
