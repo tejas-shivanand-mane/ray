@@ -149,7 +149,7 @@ class Limit(Exception):
 
 
 def check_time(deadline):
-    if time.perf_counter() >= deadline:
+    if deadline is not None and time.perf_counter() >= deadline:
         raise Limit("timeout")
 
 
@@ -266,7 +266,9 @@ def exact_dp(case, deadline, max_states, placement=None):
 
 
 def solve_z3(case, deadline, smt_path):
+    """Use deadline=None for no wall-time limit, including individual queries."""
     import z3
+    began = time.perf_counter()
     solver = z3.Solver()
     variables = [[z3.Bool("task_%d_choice_%d" % (i, k)) for k in range(len(options))]
                  for i, options in enumerate(case["options"])]
@@ -305,14 +307,26 @@ def solve_z3(case, deadline, smt_path):
     candidates = [p for p in seeds(case) if evaluate(case, p)["feasible"]]
     best = min(candidates, key=lambda p: rank(case, p)) if candidates else None
     lower, upper = 0, evaluate(case, best)["objective"] if best is not None else None
-    trace, reason, status = [], None, "timeout"
+    trace, reason, status = [], None, "unknown" if deadline is None else "timeout"
+
+    def progress(phase, bound=None):
+        # Checkpoint diagnostics even when the next unbounded query takes hours.
+        # This is an incumbent snapshot, not serialized/resumable solver state.
+        path = Path(smt_path).with_suffix(".progress.json")
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps({"phase": phase, "current_query_bound": bound,
+            "plan": best, "lower_bound": lower, "upper_bound": upper,
+            "queries": trace, "elapsed_s": time.perf_counter() - began,
+            "unlimited": deadline is None, "optimality_proven": status in ("optimal", "infeasible")}, indent=2))
+        temp.replace(path)
 
     def query(bound=None):
         check_time(deadline)
         solver.push()
         if bound is not None:
             solver.add(objective <= bound)
-        solver.set(timeout=max(1, int((deadline - time.perf_counter()) * 1000)))
+        progress("checking", bound)
+        solver.set(timeout=0 if deadline is None else max(1, int((deadline - time.perf_counter()) * 1000)))
         result = solver.check()
         plan, unknown = None, None
         if result == z3.sat:
@@ -353,6 +367,7 @@ def solve_z3(case, deadline, smt_path):
                 status = "optimal"
     except Limit:
         pass
+    progress(status)
     return {"plan": best, "status": status, "optimality_proven": status in ("optimal", "infeasible"),
         "lower_bound": lower, "upper_bound": upper, "queries": trace, "unknown_reason": reason,
         "decision_booleans": sum(map(len, variables))}

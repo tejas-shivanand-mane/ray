@@ -36,6 +36,34 @@ configuration, profiles, all planner results, SMT encodings, query status
 traces, summaries and source snapshots. Raw documents and pickle payloads are
 excluded. No project code, tests or experiments were run by the assistant.
 
+### Z3 without any time limit
+
+```bash
+python gossip_benchmarks/selective_replication/data_processing/joint_scaling.py --z3-unlimited
+```
+
+This removes both the per-query and total Z3 time limits, including the Z3
+small-case audit. It also disables the overall 28-minute controller timer, so
+that timer cannot terminate Z3. `--minutes` is ignored in this mode. The modeled
+application deadline remains a constraint on the selected plan; it is not a
+timer on the solver. Other planners retain their configured time/state limits.
+Reports label this as an unequal-planning-budget comparison and continue to
+charge Z3's actual planning time.
+
+There is no automatic practical-gap stopping rule: Z3 searches for a proven
+optimum. It may take a long time, or return `unknown` for a non-time-limit
+reason. No time limit does not guarantee a proof or unlimited machine memory.
+The workload, constraints, initial plans and optimization objective are unchanged.
+
+Ctrl+C stops the child process and writes an archive of completed calls and
+diagnostics. `models/*.progress.json` records the most recent incumbent, bounds,
+completed queries and current query target. Interrupted calls are not counted
+as completed results. Resume the new run with `--resume RUN_DIRECTORY`; the
+unlimited setting is saved automatically. Completed calls are skipped, but the
+interrupted solver call restarts; internal Z3 search state is not serialized.
+After pulling this change, start a fresh run rather than resuming an old bounded
+run: the source fingerprint and planning protocol have changed.
+
 ## Measured versus modeled
 
 Measured locally:

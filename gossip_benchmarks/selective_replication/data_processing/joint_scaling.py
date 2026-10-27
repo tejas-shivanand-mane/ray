@@ -137,7 +137,7 @@ def plan(method, case, settings, smt_path):
     deadline = began + settings["planner_seconds"]
     n = len(case["options"])
     if method == "z3":
-        result = model.solve_z3(case, deadline, smt_path)
+        result = model.solve_z3(case, None if settings.get("z3_unlimited", False) else deadline, smt_path)
     elif method == "joint_dp":
         result = model.exact_dp(case, deadline, settings["dp_max_states"])
     elif method == "sequential_dp":
@@ -227,6 +227,7 @@ def report(output):
                 validation_errors.append("Infeasibility contradiction: " + row["case_id"])
             comparisons.append(comparison)
     summary = {"status": status, "validation_errors": validation_errors, "results_completed": len(rows),
+        "z3_unlimited": manifest["settings"].get("z3_unlimited", False),
         "results_planned": manifest["results_planned"], "comparisons": comparisons,
         "limitations": ["Offline model calibrated from local real-data task profiles; no cloud failures executed.",
             "Repeated planner timings are not repeated distributed workload measurements.",
@@ -255,6 +256,8 @@ def report(output):
         "|---|---|---:|---:|---:|---:|---:|"]
     if validation_errors:
         lines.insert(4, "INVALID RESULTS: " + "; ".join(validation_errors))
+    if manifest["settings"].get("z3_unlimited", False):
+        lines.insert(4, "Z3 has no time limit; other search methods retain their configured budgets. This is not an equal-planning-budget comparison.")
     groups = {}
     for row in rows:
         groups.setdefault((row["case_id"], row["method"]), []).append(row)
@@ -327,6 +330,8 @@ def main():
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--profile-repeats", type=int, default=2)
     parser.add_argument("--planner-seconds", type=float, default=5.)
+    parser.add_argument("--z3-unlimited", action="store_true",
+                        help="Remove Z3 query/search time limits and the overall controller timer")
     parser.add_argument("--dp-max-states", type=int, default=10000)
     parser.add_argument("--minutes", type=float, default=28.)
     parser.add_argument("--seed", type=int, default=20261026)
@@ -342,6 +347,8 @@ def main():
         manifest = read_json(output / "manifest.json")
         if manifest["source_hashes"] != hashes() or manifest["versions"] != versions():
             parser.error("Source or dependency versions changed; start a fresh run")
+        if args.z3_unlimited and not manifest["settings"].get("z3_unlimited", False):
+            parser.error("Cannot change a bounded run on resume; start a fresh --z3-unlimited run")
         print("Resuming saved settings; only --minutes changes the session budget", flush=True)
     else:
         if (any(n != 7 and n < 20 for n in args.tasks) or min(args.documents) < max(args.tasks) or
@@ -356,7 +363,7 @@ def main():
                     for r in config["risk_profiles"])):
             parser.error("Use distinct lowercase risk profile names without path separators")
         settings = {key: getattr(args, key) for key in ("tasks", "documents", "tokens", "repeats",
-            "profile_repeats", "planner_seconds", "dp_max_states", "seed")}
+            "profile_repeats", "planner_seconds", "dp_max_states", "seed", "z3_unlimited")}
         # Validate config before downloading or measuring anything.
         tiny = {"tasks": [{"compute_us": 1000, "write_us": 10, "read_us": 10, "bytes": 100}], "reduce_us": 100}
         for risk in config["risk_profiles"]:
@@ -374,6 +381,9 @@ def main():
             "methods": METHODS, "price_source": config.get("description", "user-provided assumptions")}
         base.atomic_json(output / "manifest.json", manifest)
     print("Output: " + str(output), flush=True)
+    unlimited = manifest["settings"].get("z3_unlimited", False)
+    if unlimited:
+        print("Z3 unlimited: no solver or controller timeout. Ctrl+C saves completed results and diagnostics.", flush=True)
     lock = output / "controller.lock"
     try:
         with lock.open("x") as stream:
@@ -387,11 +397,14 @@ def main():
             process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(output)],
                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
-                code = process.wait(timeout=args.minutes * 60)
+                code = process.wait(timeout=None if unlimited else args.minutes * 60)
                 status = {"status": "complete" if code == 0 else "failed", "exit_code": code}
             except subprocess.TimeoutExpired:
                 base.stop_group(process)
                 status = {"status": "partial_timeout", "resume": str(output)}
+            except KeyboardInterrupt:
+                base.stop_group(process)
+                status = {"status": "interrupted", "resume": str(output)}
         base.atomic_json(output / "status.json", status)
         report(output)
         print(status["status"] + "; send " + str(output / "analysis.zip"), flush=True)

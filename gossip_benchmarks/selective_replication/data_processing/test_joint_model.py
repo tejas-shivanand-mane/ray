@@ -49,7 +49,8 @@ class JointModelTests(unittest.TestCase):
                 oracle = model.exhaustive(case, time.perf_counter() + 10)
                 optimum = None if oracle is None else model.evaluate(case, oracle)["objective"]
                 dp = model.exact_dp(case, time.perf_counter() + 10, 100000)
-                z3 = model.solve_z3(case, time.perf_counter() + 10, Path(directory) / "case.smt2")
+                z3 = model.solve_z3(case, None if budget == 200 else time.perf_counter() + 10,
+                                    Path(directory) / "case.smt2")
                 for result in (dp, z3):
                     self.assertTrue(result["optimality_proven"], result)
                     actual = None if result["plan"] is None else model.evaluate(case, result["plan"])["objective"]
