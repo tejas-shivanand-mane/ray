@@ -55,6 +55,16 @@ def main(config):
                         write_json(folder / f'release-{index}.json', dict(unix_s=time.time()))
                         released.add(index)
                         reply = dict(released=True)
+                    elif self.path in ('/training_gate', '/training_progress'):
+                        token = value['token']
+                        entry = registrations[token]
+                        if entry['index'] != index:
+                            raise ValueError('Attempt/index mismatch')
+                        phase = self.path.lstrip('/')
+                        write_json(folder / f'{phase}-{index}-{token}.json', dict(
+                            index=index, replay=entry['replay'], unix_s=time.time(),
+                            step=value['step'], train_s=value['train_s'], cpu_s=value['cpu_s']))
+                        reply = dict(ok=True)
                     elif self.path == '/finish':
                         token = value['token']
                         entry = registrations[token]

@@ -22,6 +22,14 @@ LOCK = '/var/lib/raybench/ray-headloss-lock'
 
 
 class NativePilot(HeadVMLoss):
+    driver_script = 'native_workload.py'
+
+    def workload_parameters(self):
+        return {}
+
+    def report_metadata(self):
+        return {}
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.transport_events = []
@@ -87,7 +95,8 @@ class NativePilot(HeadVMLoss):
             super().prepare()
             self.ssh(self.support, 'sudo DEBIAN_FRONTEND=noninteractive apt-get '
                 '-o DPkg::Lock::Timeout=120 install -y -qq redis-server socat', timeout=300)
-            for name in ('native_workload.py', 'native_probe.py', 'native_gate.py', 'evidence.py'):
+            for name in ('native_workload.py', 'native_probe.py', 'native_gate.py',
+                         'native_ml_task.py', 'native_ml_workload.py', 'evidence.py'):
                 for vm in self.names:
                     self.scp(self.bundle / name, vm+':/tmp/'+name)
                     self.ssh(vm, f'sudo mkdir -p {ROOT} && sudo install -m 644 /tmp/{name} {ROOT}/{name}')
@@ -263,7 +272,7 @@ class NativePilot(HeadVMLoss):
             if time.monotonic() > end:
                 raise TimeoutError('Four Ray nodes did not register')
             time.sleep(1)
-        cfg = dict(folder=folder, enabled=enabled, fault=fault, address=address,
+        cfg = dict(folder=folder, enabled=enabled, fault=fault, infrastructure=infrastructure, address=address,
             head_ip=self.nodes[self.head]['ip'], support_ip=self.nodes[self.support]['ip'],
             replacement_ip=self.nodes[self.replacement]['ip'],
             executor_ips=[self.nodes[n]['ip'] for n in self.trainers],
@@ -288,7 +297,7 @@ class NativePilot(HeadVMLoss):
             counters_before=self.counters(self.names), workload=cfg)
         sample['workload_dispatch_monotonic'] = time.monotonic()
         save()
-        self.service(self.support, DRIVER_UNIT, [PYTHON, ROOT+'/native_workload.py', folder+'/native-config.json'], seconds=cfg['timeout_s']+30)
+        self.service(self.support, DRIVER_UNIT, [PYTHON, ROOT+'/'+self.driver_script, folder+'/native-config.json'], seconds=cfg['timeout_s']+30)
         end = time.monotonic()+cfg['timeout_s']
         fault_done = False
         while time.monotonic() < end:
@@ -315,7 +324,9 @@ class NativePilot(HeadVMLoss):
                 fault_done = True
                 save()
             progress = self._remote_json(folder+'/progress.json')
-            if fault and fault_done and progress and len(progress['reads']) > 1 and 'resumed_monotonic' not in sample:
+            resumed = progress and (progress.get('training_resumed') or
+                len(progress['reads']) > workload.get('pre_failure_reads', 1))
+            if fault and fault_done and resumed and 'resumed_monotonic' not in sample:
                 sample['resumed_monotonic'] = time.monotonic()
                 sample['failure_to_resumption_upper_bound_s'] = time.monotonic()-sample['stop_requested_monotonic']
                 save()
@@ -391,6 +402,7 @@ class NativePilot(HeadVMLoss):
         if len({row[0] for row in observations}) != len(observations):
             raise ValueError('Observation labels must be unique')
         workload = dict(tasks=tasks, payload_bytes=payload_bytes, timeout_s=timeout_s)
+        workload.update(self.workload_parameters())
         settings = dict(workload=workload, observations=observations,
                         detection_config=self.detection_config, gate='off-head-http-v1')
         for vm in self.names:
@@ -409,6 +421,7 @@ class NativePilot(HeadVMLoss):
         if not fresh and report.get('settings') != settings:
             raise ValueError('Settings changed or legacy report: use a new suite name')
         report['settings'] = settings
+        report.update(self.report_metadata())
         report['planned_observations'] = len(observations)
         hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in self.bundle.glob('native_*.py')}
         prepared = json.loads((self.local/'native-prepared.json').read_text())
