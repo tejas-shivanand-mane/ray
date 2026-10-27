@@ -2,7 +2,11 @@
 
 Prepared against main `c8bde84a7becb1fd81d7e9e76782701d16b62f75`.
 Implementation has been inspected, **not executed or tested** by the assistant.
-No notebook is modified. The existing training notebook remains a different experiment.
+Open [Ray_GCP_Native_Head_VM_Loss.ipynb](../Ray_GCP_Native_Head_VM_Loss.ipynb)
+for editable setup, inventory, preparation, run/resume, collection, and plotting
+cells. Run cells individually; skip preparation on an ordinary resume. The plot
+cell also works independently with an explicit report path. No existing notebook
+is modified. The existing training notebook remains a different experiment.
 
 ## What inspection established
 
