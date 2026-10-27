@@ -176,9 +176,7 @@ class HeadVMLoss:
                 "A head-loss supervisor owns the cluster; inspect its report before cleanup"
             )
         # Check CLI support; never silently downgrade to a service kill or graceful stop.
-        help_text = run(["gcloud", "compute", "instances", "stop", "--help"]).stdout
-        if "--no-graceful-shutdown" not in help_text:
-            raise RuntimeError("Update gcloud: VM loss requires --no-graceful-shutdown")
+        self.check_stop_capability()
         identities = []
         for name in self.names:
             request = shlex.quote(
@@ -269,6 +267,11 @@ class HeadVMLoss:
                 },
             ),
         )
+
+    def check_stop_capability(self):
+        help_text = run(["gcloud", "compute", "instances", "stop", "--help"]).stdout
+        if "--no-graceful-shutdown" not in help_text:
+            raise RuntimeError("Update gcloud: VM loss requires --no-graceful-shutdown")
 
     def _stop_node(self, name):
         # Unknown/inactive transient units are harmless; inability to stop active ones is not.

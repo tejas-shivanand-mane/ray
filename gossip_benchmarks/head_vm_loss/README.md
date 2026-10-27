@@ -1,5 +1,9 @@
 # Head VM loss: first experiment
 
+For the native Fixed-R OFF/ON pilot with surviving GCS state and actual head VM
+loss, see [NATIVE_PILOT.md](NATIVE_PILOT.md). The training experiment below is a
+separate whole-job checkpoint-restart comparison.
+
 Open `../Ray_GCP_Head_VM_Loss.ipynb`. The original worker-loss notebook is
 unchanged, including its locally edited cells. This notebook imports these plain
 Python files; edit them directly. It requires the existing five-VM state file and
