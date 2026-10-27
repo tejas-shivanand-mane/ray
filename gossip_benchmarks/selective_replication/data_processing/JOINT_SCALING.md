@@ -50,10 +50,34 @@ timer on the solver. Other planners retain their configured time/state limits.
 Reports label this as an unequal-planning-budget comparison and continue to
 charge Z3's actual planning time.
 
-There is no automatic practical-gap stopping rule: Z3 searches for a proven
-optimum. It may take a long time, or return `unknown` for a non-time-limit
-reason. No time limit does not guarantee a proof or unlimited machine memory.
-The workload, constraints, initial plans and optimization objective are unchanged.
+Fresh runs now default to a certified **0.1% relative optimality gap**. For an
+explicit command:
+
+```bash
+python gossip_benchmarks/selective_replication/data_processing/joint_scaling.py --z3-unlimited --z3-gap-percent 0.1
+```
+
+For a feasible incumbent U and a proven lower bound L, stop when
+`(U - L) / L <= 0.001`. The comparison uses exact rational arithmetic. This
+certifies that U is at most 1.001 times the true optimum of the modeled
+objective. With L=0 and U>0 no relative certificate is possible. Bounds come
+from completed SAT/UNSAT checks, never from elapsed time or lack of improvement.
+The test occurs before starting another solver query. An individual query can
+still take arbitrarily long; the tolerance does not interrupt an in-flight query.
+
+Such results have `status: gap_certified`, `gap_certified: true` and
+`optimality_proven: false`. Exact solutions retain `status: optimal` and
+`optimality_proven: true`. Results, progress files, CSV and summaries include
+the requested and achieved gap. Small-case correctness audits still require
+exact agreement with exhaustive search. Set `--z3-gap-percent 0` to restore
+exact-only search. Passing no gap argument on resume uses the saved tolerance;
+changing it requires a fresh run.
+
+Z3 may still take a long time or return `unknown` for a non-time-limit reason.
+No time limit does not guarantee a proof or unlimited machine memory. The
+workload, constraints, initial plans and optimization objective are unchanged.
+The certificate concerns modeled expected execution time, not real runtime
+uncertainty or the total time spent planning plus executing.
 
 Ctrl+C stops the child process and writes an archive of completed calls and
 diagnostics. `models/*.progress.json` records the most recent incumbent, bounds,
@@ -61,8 +85,10 @@ completed queries and current query target. Interrupted calls are not counted
 as completed results. Resume the new run with `--resume RUN_DIRECTORY`; the
 unlimited setting is saved automatically. Completed calls are skipped, but the
 interrupted solver call restarts; internal Z3 search state is not serialized.
-After pulling this change, start a fresh run rather than resuming an old bounded
-run: the source fingerprint and planning protocol have changed.
+After pulling this change, start a fresh run rather than resuming an older
+bounded or exact-only run: the source fingerprint and planning protocol have
+changed. First Ctrl+C the old run to preserve its archive. Old result folders
+are not overwritten or mixed into the new experiment.
 
 ## Measured versus modeled
 
@@ -196,7 +222,8 @@ Z3 uses N * M * 2 one-hot Booleans: 42 at seven tasks, 600 at 100 tasks for thre
 nodes. Conceptually these encode N node choices and N protection decisions.
 Every SAT/UNSAT/unknown query is logged. Returned Z3 scenario times and
 constraints are checked with a separate Python evaluator. Completed binary
-search certifies the primary objective; optimal tied plans may differ.
+search certifies the exact primary objective; reaching the declared relative
+gap instead certifies an approximate optimum. Optimal tied plans may differ.
 Before the sweep, three-task cases are audited against exhaustive search.
 Completed DP/Z3 optima are cross-checked; contradictions invalidate results.
 

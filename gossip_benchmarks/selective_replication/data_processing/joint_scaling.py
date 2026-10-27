@@ -137,7 +137,8 @@ def plan(method, case, settings, smt_path):
     deadline = began + settings["planner_seconds"]
     n = len(case["options"])
     if method == "z3":
-        result = model.solve_z3(case, None if settings.get("z3_unlimited", False) else deadline, smt_path)
+        result = model.solve_z3(case, None if settings.get("z3_unlimited", False) else deadline,
+                                smt_path, gap_percent=settings.get("z3_gap_percent", 0.))
     elif method == "joint_dp":
         result = model.exact_dp(case, deadline, settings["dp_max_states"])
     elif method == "sequential_dp":
@@ -182,7 +183,7 @@ def audit_small_case(output, profile_value, config, settings):
         optimum = model.exhaustive(case, time.perf_counter() + 20)
         expected = None if optimum is None else model.evaluate(case, optimum)["objective"]
         for method in ("joint_dp", "z3"):
-            result = plan(method, case, dict(settings, planner_seconds=10), output / "models" / ("audit-" + risk["name"] + ".smt2"))
+            result = plan(method, case, dict(settings, planner_seconds=10, z3_gap_percent=0.), output / "models" / ("audit-" + risk["name"] + ".smt2"))
             actual = result.get("metrics", {}).get("objective")
             if not result["optimality_proven"] or actual != expected:
                 base.atomic_json(path, {"status": "failed", "method": method,
@@ -202,6 +203,10 @@ def report(output):
     for row in rows:
         if row["method"] != "z3":
             continue
+        if row.get("gap_certified") and (not row.get("metrics", {}).get("feasible") or
+                row["optimality_proven"] or row["upper_bound"] != row["metrics"]["objective"] or not model.within_gap(
+                    row["lower_bound"], row["upper_bound"], row["target_gap_percent"])):
+            validation_errors.append("Invalid gap certificate: " + row["case_id"])
         for method in METHODS:
             if method == "z3":
                 continue
@@ -213,6 +218,8 @@ def report(output):
             comparison = {"case_id": row["case_id"], "repeat": row["repeat"], "baseline": method,
                 "z3_feasible": z_ok, "baseline_feasible": b_ok,
                 "z3_optimality_proven": row["optimality_proven"],
+                "z3_gap_certified": row.get("gap_certified", False),
+                "z3_certified_gap_percent": row.get("certified_gap_percent"),
                 "baseline_optimality_proven": other["optimality_proven"]}
             if z_ok and b_ok:
                 comparison.update({"modeled_execution_gain_percent": 100 * (
@@ -228,16 +235,19 @@ def report(output):
             comparisons.append(comparison)
     summary = {"status": status, "validation_errors": validation_errors, "results_completed": len(rows),
         "z3_unlimited": manifest["settings"].get("z3_unlimited", False),
+        "z3_target_gap_percent": manifest["settings"].get("z3_gap_percent", 0.),
         "results_planned": manifest["results_planned"], "comparisons": comparisons,
         "limitations": ["Offline model calibrated from local real-data task profiles; no cloud failures executed.",
             "Repeated planner timings are not repeated distributed workload measurements.",
             "Failure probabilities and prices are configurable assumptions, not provider measurements.",
             "All checkpoint outputs are durable before one post-map node-loss window.",
-            "Exact DP/Z3 labels require completed proofs; timed-out incumbents are not certified optimal."]}
+            "Exact DP/Z3 labels require completed proofs; timed-out incumbents are not certified optimal.",
+            "Gap-certified Z3 plans meet the declared bound on the modeled objective; they are not exact optima."]}
     base.atomic_json(output / "summary.json", summary)
     fields = ("case", "repeat", "method", "status", "optimality_proven", "feasible", "planning_s",
               "modeled_expected_s", "modeled_expected_usd", "deadline_success", "expected_plus_planning_s",
-              "deadline_success_including_planning", "reuse_20_s", "checkpoint_bytes")
+              "deadline_success_including_planning", "reuse_20_s", "checkpoint_bytes",
+              "gap_certified", "certified_gap_percent", "target_gap_percent")
     with (output / "results.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fields)
         writer.writeheader()
@@ -247,13 +257,15 @@ def report(output):
                 r["optimality_proven"], metrics.get("feasible", False), r["planning_s"],
                 metrics.get("expected_s"), metrics.get("expected_usd"), metrics.get("deadline_success"),
                 r.get("expected_plus_planning_s"), r.get("deadline_success_including_planning"),
-                r.get("reuse_20_s"), metrics.get("bytes")))))
+                r.get("reuse_20_s"), metrics.get("bytes"), r.get("gap_certified", False),
+                r.get("certified_gap_percent"), r.get("target_gap_percent")))))
     lines = ["# Joint placement and recovery scaling", "", "Status: " + status["status"],
         "Completed planner results: %d/%d." % (len(rows), manifest["results_planned"]), "",
         "Execution times, dollar costs and deadline probabilities below are MODEL outputs.",
         "Only local profiling and planner durations were measured.", "",
-        "| Case | Method | Completed repeats | Feasible | Proven optimal | Median planning s | Median modeled execution s |",
-        "|---|---|---:|---:|---:|---:|---:|"]
+        "Z3 stopping tolerance: %s%% relative to the proven lower bound." % manifest["settings"].get("z3_gap_percent", 0.), "",
+        "| Case | Method | Completed repeats | Feasible | Proven optimal | Gap-certified | Median planning s | Median modeled execution s |",
+        "|---|---|---:|---:|---:|---:|---:|---:|"]
     if validation_errors:
         lines.insert(4, "INVALID RESULTS: " + "; ".join(validation_errors))
     if manifest["settings"].get("z3_unlimited", False):
@@ -264,8 +276,9 @@ def report(output):
     for (case_id, method), group in sorted(groups.items()):
         feasible = [r for r in group if r.get("metrics", {}).get("feasible")]
         runtime = "%.6f" % statistics.median(r["metrics"]["expected_s"] for r in feasible) if feasible else "—"
-        lines.append("| %s | %s | %d | %d | %d | %.6f | %s |" % (case_id, method, len(group),
+        lines.append("| %s | %s | %d | %d | %d | %d | %.6f | %s |" % (case_id, method, len(group),
             len(feasible), sum(r["optimality_proven"] and r["status"] == "optimal" for r in group),
+            sum(r.get("gap_certified", False) for r in group),
             statistics.median(r["planning_s"] for r in group), runtime))
     lines += ["", "See results.csv for cost, deadline success and planning-inclusive times.",
         "Use matched case/repetition comparisons; do not drop timeouts or infeasible methods.",
@@ -332,6 +345,8 @@ def main():
     parser.add_argument("--planner-seconds", type=float, default=5.)
     parser.add_argument("--z3-unlimited", action="store_true",
                         help="Remove Z3 query/search time limits and the overall controller timer")
+    parser.add_argument("--z3-gap-percent", type=float, default=None,
+                        help="Certified relative optimality tolerance in percent (fresh-run default: 0.1; 0 means exact)")
     parser.add_argument("--dp-max-states", type=int, default=10000)
     parser.add_argument("--minutes", type=float, default=28.)
     parser.add_argument("--seed", type=int, default=20261026)
@@ -342,6 +357,8 @@ def main():
         return
     if not 0 < args.minutes <= 29:
         parser.error("--minutes must be in (0,29]")
+    if args.z3_gap_percent is not None and (not math.isfinite(args.z3_gap_percent) or args.z3_gap_percent < 0):
+        parser.error("--z3-gap-percent must be finite and nonnegative")
     if args.resume:
         output = args.resume.resolve()
         manifest = read_json(output / "manifest.json")
@@ -349,8 +366,12 @@ def main():
             parser.error("Source or dependency versions changed; start a fresh run")
         if args.z3_unlimited and not manifest["settings"].get("z3_unlimited", False):
             parser.error("Cannot change a bounded run on resume; start a fresh --z3-unlimited run")
+        if args.z3_gap_percent is not None and args.z3_gap_percent != manifest["settings"].get("z3_gap_percent", 0.):
+            parser.error("Cannot change gap tolerance on resume; start a fresh run")
         print("Resuming saved settings; only --minutes changes the session budget", flush=True)
     else:
+        if args.z3_gap_percent is None:
+            args.z3_gap_percent = .1
         if (any(n != 7 and n < 20 for n in args.tasks) or min(args.documents) < max(args.tasks) or
                 min(args.tokens, args.repeats, args.profile_repeats, args.dp_max_states) < 1 or
                 not 0 < args.planner_seconds <= 60 or len(set(args.tasks)) != len(args.tasks) or
@@ -363,7 +384,7 @@ def main():
                     for r in config["risk_profiles"])):
             parser.error("Use distinct lowercase risk profile names without path separators")
         settings = {key: getattr(args, key) for key in ("tasks", "documents", "tokens", "repeats",
-            "profile_repeats", "planner_seconds", "dp_max_states", "seed", "z3_unlimited")}
+            "profile_repeats", "planner_seconds", "dp_max_states", "seed", "z3_unlimited", "z3_gap_percent")}
         # Validate config before downloading or measuring anything.
         tiny = {"tasks": [{"compute_us": 1000, "write_us": 10, "read_us": 10, "bytes": 100}], "reduce_us": 100}
         for risk in config["risk_profiles"]:
@@ -381,6 +402,7 @@ def main():
             "methods": METHODS, "price_source": config.get("description", "user-provided assumptions")}
         base.atomic_json(output / "manifest.json", manifest)
     print("Output: " + str(output), flush=True)
+    print("Z3 target optimality gap: %s%%" % manifest["settings"].get("z3_gap_percent", 0.), flush=True)
     unlimited = manifest["settings"].get("z3_unlimited", False)
     if unlimited:
         print("Z3 unlimited: no solver or controller timeout. Ctrl+C saves completed results and diagnostics.", flush=True)

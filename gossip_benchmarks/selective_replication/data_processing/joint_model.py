@@ -265,9 +265,33 @@ def exact_dp(case, deadline, max_states, placement=None):
             "peak_states": peak}
 
 
-def solve_z3(case, deadline, smt_path):
+def within_gap(lower, upper, gap_percent):
+    """Certify U <= (1 + tolerance) * optimum using the proven lower bound L.
+
+    Integer/rational arithmetic avoids accepting a gap through float rounding.
+    L=0 only certifies U=0; an absent incumbent never certifies anything.
+    """
+    if upper is None:
+        return False
+    if not 0 <= lower <= upper:
+        raise ValueError("Invalid objective bounds")
+    tolerance = Fraction(str(gap_percent)) / 100
+    if tolerance < 0:
+        raise ValueError("Gap tolerance must be nonnegative")
+    return upper - lower <= tolerance * lower
+
+
+def relative_gap_percent(lower, upper):
+    if upper is None or (lower == 0 and upper > 0):
+        return None
+    return 0. if upper == lower else float(100 * Fraction(upper - lower, lower))
+
+
+def solve_z3(case, deadline, smt_path, gap_percent=0.):
     """Use deadline=None for no wall-time limit, including individual queries."""
     import z3
+    if not math.isfinite(gap_percent) or gap_percent < 0:
+        raise ValueError("Gap tolerance must be finite and nonnegative")
     began = time.perf_counter()
     solver = z3.Solver()
     variables = [[z3.Bool("task_%d_choice_%d" % (i, k)) for k in range(len(options))]
@@ -317,6 +341,9 @@ def solve_z3(case, deadline, smt_path):
         temp.write_text(json.dumps({"phase": phase, "current_query_bound": bound,
             "plan": best, "lower_bound": lower, "upper_bound": upper,
             "queries": trace, "elapsed_s": time.perf_counter() - began,
+            "target_gap_percent": gap_percent,
+            "certified_gap_percent": relative_gap_percent(lower, upper),
+            "gap_certified": status == "gap_certified",
             "unlimited": deadline is None, "optimality_proven": status in ("optimal", "infeasible")}, indent=2))
         temp.replace(path)
 
@@ -355,6 +382,9 @@ def solve_z3(case, deadline, smt_path):
                 upper = evaluate(case, best)["objective"]
         if best is not None:
             while lower < upper:
+                if within_gap(lower, upper, gap_percent):
+                    status = "gap_certified"
+                    break
                 bound = (lower + upper) // 2
                 result, plan, reason = query(bound)
                 if result == z3.sat:
@@ -369,6 +399,9 @@ def solve_z3(case, deadline, smt_path):
         pass
     progress(status)
     return {"plan": best, "status": status, "optimality_proven": status in ("optimal", "infeasible"),
+        "gap_certified": status == "gap_certified", "target_gap_percent": gap_percent,
+        "certified_gap_percent": relative_gap_percent(lower, upper),
+        "absolute_gap_s": None if upper is None else (upper - lower) / case["weight_total"] / 1e6,
         "lower_bound": lower, "upper_bound": upper, "queries": trace, "unknown_reason": reason,
         "decision_booleans": sum(map(len, variables))}
 

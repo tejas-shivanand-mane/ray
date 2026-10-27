@@ -24,6 +24,31 @@ def fixture():
 
 
 class JointModelTests(unittest.TestCase):
+    def test_gap_certificate_uses_lower_bound_and_exact_boundary(self):
+        self.assertTrue(model.within_gap(1000, 1001, .1))
+        self.assertFalse(model.within_gap(1000, 1002, .1))
+        self.assertFalse(model.within_gap(999, 1000, .1))
+        self.assertFalse(model.within_gap(0, 1, .1))
+        self.assertFalse(model.within_gap(0, None, .1))
+        self.assertTrue(model.within_gap(0, 0, 0.))
+        self.assertFalse(model.within_gap(1000, 1001, 0.))
+        # The owner's interrupted unlimited run had already passed this threshold.
+        self.assertTrue(model.within_gap(546545104113, 546545120400, .1))
+
+    def test_gap_stopping_keeps_a_valid_certificate(self):
+        case = fixture()
+        oracle = model.exhaustive(case, time.perf_counter() + 10)
+        optimum = model.evaluate(case, oracle)["objective"]
+        with tempfile.TemporaryDirectory() as directory:
+            result = model.solve_z3(case, None, Path(directory) / "case.smt2", gap_percent=.1)
+        self.assertIn(result["status"], ("optimal", "gap_certified"))
+        objective = model.evaluate(case, result["plan"])["objective"]
+        self.assertLessEqual(result["lower_bound"], optimum)
+        self.assertLessEqual(optimum, objective)
+        self.assertLessEqual(objective * 1000, optimum * 1001)
+        self.assertEqual(result["optimality_proven"], result["status"] == "optimal")
+        self.assertEqual(result["gap_certified"], result["status"] == "gap_certified")
+
     def test_node_loss_is_shared_and_unused_node_loss_has_no_effect(self):
         case = fixture()
         value = model.evaluate(case, [0, 0, 0])
