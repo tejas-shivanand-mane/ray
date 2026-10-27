@@ -5,6 +5,7 @@ Optimality refers to the fixed DAG/order/failure model, not real execution time.
 """
 
 import itertools
+import json
 import time
 
 
@@ -141,8 +142,7 @@ def solve_z3(stages, faults, probability, budget, timeout_ms, smt_path):
     began = time.perf_counter()
     n = len(stages)
     x = [z3.Bool("save_%d" % i) for i in range(n - 1)] + [z3.BoolVal(True)]
-    solver = z3.Optimize()
-    solver.set(timeout=timeout_ms)
+    solver = z3.Solver()
     size = z3.Sum([z3.If(x[i], stages[i]["bytes"], 0) for i in range(n - 1)])
     solver.add(size <= budget)
     healthy = z3.Sum([s["compute_us"] + z3.If(x[i], s["write_us"], 0)
@@ -165,21 +165,85 @@ def solve_z3(stages, faults, probability, budget, timeout_ms, smt_path):
         lost = round(stages[fault["stage"]]["compute_us"] * fault["fraction"])
         failed.append(prefix + lost + z3.Sum(terms))
     objective = (1000 - probability) * len(faults) * healthy + probability * z3.Sum(failed)
-    handle = solver.minimize(objective)
-    solver.minimize(size)
-    solver.minimize(z3.Sum([z3.If(x[i], 1 << i, 0) for i in range(n - 1)]))
-    smt_path.write_text(solver.sexpr())
-    status = solver.check()
-    result = {"status": str(status), "elapsed_s": time.perf_counter() - began,
-              "optimality_proven": False, "mask": None}
+    mask_expr = z3.Sum([z3.If(x[i], 1 << i, 0) for i in range(n - 1)])
+    # Name the objectives so the exported SAT queries are directly inspectable.
+    objectives = []
+    for name, expression in (("objective", objective), ("bytes", size), ("mask", mask_expr)):
+        variable = z3.Int("plan_" + name)
+        solver.add(variable == expression)
+        objectives.append((name, variable))
+    smt_path.write_text(solver.to_smt2())
+    result = {"status": "unknown", "optimality_proven": False, "mask": None,
+              "method": "integer_binary_search_with_strict_improvement_checks",
+              "queries": [], "certificates": {}}
+    deadline = began + timeout_ms / 1000
+
+    def check(target, label, bound=None):
+        remaining = int((deadline - time.perf_counter()) * 1000)
+        if remaining <= 0:
+            result["reason"] = "Per-case solver time budget exhausted"
+            return z3.unknown
+        target.set(timeout=remaining)
+        status = target.check()
+        result["queries"].append({"label": label, "bound": bound, "status": str(status)})
+        if status == z3.unknown:
+            result["reason"] = target.reason_unknown()
+        return status
+
+    def remember(model):
+        result.update({name: model.eval(expression, model_completion=True).as_long()
+                       for name, expression in objectives})
+        result["healthy_us"] = model.eval(healthy, model_completion=True).as_long()
+        result["failed_us"] = [model.eval(term, model_completion=True).as_long() for term in failed]
+
+    # Use ordinary SMT feasibility queries instead of trusting Optimize's
+    # reported lower/upper bounds. All three integer objectives are nonnegative.
+    status = check(solver, "initial_feasibility")
     if status == z3.sat:
-        result.update(lower=str(handle.lower()), upper=str(handle.upper()))
-        model = solver.model()
-        result["mask"] = sum(1 << i for i in range(n - 1) if z3.is_true(model.eval(x[i])))
-        result["objective"] = model.eval(objective).as_long()
-        result["optimality_proven"] = result["lower"] == result["upper"] == str(result["objective"])
-    else:
-        result["reason"] = solver.reason_unknown()
+        best = solver.model()
+        remember(best)
+        for name, expression in objectives:
+            low, high = 0, best.eval(expression, model_completion=True).as_long()
+            while low < high:
+                middle = (low + high) // 2
+                solver.push()
+                solver.add(expression <= middle)
+                status = check(solver, name + "_search", middle)
+                if status == z3.sat:
+                    best = solver.model()
+                    high = best.eval(expression, model_completion=True).as_long()
+                    remember(best)
+                solver.pop()
+                if status == z3.unsat:
+                    low = middle + 1
+                elif status != z3.sat:
+                    break
+            if status == z3.unknown:
+                break
+            # Rebuild a fresh solver for the strict-improvement check. Save the
+            # exact query, the returned status, and the feasible witness value.
+            verifier = z3.Solver()
+            verifier.add(*solver.assertions())
+            verifier.add(expression < high)
+            smt_path.with_name(smt_path.stem + "-better-" + name + ".smt2").write_text(verifier.to_smt2())
+            status = check(verifier, name + "_strict_improvement", high)
+            result["certificates"][name] = {"value": high, "strict_improvement": str(status)}
+            if status != z3.unsat:
+                if status == z3.sat:
+                    result["reason"] = "Strict-improvement check contradicted binary search"
+                    result["counterexample"] = str(verifier.model())
+                break
+            solver.add(expression == high)
+        else:
+            # The retained witness satisfies all fixed lexicographic optima.
+            result["status"] = "sat"
+            result["optimality_proven"] = True
+    elif status == z3.unsat:
+        result["status"] = "unsat"
+        result["reason"] = "No feasible checkpoint set"
+    result["elapsed_s"] = time.perf_counter() - began
+    # Persist before the caller's exhaustive audit, including timeout answers.
+    smt_path.with_suffix(".json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
 
 
@@ -229,8 +293,20 @@ def study(workload, stages, directory, timeout_ms=5000):
             oracle = min((m for m in table if table[m][1] <= budget), key=table.get)
             record["oracle_mask"] = oracle
             if z["optimality_proven"]:
-                if z["objective"] != table[oracle][0] or table[z["mask"]][0] != table[oracle][0]:
-                    raise RuntimeError("Z3 and independent exhaustive replay disagree: " + case_id)
+                returned_healthy = simulate(stages, z["mask"])
+                returned_failed = [simulate(stages, z["mask"], f) for f in faults]
+                if (z["objective"] != table[oracle][0] or table[z["mask"]] != table[oracle]
+                        or z["bytes"] != table[z["mask"]][1] or z["bytes"] > budget
+                        or z["healthy_us"] != returned_healthy or z["failed_us"] != returned_failed):
+                    diagnostic = {"case": record, "stages": stages, "solver": z,
+                        "oracle_score": table[oracle], "returned_mask_score": table[z["mask"]],
+                        "returned_mask_healthy_us": returned_healthy,
+                        "returned_mask_failed_us": returned_failed,
+                        "feasible_scores": [table[m] for m in table if table[m][1] <= budget]}
+                    diagnostic_path = directory / (case_id + ".audit.json")
+                    diagnostic_path.write_text(json.dumps(diagnostic, indent=2, sort_keys=True) + "\n")
+                    raise RuntimeError("Z3 and independent exhaustive replay disagree: " + case_id
+                                       + "; full diagnostic: " + str(diagnostic_path))
                 masks["z3"] = z["mask"]
                 seconds["z3"] = z["elapsed_s"]
             for name, mask in masks.items():

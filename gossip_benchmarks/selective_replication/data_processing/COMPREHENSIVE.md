@@ -44,6 +44,10 @@ Read `summary.md` and share **`analysis.zip`**. That archive includes all modele
 cases, the discovery scan, SMT encodings, profiles, raw replay events, selected
 plans, correctness results, software versions, input fingerprints, and source
 snapshots. Raw public datasets/checkpoint payloads are not bundled.
+Solver results are saved before the exhaustive audit, including returned masks,
+objective values, per-scenario costs, SAT-query statuses and strict-improvement
+checks. A disagreement adds a diagnostic with the oracle's answer and feasible
+scores. Failed-worker configurations, events, progress and logs are also included.
 
 ```bash
 # Continue after timeout/interruption, retaining profiles, plans and finished runs:
@@ -61,6 +65,20 @@ controllers. Normal exits, timeouts, and Ctrl-C remove it. After a hard machine
 crash, verify the old controller has stopped before manually removing `run.lock`.
 An interrupted final JSONL append is preserved separately and repaired on resume;
 earlier corruption or failed output validation is not silently ignored.
+
+After a code fix, start a **fresh** run while reusing the old downloaded/prepared
+inputs (replace the path with the original run directory, not its ZIP file):
+
+```bash
+python gossip_benchmarks/selective_replication/data_processing/comprehensive.py \
+  --reuse-inputs-from ray_gcp_results/data-processing-comprehensive/YOUR_OLD_RUN_DIRECTORY
+```
+
+This copies and checks the prepared input fingerprints under the controller
+time budget. Input settings and the workload source must match the old run.
+Profiling and planning run again; no previous plans or replay observations are
+carried over, and the original directory is preserved. Subsequent interruptions
+of the new run can use ordinary `--resume` with its newly printed directory.
 
 ## Data and real-world operator patterns
 
@@ -171,12 +189,18 @@ Z3 receives Boolean checkpoint choices, a sum-of-bytes constraint, and symbolic
 dependency/recompute/restore expressions for each failure scenario. It minimizes
 weighted expected completion time, then checkpoint bytes, then a deterministic
 mask tie-break. **It does not receive a lookup table of the optimal answer.**
-It exports an `.smt2` encoding per case. A result is called proven only if the
-solver's lower and upper objective bounds coincide. Unknown/timeout results are
-recorded, not relabeled as optimal or replaced with an oracle solution.
+It uses ordinary Z3 feasibility queries with integer binary search, optimizing
+each objective in order and fixing its value before optimizing the next. For
+each objective, a fresh solver must report UNSAT for a strictly better solution
+under the earlier fixed objectives. The feasible witness and these queries are
+saved alongside the base `.smt2` encoding. It does not rely on `Optimize`'s
+reported objective bounds. Unknown/timeout results are recorded, not relabeled
+as optimal or replaced with an oracle solution. The per-case solver time budget
+covers all three searches and their strict-improvement checks.
 
 An independent imperative replay enumerates all 512 or 1,024 subsets for these
-small graphs and checks the proven Z3 objective. A disagreement aborts the run.
+small graphs and checks the proven Z3 objective, byte count and mask tie-break.
+A disagreement saves the full diagnostic before aborting the run.
 This is a correctness audit, not a scalability result. Greedy's timed execution
 uses lazy scoring of only its visited candidates, not a free precomputed oracle.
 The oracle and discovery scan are experimental overhead, separate from the
@@ -296,4 +320,4 @@ not a research contribution.
 - Zone lookup: https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv
 - 20 Newsgroups loader: https://scikit-learn.org/stable/modules/generated/sklearn.datasets.fetch_20newsgroups.html
 - DuckDB Python API: https://duckdb.org/docs/stable/clients/python/reference/
-- Z3 optimization API: https://z3prover.github.io/api/html/classz3py_1_1_optimize.html
+- Z3 solver API: https://z3prover.github.io/api/html/classz3py_1_1_solver.html

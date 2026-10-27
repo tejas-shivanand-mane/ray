@@ -328,20 +328,52 @@ def report(output, manifest, status, error=None):
         for path in sorted(output.iterdir()):
             if path.is_file() and path.suffix in (".json", ".jsonl", ".md", ".csv", ".log"):
                 archive.write(path, path.name)
-        for path in (output / "models").glob("*.smt2"):
-            archive.write(path, "models/" + path.name)
+        for path in sorted((output / "models").glob("*")):
+            if path.is_file() and path.suffix in (".smt2", ".json"):
+                archive.write(path, "models/" + path.name)
         if (output / "inputs" / "inputs.json").exists():
             archive.write(output / "inputs" / "inputs.json", "inputs/inputs.json")
-        for path in (output / "work").glob("*/worker-*.log"):
-            archive.write(path, str(path.relative_to(output)))
+        # Only small diagnostic files from unfinished/failed workers. Never
+        # include raw data or checkpoint payloads in the analysis bundle.
+        for path in sorted((output / "work").glob("*/*")):
+            if path.is_file() and path.suffix in (".json", ".jsonl", ".log"):
+                archive.write(path, str(path.relative_to(output)))
         for name in SOURCE_FILES + ("COMPREHENSIVE.md", "requirements-comprehensive.txt"):
             archive.write(Path(__file__).with_name(name), "source/" + name)
     archive_tmp.replace(output / "analysis.zip")
     return summary
 
 
+def reuse_prepared_inputs(output, settings):
+    """Copy verified input payloads into a NEW run; never reuse plans/results."""
+    source = settings.get("reuse_inputs_from")
+    if not source or (output / "inputs" / "inputs.json").exists():
+        return
+    source = Path(source)
+    previous = json.loads((source / "manifest.json").read_text())
+    keys = ("workloads", "taxi_rows", "news_documents", "news_tokens", "seed")
+    if any(previous[key] != settings[key] for key in keys):
+        raise RuntimeError("Reused input settings differ; match the original data settings or start without --reuse-inputs-from")
+    if previous["source_hashes"]["real_workloads.py"] != settings["source_hashes"]["real_workloads.py"]:
+        raise RuntimeError("Input/workload implementation changed; prepare fresh data")
+    metadata = json.loads((source / "inputs" / "inputs.json").read_text())
+    directory = output / "inputs"
+    directory.mkdir(exist_ok=True)
+    for name, info in metadata.items():
+        old = Path(info["path"])
+        target = directory / (name + "-reused" + "".join(old.suffixes))
+        temp = target.with_name(target.name + ".partial")
+        shutil.copyfile(old, temp)
+        if workloads.sha_file(temp) != info["sha256"]:
+            raise RuntimeError("Reused input fingerprint mismatch: " + str(old))
+        temp.replace(target)
+        info["path"] = str(target)
+    base.atomic_json(directory / "inputs.json", metadata)
+
+
 def controller(output):
     settings = json.loads((output / "manifest.json").read_text())
+    reuse_prepared_inputs(output, settings)
     inputs = workloads.prepare(output / "inputs", settings)
     (output / "models").mkdir(exist_ok=True)
     for workload in settings["workloads"]:
@@ -411,6 +443,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--reuse-inputs-from", type=Path,
+                        help="Start a fresh run using verified prepared inputs from an old run directory")
     parser.add_argument("--max-minutes", type=float, default=28)
     parser.add_argument("--workloads", nargs="+", choices=workloads.WORKLOADS, default=list(workloads.WORKLOADS))
     parser.add_argument("--taxi-rows", type=int, default=200000)
@@ -436,6 +470,8 @@ def main():
         parser.error("Input sizes and solver timeout must be positive")
     if len(set(args.workloads)) != len(args.workloads):
         parser.error("Duplicate workload names")
+    if args.reuse_inputs_from and (args.resume or args.taxi_file or args.zones_file):
+        parser.error("--reuse-inputs-from starts a fresh run and cannot be combined with --resume or local input overrides")
     versions = {}
     for package in ("duckdb", "pyarrow", "scikit-learn", "z3-solver"):
         try:
@@ -455,6 +491,7 @@ def main():
                     "news_documents": args.news_documents, "news_tokens": args.news_tokens,
                     "taxi_file": str(args.taxi_file.resolve()) if args.taxi_file else None,
                     "zones_file": str(args.zones_file.resolve()) if args.zones_file else None,
+                    "reuse_inputs_from": str(args.reuse_inputs_from.resolve()) if args.reuse_inputs_from else None,
                     "repeats": args.repeats, "seed": args.seed, "solver_timeout_ms": args.solver_timeout_ms,
                     "source_hashes": source_hashes(), "versions": versions, "python": sys.version,
                     "platform": platform.platform(), "command": sys.argv,
