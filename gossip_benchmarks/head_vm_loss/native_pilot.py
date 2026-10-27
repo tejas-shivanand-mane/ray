@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shlex
 import sys
+import threading
 import time
 
 from launcher import HeadVMLoss, PYTHON, BIN, ROOT, SHARED, NODE_UNIT, DRIVER_UNIT, parallel
@@ -21,16 +22,52 @@ LOCK = '/var/lib/raybench/ray-headloss-lock'
 
 
 class NativePilot(HeadVMLoss):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.transport_events = []
+        self.transport_lock = threading.Lock()
+
     def check_stop_capability(self):
         self.stop_args = stop_command()
 
     def gc(self, *args, **kwargs):
+        # Retry only the explicit IAP connection-creation failure: no SSH
+        # session was established. Never retry a timeout, generic SSH exit 255,
+        # remote command failure, or VM mutation with an unknown outcome.
+        check = kwargs.pop('check', True)
+        end = time.monotonic() + kwargs.pop('timeout', 180)
         if getattr(self, 'deadline', None) is not None:
-            remaining = self.deadline-time.monotonic()
+            end = min(end, self.deadline)
+        transport = len(args) >= 3 and args[0] == 'compute' and args[1] in ('ssh', 'scp')
+        for attempt in range(1, 4):
+            remaining = end-time.monotonic()
             if remaining <= 0:
-                raise TimeoutError('Pilot session budget exhausted; resume skips recorded outcomes')
-            kwargs['timeout'] = min(kwargs.get('timeout', 180), remaining)
-        return super().gc(*args, **kwargs)
+                raise TimeoutError('Cloud command/session budget exhausted; inspect recorded outcomes')
+            result = super().gc(*args, timeout=remaining, check=False, **kwargs)
+            unreachable = (transport and result.returncode != 0 and
+                "Error while connecting [4003:" in result.stderr and
+                'Failed to connect to port 22' in result.stderr)
+            delay = 2 * attempt
+            retry = unreachable and attempt < 3 and end-time.monotonic() > delay + 1
+            if unreachable:
+                event = dict(unix_s=time.time(), operation=args[1],
+                    target=str(args[2] if args[1] == 'ssh' else args[3]),
+                    attempt=attempt, reason='IAP 4003: cannot connect to SSH port 22',
+                    retry_in_s=delay if retry else None)
+                with self.transport_lock:
+                    self.transport_events.append(event)
+                    with (self.local/'native-transport.jsonl').open('a') as stream:
+                        stream.write(json.dumps(event)+'\n')
+            if not retry:
+                break
+            print(f'IAP SSH connection failed; retry {attempt+1}/3 in {delay}s', flush=True)
+            time.sleep(delay)
+        if check and result.returncode:
+            command = ['gcloud', *args, '--project='+self.project, '--quiet']
+            hint = ('\nIAP could not reach SSH port 22. Check VM status, SSH service and '
+                    'IAP firewall/connectivity; this is not a Ray recovery result.' if unreachable else '')
+            raise RuntimeError(shlex.join(command)+'\n'+result.stderr[-4000:]+result.stdout[-4000:]+hint)
+        return result
 
     def prepare(self):
         # Preparation has its own <=28 minute budget; no workload runs here.
@@ -402,6 +439,7 @@ class NativePilot(HeadVMLoss):
                 report['samples'].append(sample)
                 save()
                 print(label, flush=True)
+                transport_start = len(self.transport_events)
                 try:
                     self.run_one(f'{SHARED}/{self.run_id}/{name}/{label}', enabled, fault, infra, save, sample, workload)
                 except Exception as exc:
@@ -422,6 +460,7 @@ class NativePilot(HeadVMLoss):
                     raise
                 finally:
                     self.capture_diagnostics(f'{SHARED}/{self.run_id}/{name}/{label}', sample)
+                    sample['transport_events'] = self.transport_events[transport_start:]
                     save()
                 for vm in self.names:
                     if fault and vm == self.head:
@@ -432,6 +471,7 @@ class NativePilot(HeadVMLoss):
                         (directory/(label+'-'+vm+'.log')).write_text(log.stdout)
                     except Exception as exc:
                         sample.setdefault('journal_errors', {})[vm] = str(exc)
+                    sample['transport_events'] = self.transport_events[transport_start:]
                     save()
                 print(label+': '+sample['status'], flush=True)
             report['finished_matrix'] = len(report['samples']) == len(observations) and all(r['status'] != 'running' for r in report['samples'])
@@ -455,7 +495,12 @@ class NativePilot(HeadVMLoss):
             save()
             try:
                 if not errors:
-                    self.ssh(self.support, 'sudo -u raybench rmdir '+LOCK)
+                    try:
+                        self.ssh(self.support, 'sudo -u raybench rmdir '+LOCK)
+                    except Exception as exc:
+                        errors.append('Could not release suite lock: '+str(exc))
+                        report['cleanup_errors'] = errors
+                        save()
             finally:
                 self.deadline = None
         return report
@@ -465,7 +510,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['inventory', 'prepare', 'run', 'download'])
     parser.add_argument('--state', required=True)
-    parser.add_argument('--suite', default='native-head-v4')
+    parser.add_argument('--suite', default='native-head-v5')
     args = parser.parse_args()
     pilot = NativePilot(args.state)
     if args.action == 'inventory':

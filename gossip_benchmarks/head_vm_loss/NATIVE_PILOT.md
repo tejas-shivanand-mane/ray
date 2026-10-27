@@ -124,7 +124,31 @@ from accessible VMs (64 KiB per file, at most 128 files per VM). These include
 core-worker, raylet, GCS and worker stderr logs under each row's `diagnostics/`.
 Missing/truncated logs are recorded; the stopped original head is never restarted
 to obtain its logs. Download the evidence before deleting the support VM.
-The old suite must not be resumed with these changed helpers; use `native-head-v4`.
+The old suite must not be resumed with changed helpers; the current default is
+`native-head-v5`.
+
+### IAP connection failures
+
+The controller retries only the explicit IAP connection-creation error containing
+both `Error while connecting [4003:` and `Failed to connect to port 22` for SSH/SCP.
+There are at most three attempts, with two/four-second waits; all attempts and
+waits share the original command timeout and session budget. No timeout, generic
+SSH exit 255, remote-command error, or VM operation is automatically repeated.
+Persistent connection failure still stops the suite and remains an infrastructure
+error. Retries do not repair an unavailable VM, SSH service or network path.
+
+Events are appended to local `native-transport.jsonl`, including during setup and
+cleanup; per-observation events also appear in `native-report.json`. Retry delays
+are not silently subtracted from observed fault timing. A failure in
+`plain-healthy` before injection is not evidence about head-loss recovery.
+
+Use the notebook's optional connection diagnostic cell after restarting the
+kernel and setting `EXISTING_STATE_FILE` to the existing cluster's state file.
+It reads VM status, checks SSH, and reports the support services/lock. If all VMs
+are running and reachable, cleanup succeeded, and the lock is absent, use a new
+suite (`native-head-v5`), rerun preparation to upload/fingerprint the new helpers,
+then run the matrix. Preserve the previous report. Do not bypass a remaining lock
+or cleanup error; inspect it first. This update does not require VM recreation.
 
 ## Run from your existing checkout
 
@@ -143,7 +167,7 @@ conda activate ray-dev
 export STATE_FILE=/absolute/path/to/your/rayexp-...-state.json
 python gossip_benchmarks/head_vm_loss/native_pilot.py inventory --state "$STATE_FILE"
 python gossip_benchmarks/head_vm_loss/native_pilot.py prepare --state "$STATE_FILE"
-python gossip_benchmarks/head_vm_loss/native_pilot.py run --state "$STATE_FILE" --suite native-head-v4
+python gossip_benchmarks/head_vm_loss/native_pilot.py run --state "$STATE_FILE" --suite native-head-v5
 ```
 
 Preparation installs Redis/socat and sets up surviving NFS; budget <=28 minutes.
@@ -160,11 +184,11 @@ successful completion. Unknown cloud/start outcomes abort and require inspection
 After completion, or to collect partial evidence without rerunning:
 
 ```bash
-python gossip_benchmarks/head_vm_loss/native_pilot.py download --state "$STATE_FILE" --suite native-head-v4
+python gossip_benchmarks/head_vm_loss/native_pilot.py download --state "$STATE_FILE" --suite native-head-v5
 # Replace RUN_ID with the run_id inside your state JSON.
 python gossip_benchmarks/head_vm_loss/native_report.py \
-  ray_gcp_results/head-vm-loss/RUN_ID/native-head-v4/native-report.json \
-  --plot ray_gcp_results/head-vm-loss/RUN_ID/native-head-v4/completion.png
+  ray_gcp_results/head-vm-loss/RUN_ID/native-head-v5/native-report.json \
+  --plot ray_gcp_results/head-vm-loss/RUN_ID/native-head-v5/completion.png
 ```
 
 The report resides on your notebook host; detailed gates/results and Redis AOF
