@@ -48,7 +48,7 @@ class NativePilot(HeadVMLoss):
             # Its stable-only capability check is superseded by stop_command().
             super().prepare()
             self.ssh(self.support, 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server socat', timeout=300)
-            for name in ('native_workload.py', 'native_probe.py'):
+            for name in ('native_workload.py', 'native_probe.py', 'evidence.py'):
                 for vm in self.names:
                     self.scp(self.bundle / name, vm+':/tmp/'+name)
                     self.ssh(vm, f'sudo mkdir -p {ROOT} && sudo install -m 644 /tmp/{name} {ROOT}/{name}')
@@ -64,6 +64,7 @@ class NativePilot(HeadVMLoss):
             '--uid='+user, '--gid='+user, '--property=KillMode=control-group',
             '--property=TimeoutStopSec=10', '--property=Restart=no',
             '--property=RuntimeMaxSec='+str(seconds),
+            '--setenv=PYTHONPATH='+ROOT,
             '--setenv=PATH='+BIN+':/usr/bin:/bin', '--setenv=RAY_USAGE_STATS_ENABLED=0',
             '--setenv=OMP_NUM_THREADS=1', '--setenv=OPENBLAS_NUM_THREADS=1']
         args += ['--setenv='+e for e in env]
