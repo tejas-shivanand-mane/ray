@@ -1,0 +1,18 @@
+{
+  "description": "Illustrative sensitivity assumptions, NOT cloud-provider prices or measured failure probabilities. Probability is per modeled post-map recovery window, not per task or per second.",
+  "nodes": [
+    {"name": "spot_a", "kind": "spot", "failure_probability": 0.05, "usd_per_hour": 0.03, "speed": 1.0, "restart_s": 5.0, "transfer_mib_s": 100},
+    {"name": "spot_b", "kind": "spot", "failure_probability": 0.15, "usd_per_hour": 0.025, "speed": 0.8, "restart_s": 5.0, "transfer_mib_s": 100},
+    {"name": "regular_a", "kind": "regular", "failure_probability": 0.001, "usd_per_hour": 0.10, "speed": 1.2, "restart_s": 5.0, "transfer_mib_s": 100}
+  ],
+  "risk_profiles": [
+    {"name": "configured", "spot_multiplier": 1.0},
+    {"name": "higher_spot_risk", "spot_multiplier": 2.0}
+  ],
+  "checkpoint_mib_s": 50,
+  "reducer_usd_per_hour": 0.10,
+  "storage_fraction": 0.65,
+  "budget_factors": [1.0],
+  "deadline_factor": 2.0,
+  "minimum_deadline_success": 0.95
+}

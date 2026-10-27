@@ -1,5 +1,11 @@
 # Does selective recovery help data processing?
 
+For **7–100 task decisions, node-specific failure probabilities, spot/regular
+prices, placement, storage budgets and deadline targets**, use
+[JOINT_SCALING.md](JOINT_SCALING.md). This owner-run study profiles real document
+processing locally and compares eight planners in an explicitly offline node
+model. Its modeled cloud times/costs are not measured VM-failure results.
+
 To **confirm whether Z3 improves results**, use the fixed ten-case protocol in
 [CONFIRMATION.md](CONFIRMATION.md): fresh and disjoint document samples, seven
 repetitions, strong greedy and exact knapsack DP, and completion time including
