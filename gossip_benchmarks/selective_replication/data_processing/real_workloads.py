@@ -14,10 +14,13 @@ import re
 import shutil
 import urllib.request
 
+import sharded_dedup
+
 
 TAXI_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet"
 ZONE_URL = "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv"
-WORKLOADS = ("taxi_dashboard", "taxi_zone_join", "news_index")
+DEFAULT_WORKLOADS = ("taxi_dashboard", "taxi_zone_join", "news_index")
+WORKLOADS = DEFAULT_WORKLOADS + sharded_dedup.WORKLOADS
 
 
 def sha_file(path):
@@ -89,7 +92,7 @@ def prepare(directory, settings):
                             "source_url": TAXI_URL, "raw_sha256": sha_file(raw),
                             "sample": "first records by deterministic column ordering after filters"}
         metadata["zones"] = {"path": str(zones), "sha256": sha_file(zones), "source_url": ZONE_URL}
-    if "news_index" in settings["workloads"]:
+    if any(w.startswith("news_") for w in settings["workloads"]):
         from sklearn.datasets import fetch_20newsgroups
         data = fetch_20newsgroups(data_home=str(directory / "sklearn-cache"), subset="all",
                                  remove=("headers", "footers", "quotes"),
@@ -107,6 +110,8 @@ def prepare(directory, settings):
 
 
 def graph(workload):
+    if workload in sharded_dedup.WORKLOADS:
+        return sharded_dedup.graph()
     if workload == "taxi_dashboard":
         return [
             ("clean_trips", []), ("trip_features", [0]),
@@ -159,6 +164,8 @@ def sql(con, parents, query, params=None):
 
 
 def compute(workload, stage, parents, inputs, settings, con):
+    if workload in sharded_dedup.WORKLOADS:
+        return sharded_dedup.compute(stage, parents, inputs, settings)
     specs = graph(workload)
     if stage == len(specs) - 1:
         return {specs[parent][0]: {"sha256": fingerprint(value),

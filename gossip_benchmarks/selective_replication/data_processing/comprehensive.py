@@ -23,9 +23,10 @@ import zipfile
 import benchmark as base
 import budget_planner as planner
 import real_workloads as workloads
+import sharded_dedup
 
 
-SOURCE_FILES = ("comprehensive.py", "budget_planner.py", "real_workloads.py", "benchmark.py")
+SOURCE_FILES = ("comprehensive.py", "budget_planner.py", "real_workloads.py", "benchmark.py", "sharded_dedup.py")
 POLICIES = ("recompute", "checkpoint_all", "greedy", "greedy_swap", "z3")
 
 
@@ -262,7 +263,7 @@ def report(output, manifest, status, error=None):
                                    "expected_plus_planning_s": mean[2] + plan["planning_s"],
                                    "one_off_with_profile_s": mean[2] + plan["planning_s"] + profiles[workload]["elapsed_s"]})
         for name in ("greedy", "greedy_swap", "z3"):
-            for baseline in ("recompute", "checkpoint_all", "greedy_swap"):
+            for baseline in ("recompute", "checkpoint_all", "greedy", "greedy_swap"):
                 if name == baseline or not repeats or name not in values or baseline not in values:
                     continue
                 a, b = values[baseline], values[name]
@@ -283,8 +284,22 @@ def report(output, manifest, status, error=None):
         model_counts[origin] = {"cases": len(subset), "z3_proven": sum(c["solver"]["optimality_proven"] for c in subset),
             "greedy_suboptimal": sum(c["plans"]["greedy"]["model_gap_fraction"] > 0 for c in subset),
             "swap_suboptimal": sum(c["plans"]["greedy_swap"]["model_gap_fraction"] > 0 for c in subset)}
+    witnesses = [{"case": c["id"], "origin": c["origin"], "selected_for_measurement": c["measure"],
+                  "failure_scope": c.get("failure_scope", "compute_progress"),
+                  "budget_bytes": c["budget_bytes"],
+                  "empirical_comparison": next((r for r in comparisons if r["case"] == c["id"]
+                      and r["policy"] == "z3" and r["baseline"] == w["baseline"]), None), **w}
+                 for c in all_cases for w in c.get("counterexamples", [])]
+    base.atomic_json(output / "counterexamples.json", {
+        "status": status, "modeled_counterexamples": witnesses,
+        "meaning": "Strict modeled gaps certified by Z3 and exhaustive enumeration; empirical gains are separate.",
+        "discovery_counts": {w: {"scanned": len(s["discovery_scan"]),
+            "greedy_gaps": sum(r["greedy_gap_fraction"] > 0 for r in s["discovery_scan"]),
+            "swap_gaps": sum(r["swap_gap_fraction"] > 0 for r in s["discovery_scan"])} for w, s in studies.items()}})
     summary = {"status": status, "error": error, "unique_replays_completed": len(indexed),
                "unique_replays_planned": planned, "modeled_cases": model_counts,
+               "counterexamples": witnesses,
+               "failure_scopes": {w: s.get("failure_scope", "compute_progress") for w, s in studies.items()},
                "aggregates": aggregates, "comparisons": comparisons,
                "fault_fallbacks": sum(bool(r.get("fault")) and r["fault"]["mode"] != "timed_during_task" for r in rows),
                "fault_injections": sum(bool(r.get("fault")) for r in rows),
@@ -296,6 +311,16 @@ def report(output, manifest, status, error=None):
              (status, len(indexed), planned), "", summary["warning"], "", "## Modeled choices", ""]
     for origin, counts in model_counts.items():
         lines.append("- %s: %s" % (origin, counts))
+    lines += ["", "## Greedy counterexamples", "",
+              "Failure scopes: " + str(summary["failure_scopes"]), "",
+              "Reduce-only cases condition failures on the final combine task. They do not represent a uniform job-wide hazard."]
+    if not witnesses:
+        lines.append("No certified greedy counterexample in the completed modeled cases; see counterexamples.json for scan counts.")
+    for witness in witnesses:
+        lines.append("- {case}, {baseline}: remove {remove}, add {add}; modeled time "
+                     "{baseline_expected_s:.6f}s -> {optimal_expected_s:.6f}s; minimum changed choices "
+                     "to improve: {minimum_changed_choices_to_improve}; selected for measurement: "
+                     "{selected_for_measurement}.".format(**witness))
     lines += ["", "## Measured completion time", "",
               "Only complete matched repetitions enter each case. With-failure means the three evaluation fault locations; "
               "expected time mixes those with healthy time using that case's assumed probability. "
@@ -375,6 +400,8 @@ def controller(output):
     settings = json.loads((output / "manifest.json").read_text())
     reuse_prepared_inputs(output, settings)
     inputs = workloads.prepare(output / "inputs", settings)
+    if any(w in sharded_dedup.WORKLOADS for w in settings["workloads"]):
+        inputs = sharded_dedup.prepare(output / "inputs", inputs)
     (output / "models").mkdir(exist_ok=True)
     for workload in settings["workloads"]:
         path = output / ("profile-" + workload + ".json")
@@ -446,7 +473,7 @@ def main():
     parser.add_argument("--reuse-inputs-from", type=Path,
                         help="Start a fresh run using verified prepared inputs from an old run directory")
     parser.add_argument("--max-minutes", type=float, default=28)
-    parser.add_argument("--workloads", nargs="+", choices=workloads.WORKLOADS, default=list(workloads.WORKLOADS))
+    parser.add_argument("--workloads", nargs="+", choices=workloads.WORKLOADS, default=list(workloads.DEFAULT_WORKLOADS))
     parser.add_argument("--taxi-rows", type=int, default=200000)
     parser.add_argument("--news-documents", type=int, default=1500)
     parser.add_argument("--news-tokens", type=int, default=512)

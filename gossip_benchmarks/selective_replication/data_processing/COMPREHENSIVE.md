@@ -82,6 +82,80 @@ of the new run can use ordinary `--resume` with its newly printed directory.
 
 ## Data and real-world operator patterns
 
+### Targeted greedy-counterexample experiment
+
+Run this separately from the default three workloads:
+
+```bash
+python gossip_benchmarks/selective_replication/data_processing/comprehensive.py \
+  --workloads news_dedup_progress news_dedup_reduce
+```
+
+This uses the same real Newsgroups corpus, split into seven **natural source
+hierarchies**: alt, comp, misc, rec, sci, soc and talk. The record counts and text
+lengths follow the data; partition sizes are not adjusted to force an answer.
+Seven independent tasks read their prepared partitions, form three-word shingles
+and compute 64-component MinHash signatures. A single fused reducer builds
+16-band LSH candidate buckets and checks candidates against actual shingle
+Jaccard similarity at threshold 0.8. Its report includes verified pairs and a
+fingerprint covering all producer signatures. Very short documents with no
+three-word shingles are excluded from candidate generation.
+
+This is a document deduplication application pattern. Source partitions are
+prepared before profiling, and their files, record counts and fingerprints are
+recorded. Preparation time belongs to setup. Tasks still execute serially on
+one worker; this is not a distributed MapReduce implementation or production
+trace. MinHash/LSH is approximate candidate generation, not an exhaustive
+guarantee that every similar pair is found.
+
+Why this can expose a greedy gap: saving one large, expensive producer can
+consume space that would have protected two or more other producers whose
+combined recomputation cost is larger. A one-for-one swap cannot always make
+that improvement. The existing strong greedy algorithms are unchanged. For
+these seven optional outputs, discovery checks **every distinct subset-size
+budget**, at most 128 per probability, rather than only singleton/pair budgets.
+All scan outcomes are retained. Z3 still solves its symbolic constraints; it
+does not receive the exhaustive answer.
+
+The two names are **one application with two failure scenarios**, not independent
+workloads:
+
+- `news_dedup_progress`: planning/evaluation positions span useful computation
+  across producers and the reducer, including the final task.
+- `news_dedup_reduce`: all prescribed failures occur within the reducer, after
+  producers finish. Planning uses 15/35/55/75/95% of that task's profiled compute;
+  evaluation uses 25/50/80%. The assumed 1/10/30% probabilities therefore mean
+  a job experiences one failure in this phase. This is a deliberately targeted
+  recovery stress case, not a measured production failure distribution.
+
+Fusing candidate generation and verification into the final task means the
+seven producer outputs are the optional checkpoint boundaries. Splitting that
+reducer and allowing a checkpoint inside it is a different optimization problem
+and could change the outcome. The final report remains mandatory.
+
+Each scenario has 21 predefined modeled cases and up to three discovered cases.
+Two predefined cases and at most one discovered case per scenario receive five
+repetitions. The original 28-minute controller cap and resume behavior apply.
+Use a fresh run: source changes invalidate prior profiles/plans. The default
+command still selects only the original three workloads.
+
+`counterexamples.json` explicitly reports the checkpoint choices to remove/add,
+both byte counts and modeled times, and the smallest number of selection bits
+that must change to improve on greedy. A case is called a modeled counterexample
+only after Z3 and exhaustive enumeration agree on a strictly better objective.
+The file links it to the paired measured comparison when available. A modeled
+gap can vanish in actual timing or fail to repay planning overhead. No gap found
+is reported explicitly; it is never replaced with the constructed unit-test
+fixture. Discovered cases cannot estimate how frequently greedy loses.
+
+For reduce-only faults, the independent-producer selection is a knapsack-style
+problem; dynamic programming can also solve it. A greedy counterexample here
+would demonstrate a limitation of the tested heuristics, not that SMT is uniquely
+necessary or a novel research contribution.
+
+Background on the processing pattern: *Mining of Massive Datasets*, Chapter 3,
+https://infolab.stanford.edu/~ullman/mmds/ch3n.pdf.
+
 ### Taxi dashboard
 
 Source: January 2024 yellow taxi trip records from the NYC Taxi and Limousine

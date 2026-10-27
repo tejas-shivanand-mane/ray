@@ -5,6 +5,11 @@ controls, Z3 optimization, and resumable measured replays**, use
 [COMPREHENSIVE.md](COMPREHENSIVE.md). The original small generated-data experiment
 below remains available unchanged.
 
+The targeted `news_dedup_progress news_dedup_reduce` experiment in that guide
+adds seven real document-source partitions competing for checkpoint space. It
+exports explicit greedy counterexamples only if the measured cost model and Z3
+audit establish them; ordinary and reduce-phase failure scenarios remain separate.
+
 This is a small **measured mechanism experiment**, not a claim of research
 novelty or a distributed Ray benchmark. It executes real data-processing
 operators on generated records, commits selected intermediate outputs, abruptly

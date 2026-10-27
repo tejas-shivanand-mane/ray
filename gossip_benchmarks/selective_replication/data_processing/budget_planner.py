@@ -13,13 +13,14 @@ FRACTIONS = (0, .001, .01, .03, .1, .3, 1)
 PROBABILITIES = (10, 100, 300)  # per thousand, not observed failure frequencies
 
 
-def fault_points(stages, fractions):
+def fault_points(stages, fractions, include_final=False):
     """Map useful-compute progress to a task and fractional lost computation."""
-    total = sum(s["compute_us"] for s in stages[:-1])
+    eligible = stages if include_final else stages[:-1]
+    total = sum(s["compute_us"] for s in eligible)
     points = []
     for fraction in fractions:
         target, prefix = fraction * total, 0
-        for index, stage in enumerate(stages[:-1]):
+        for index, stage in enumerate(eligible):
             if prefix + stage["compute_us"] >= target:
                 points.append({"stage": index, "fraction": (target - prefix) / stage["compute_us"],
                                "progress_fraction": fraction})
@@ -249,13 +250,24 @@ def solve_z3(stages, faults, probability, budget, timeout_ms, smt_path):
 
 def study(workload, stages, directory, timeout_ms=5000):
     """Fixed grid + labeled discovery of storage tradeoffs on measured operators."""
-    faults = fault_points(stages, (.15, .35, .55, .75, .95))
-    evaluation = fault_points(stages, (.25, .50, .80))
+    sharded = workload.startswith("news_dedup_")
+    failure_scope = "reduce_phase_only" if workload == "news_dedup_reduce" else "compute_progress"
+    if failure_scope == "reduce_phase_only":
+        faults = [{"stage": len(stages) - 1, "fraction": f} for f in (.15, .35, .55, .75, .95)]
+        evaluation = [{"stage": len(stages) - 1, "fraction": f} for f in (.25, .50, .80)]
+    else:
+        faults = fault_points(stages, (.15, .35, .55, .75, .95), include_final=sharded)
+        evaluation = fault_points(stages, (.25, .50, .80), include_final=sharded)
     total_bytes = sum(s["bytes"] for s in stages[:-1])
     fixed = [(f, round(total_bytes * f)) for f in FRACTIONS]
     sizes = [s["bytes"] for s in stages[:-1]]
     # Scan real checkpoint-size breakpoints, not hand-written task benefits.
     discovery_budgets = sorted(set(sizes + [a + b for a, b in itertools.combinations(sizes, 2)]))
+    if sharded:
+        # Seven producers have just 128 subsets. Every feasibility breakpoint
+        # is cheap to inspect; leave the old workloads' discovery grid unchanged.
+        discovery_budgets = sorted({sum(size for i, size in enumerate(sizes) if mask & (1 << i))
+                                    for mask in range(1 << len(sizes))})
     cases, scan = [], []
     for probability in PROBABILITIES:
         table = make_table(stages, faults, probability)
@@ -280,6 +292,7 @@ def study(workload, stages, directory, timeout_ms=5000):
             case_id = "%s-p%d-%s-b%d" % (workload, probability, origin, budget)
             record = {"id": case_id, "origin": origin, "budget_fraction": fraction,
                       "workload": workload, "budget_bytes": budget,
+                      "failure_scope": failure_scope,
                       "probability_per_thousand": probability, "planning_faults": faults,
                       "evaluation_faults": evaluation, "plans": {}}
             masks = {"recompute": 0, "checkpoint_all": (1 << len(sizes)) - 1}
@@ -315,6 +328,23 @@ def study(workload, stages, directory, timeout_ms=5000):
                     "selected": [s["name"] for i, s in enumerate(stages[:-1]) if mask & (1 << i)],
                     "modeled_expected_s": table[mask][0] / (1000 * len(faults) * 1e6),
                     "model_gap_fraction": (table[mask][0] - table[oracle][0]) / max(1, table[mask][0])}
+            record["counterexamples"] = []
+            if "z3" in masks:
+                for name in ("greedy", "greedy_swap"):
+                    chosen = masks[name]
+                    if table[chosen][0] <= table[oracle][0]:
+                        continue
+                    better = [m for m in table if table[m][1] <= budget and table[m][0] < table[chosen][0]]
+                    record["counterexamples"].append({
+                        "baseline": name, "baseline_mask": chosen, "optimal_mask": oracle,
+                        "baseline_bytes": table[chosen][1], "optimal_bytes": table[oracle][1],
+                        "baseline_expected_s": table[chosen][0] / (1000 * len(faults) * 1e6),
+                        "optimal_expected_s": table[oracle][0] / (1000 * len(faults) * 1e6),
+                        "remove": [s["name"] for i, s in enumerate(stages[:-1])
+                                   if chosen & (1 << i) and not oracle & (1 << i)],
+                        "add": [s["name"] for i, s in enumerate(stages[:-1])
+                                if oracle & (1 << i) and not chosen & (1 << i)],
+                        "minimum_changed_choices_to_improve": min((m ^ chosen).bit_count() for m in better)})
             cases.append(record)
     # Predefined measurements: moderate budget and unconstrained, q=.1.
     # At most one extra case per workload, chosen BEFORE measured evaluations.
@@ -327,4 +357,6 @@ def study(workload, stages, directory, timeout_ms=5000):
                                          c["plans"]["greedy"]["model_gap_fraction"]))
         chosen["measure"] = True
     return {"cases": cases, "discovery_scan": scan, "total_checkpoint_bytes": total_bytes,
+            "failure_scope": failure_scope,
+            "discovery_budget_rule": "all_subset_sizes" if sharded else "singleton_and_pair_sizes",
             "evaluation_faults": evaluation}
