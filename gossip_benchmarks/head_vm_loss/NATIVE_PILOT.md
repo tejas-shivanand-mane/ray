@@ -3,10 +3,18 @@
 Prepared against main `c8bde84a7becb1fd81d7e9e76782701d16b62f75`.
 Implementation has been inspected, **not executed or tested** by the assistant.
 Open [Ray_GCP_Native_Head_VM_Loss.ipynb](../Ray_GCP_Native_Head_VM_Loss.ipynb)
-for editable setup, inventory, preparation, run/resume, collection, and plotting
-cells. Run cells individually; skip preparation on an ordinary resume. The plot
-cell also works independently with an explicit report path. No existing notebook
-is modified. The existing training notebook remains a different experiment.
+for a settings-first workflow matching `Selective_Replication_GCP`: visible VM
+creation/setup cells, direct `cloud.prepare()` and `cloud.run_pilot(...)` calls,
+and standalone plotting. No subprocess wrapper runs the experiment.
+Set `EXISTING_STATE_FILE` to reuse a cluster, or leave it `None` to prepare fresh
+VMs on the default network. Edit `TASKS`, `PAYLOAD_BYTES`,
+`OBSERVATION_TIMEOUT_S`, `MAX_EXPERIMENT_MINUTES`, and `OBSERVATIONS` in the first
+cell. The runner records these settings and refuses changed settings on resume.
+Use a new suite name after this helper update or when changing workload/matrix.
+Run cells individually; skip creation/setup/preparation on an ordinary resume.
+After restarting the kernel, run settings and the optional reconnect cell before
+run/resume. The plot cell works independently with `RESULTS_DIR`.
+The original selective and training notebooks are unchanged.
 
 ## What inspection established
 
@@ -68,7 +76,7 @@ not the monetary cost of reserving support/replacement capacity. Native profilin
 is enabled in both arms; overhead includes instrumentation. No streaming/Data or
 TorchFT options are enabled. No assumption is made that ON succeeds or is faster.
 
-The owner exports 16 static-return normal task ObjectRefs directly to two
+By default the owner exports 16 static-return normal task ObjectRefs directly to two
 borrowers. Original executions wait on per-object NFS gates. One is consumed;
 15 remain unfinished when the owner/head is lost. OFF and ON receive the same
 replacement GCS operation. Original gates stay closed in fault observations;

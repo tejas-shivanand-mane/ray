@@ -125,7 +125,7 @@ class NativePilot(HeadVMLoss):
                 result[name] = dict(error=str(exc))
         return result
 
-    def run_one(self, folder, enabled, fault, infrastructure, save, sample):
+    def run_one(self, folder, enabled, fault, infrastructure, save, sample, workload):
         self.reset()
         self.ssh(self.support, 'sudo -u raybench mkdir '+folder)
         config = dict(enable_recovery_succession=enabled,
@@ -173,14 +173,14 @@ class NativePilot(HeadVMLoss):
             head_ip=self.nodes[self.head]['ip'], support_ip=self.nodes[self.support]['ip'],
             replacement_ip=self.nodes[self.replacement]['ip'],
             executor_ips=[self.nodes[n]['ip'] for n in self.trainers],
-            tasks=16, payload_bytes=1024*1024, timeout_s=300)
+            **workload)
         self._upload_json(cfg, folder+'/native-config.json')
         sample.update(native_config=config, before=identity,
             counters_before=self.counters(self.names), workload=cfg)
         sample['workload_dispatch_monotonic'] = time.monotonic()
         save()
-        self.service(self.support, DRIVER_UNIT, [PYTHON, ROOT+'/native_workload.py', folder+'/native-config.json'], seconds=330)
-        end = time.monotonic()+300
+        self.service(self.support, DRIVER_UNIT, [PYTHON, ROOT+'/native_workload.py', folder+'/native-config.json'], seconds=cfg['timeout_s']+30)
+        end = time.monotonic()+cfg['timeout_s']
         fault_done = False
         while time.monotonic() < end:
             result = self._remote_json(folder+'/result.json')
@@ -247,10 +247,33 @@ class NativePilot(HeadVMLoss):
             time.sleep(1)
         raise TimeoutError('Head termination unconfirmed')
 
-    def run_pilot(self, name, budget_s=1680):
+    def run_pilot(self, name, budget_s=1680, *, tasks=16,
+                  payload_bytes=1024*1024, timeout_s=300, observations=None):
         self._check_name(name)
         if not self.ready or not 60 <= budget_s <= 1680:
             raise ValueError('Prepare first; budget must be 60..1680 seconds')
+        if (type(tasks) is not int or not 2 <= tasks <= 32 or
+                type(payload_bytes) is not int or not 8 <= payload_bytes <= 4*1024*1024 or
+                type(timeout_s) is not int or not 60 <= timeout_s <= 300):
+            raise ValueError('Use 2..32 tasks, 8 bytes..4 MiB payloads, and 60..300 seconds')
+        if observations is None:
+            observations = [
+                ('plain-healthy', False, False, False),
+                ('off-healthy', False, False, True), ('on-healthy', True, False, True),
+                ('off-loss', False, True, True), ('on-loss', True, True, True)]
+        observations = [list(row) for row in observations]
+        if not observations or len(observations) > 10:
+            raise ValueError('Use 1..10 predeclared observations')
+        for row in observations:
+            if len(row) != 4 or any(type(flag) is not bool for flag in row[1:]):
+                raise ValueError('Each observation is (label, enabled, fault, infrastructure)')
+            self._check_name(row[0])
+            if row[2] and not row[3]:
+                raise ValueError('Head replacement requires Redis/proxy infrastructure')
+        if len({row[0] for row in observations}) != len(observations):
+            raise ValueError('Observation labels must be unique')
+        workload = dict(tasks=tasks, payload_bytes=payload_bytes, timeout_s=timeout_s)
+        settings = dict(workload=workload, observations=observations)
         for vm in self.names:
             self.describe(vm)  # Recheck ownership and instance IDs on every resume.
         directory = self.local / name
@@ -264,6 +287,10 @@ class NativePilot(HeadVMLoss):
             extra_resources='one reserved replacement VM; Redis/proxy/NFS/driver share support VM',
             environment=json.loads((self.local/'environment.json').read_text()),
             interpretation='single diagnostic replicate; not steady-state throughput or production HA')
+        if not fresh and report.get('settings') != settings:
+            raise ValueError('Settings changed or legacy report: use a new suite name')
+        report['settings'] = settings
+        report['planned_observations'] = len(observations)
         hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in self.bundle.glob('native_*.py')}
         prepared = json.loads((self.local/'native-prepared.json').read_text())
         if prepared['helpers'] != hashes:
@@ -283,21 +310,18 @@ class NativePilot(HeadVMLoss):
                 # Exclusive remote suite creation protects evidence even if the
                 # notebook host lost its local report. Never overwrite remote rows.
                 self.ssh(self.support, f'sudo -u raybench mkdir {SHARED}/{self.run_id}/{name}')
-            for label, enabled, fault, infra in (
-                ('plain-healthy', False, False, False),
-                ('off-healthy', False, False, True), ('on-healthy', True, False, True),
-                ('off-loss', False, True, True), ('on-loss', True, True, True)):
+            for label, enabled, fault, infra in observations:
                 if any(r['label'] == label for r in report['samples']):
                     continue  # Failed/interrupted observations are never silently overwritten.
-                if self.deadline-time.monotonic() < 420:
-                    report['paused_reason'] = 'Less than seven minutes remain for another observation'
+                if self.deadline-time.monotonic() < timeout_s+120:
+                    report['paused_reason'] = 'Insufficient time for the workload plus two-minute setup reserve'
                     break
                 sample = dict(label=label, enabled=enabled, fault=fault, infrastructure=infra, status='running')
                 report['samples'].append(sample)
                 save()
                 print(label, flush=True)
                 try:
-                    self.run_one(f'{SHARED}/{self.run_id}/{name}/{label}', enabled, fault, infra, save, sample)
+                    self.run_one(f'{SHARED}/{self.run_id}/{name}/{label}', enabled, fault, infra, save, sample, workload)
                 except Exception as exc:
                     sample.update(status='infrastructure_or_setup_error', error=str(exc))
                     save()
@@ -312,7 +336,7 @@ class NativePilot(HeadVMLoss):
                         f'-u {REDIS} -u {PROXY} --no-pager -n 400', timeout=15)
                     (directory/(label+'-'+vm+'.log')).write_text(log.stdout)
                 print(label+': '+sample['status'], flush=True)
-            report['finished_matrix'] = len(report['samples']) == 5 and all(r['status'] != 'running' for r in report['samples'])
+            report['finished_matrix'] = len(report['samples']) == len(observations) and all(r['status'] != 'running' for r in report['samples'])
         finally:
             # Reserve at most 90 seconds beyond the work budget for fencing. If it
             # fails keep the lock; never restart a failed head during cleanup.
