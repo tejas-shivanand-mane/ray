@@ -23,6 +23,7 @@ LOCK = '/var/lib/raybench/ray-headloss-lock'
 
 class NativePilot(HeadVMLoss):
     driver_script = 'native_workload.py'
+    max_observation_timeout_s = 300
 
     def workload_parameters(self):
         return {}
@@ -96,7 +97,8 @@ class NativePilot(HeadVMLoss):
             self.ssh(self.support, 'sudo DEBIAN_FRONTEND=noninteractive apt-get '
                 '-o DPkg::Lock::Timeout=120 install -y -qq redis-server socat', timeout=300)
             for name in ('native_workload.py', 'native_probe.py', 'native_gate.py',
-                         'native_ml_task.py', 'native_ml_workload.py', 'evidence.py'):
+                         'native_ml_task.py', 'native_ml_workload.py',
+                         'native_torchft_workload.py', 'evidence.py'):
                 for vm in self.names:
                     self.scp(self.bundle / name, vm+':/tmp/'+name)
                     self.ssh(vm, f'sudo mkdir -p {ROOT} && sudo install -m 644 /tmp/{name} {ROOT}/{name}')
@@ -378,8 +380,8 @@ class NativePilot(HeadVMLoss):
             raise ValueError('Prepare first; budget must be 60..1680 seconds')
         if (type(tasks) is not int or not 2 <= tasks <= 32 or
                 type(payload_bytes) is not int or not 8 <= payload_bytes <= 4*1024*1024 or
-                type(timeout_s) is not int or not 60 <= timeout_s <= 300):
-            raise ValueError('Use 2..32 tasks, 8 bytes..4 MiB payloads, and 60..300 seconds')
+                type(timeout_s) is not int or not 60 <= timeout_s <= self.max_observation_timeout_s):
+            raise ValueError('Invalid task count, payload size, or observation timeout')
         if any(type(v) is not int or not 1000 <= v <= 15000
                for v in (keepalive_interval_ms, keepalive_timeout_ms)):
             raise ValueError('Diagnostic keepalive settings must be 1000..15000 ms')
@@ -421,6 +423,7 @@ class NativePilot(HeadVMLoss):
         if not fresh and report.get('settings') != settings:
             raise ValueError('Settings changed or legacy report: use a new suite name')
         report['settings'] = settings
+        report.pop('paused_reason', None)
         report.update(self.report_metadata())
         report['planned_observations'] = len(observations)
         hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in self.bundle.glob('native_*.py')}

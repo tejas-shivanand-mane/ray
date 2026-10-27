@@ -55,6 +55,18 @@ def main(config):
                         write_json(folder / f'release-{index}.json', dict(unix_s=time.time()))
                         released.add(index)
                         reply = dict(released=True)
+                    elif self.path == '/torchft_event' and config.get('torchft'):
+                        # Evidence only: no release gate or task resubmission.
+                        rank = value['rank']
+                        if type(rank) is not int or rank not in (0, 1):
+                            raise ValueError('Invalid training rank')
+                        event = dict(value, server_unix_s=time.time())
+                        with (folder / f'torchft-events-{rank}.jsonl').open('a') as stream:
+                            stream.write(json.dumps(event)+'\n')
+                            stream.flush()
+                        if value['kind'] == 'progress':
+                            write_json(folder / f'torchft-progress-{rank}.json', event)
+                        reply = dict(ok=True)
                     elif self.path in ('/training_gate', '/training_progress'):
                         token = value['token']
                         entry = registrations[token]
