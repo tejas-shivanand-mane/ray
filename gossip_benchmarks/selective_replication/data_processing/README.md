@@ -1,5 +1,10 @@
 # Does selective recovery help data processing?
 
+To **confirm whether Z3 improves results**, use the fixed ten-case protocol in
+[CONFIRMATION.md](CONFIRMATION.md): fresh and disjoint document samples, seven
+repetitions, strong greedy and exact knapsack DP, and completion time including
+planning overhead. It performs no adaptive search for favorable cases.
+
 For **real public data, branching pipelines, storage budgets, stronger greedy
 controls, Z3 optimization, and resumable measured replays**, use
 [COMPREHENSIVE.md](COMPREHENSIVE.md). The original small generated-data experiment

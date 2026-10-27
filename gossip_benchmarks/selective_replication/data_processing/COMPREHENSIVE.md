@@ -1,5 +1,11 @@
 # Real-data selective checkpointing with storage constraints
 
+For the prespecified follow-up to the discovered greedy counterexample, see
+[CONFIRMATION.md](CONFIRMATION.md) and run `comprehensive.py --confirm-z3`.
+That mode fixes ten cases, adds exact knapsack DP, uses a disjoint document
+sample and seven timing blocks, and reports primary comparisons including
+planning time. The exploratory workflow below remains separate.
+
 This benchmark asks two separate questions:
 
 1. Can selectively saving intermediate outputs improve completion time compared

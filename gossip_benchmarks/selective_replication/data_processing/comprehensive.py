@@ -24,9 +24,11 @@ import benchmark as base
 import budget_planner as planner
 import real_workloads as workloads
 import sharded_dedup
+import confirmation
 
 
-SOURCE_FILES = ("comprehensive.py", "budget_planner.py", "real_workloads.py", "benchmark.py", "sharded_dedup.py")
+SOURCE_FILES = ("comprehensive.py", "budget_planner.py", "real_workloads.py", "benchmark.py",
+                "sharded_dedup.py", "confirmation.py")
 POLICIES = ("recompute", "checkpoint_all", "greedy", "greedy_swap", "z3")
 
 
@@ -231,6 +233,8 @@ def replay_requirements(studies):
 
 
 def report(output, manifest, status, error=None):
+    if manifest.get("study_mode") == "confirmation":
+        return confirmation.report(output, manifest, status, error)
     profiles, studies = gather(output)
     rows = base.read_rows(output / "runs.jsonl")
     indexed = {(r["workload"], r["mask"], r["repeat"], r["scenario"]): r for r in rows if r["valid"]}
@@ -348,6 +352,11 @@ def report(output, manifest, status, error=None):
             writer = csv.DictWriter(stream, fieldnames=list(aggregates[0]))
             writer.writeheader()
             writer.writerows(aggregates)
+    archive_output(output)
+    return summary
+
+
+def archive_output(output):
     archive_tmp = output / "analysis.zip.tmp"
     with zipfile.ZipFile(archive_tmp, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(output.iterdir()):
@@ -363,10 +372,9 @@ def report(output, manifest, status, error=None):
         for path in sorted((output / "work").glob("*/*")):
             if path.is_file() and path.suffix in (".json", ".jsonl", ".log"):
                 archive.write(path, str(path.relative_to(output)))
-        for name in SOURCE_FILES + ("COMPREHENSIVE.md", "requirements-comprehensive.txt"):
+        for name in SOURCE_FILES + ("COMPREHENSIVE.md", "CONFIRMATION.md", "requirements-comprehensive.txt"):
             archive.write(Path(__file__).with_name(name), "source/" + name)
     archive_tmp.replace(output / "analysis.zip")
-    return summary
 
 
 def reuse_prepared_inputs(output, settings):
@@ -398,6 +406,8 @@ def reuse_prepared_inputs(output, settings):
 
 def controller(output):
     settings = json.loads((output / "manifest.json").read_text())
+    if settings.get("study_mode") == "confirmation":
+        return confirmation.run_controller(output, settings)
     reuse_prepared_inputs(output, settings)
     inputs = workloads.prepare(output / "inputs", settings)
     if any(w in sharded_dedup.WORKLOADS for w in settings["workloads"]):
@@ -470,6 +480,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--confirm-z3", action="store_true", help="Run the fixed ten-case confirmation protocol")
     parser.add_argument("--reuse-inputs-from", type=Path,
                         help="Start a fresh run using verified prepared inputs from an old run directory")
     parser.add_argument("--max-minutes", type=float, default=28)
@@ -499,8 +510,16 @@ def main():
         parser.error("Duplicate workload names")
     if args.reuse_inputs_from and (args.resume or args.taxi_file or args.zones_file):
         parser.error("--reuse-inputs-from starts a fresh run and cannot be combined with --resume or local input overrides")
+    if args.confirm_z3:
+        if (args.resume or args.reuse_inputs_from or args.taxi_file or args.zones_file
+                or args.news_documents != 1500 or args.news_tokens != 512 or args.seed != 20261026
+                or args.repeats != 5 or args.workloads != list(workloads.DEFAULT_WORKLOADS)):
+            parser.error("--confirm-z3 fixes data settings, methods and seven repeats; supply only output/time/solver options. "
+                         "To resume, use --resume without --confirm-z3.")
+        args.workloads = list(sharded_dedup.WORKLOADS)
+        args.repeats = confirmation.REPEATS
     versions = {}
-    for package in ("duckdb", "pyarrow", "scikit-learn", "z3-solver"):
+    for package in ("duckdb", "pyarrow", "scikit-learn", "z3-solver", "scipy"):
         try:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
@@ -511,7 +530,8 @@ def main():
         if manifest["source_hashes"] != source_hashes() or manifest["versions"] != versions:
             parser.error("Source/dependency versions changed; start a fresh run rather than mixing results")
     else:
-        output = (args.output or Path("ray_gcp_results/data-processing-comprehensive") /
+        root = "ray_gcp_results/data-processing-confirmation" if args.confirm_z3 else "ray_gcp_results/data-processing-comprehensive"
+        output = (args.output or Path(root) /
                   (time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8])).resolve()
         output.mkdir(parents=True, exist_ok=False)
         manifest = {"schema_version": 1, "workloads": args.workloads, "taxi_rows": args.taxi_rows,
@@ -523,6 +543,10 @@ def main():
                     "source_hashes": source_hashes(), "versions": versions, "python": sys.version,
                     "platform": platform.platform(), "command": sys.argv,
                     "budget_fractions": planner.FRACTIONS, "probabilities_per_thousand": planner.PROBABILITIES}
+        if args.confirm_z3:
+            manifest.update(study_mode="confirmation", confirmation_protocol=confirmation.protocol())
+            manifest.pop("budget_fractions")
+            manifest.pop("probabilities_per_thousand")
         base.atomic_json(output / "manifest.json", manifest)
     lock = output / "run.lock"
     try:
