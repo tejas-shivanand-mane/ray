@@ -16,6 +16,7 @@ from gcp.capabilities import stop_command
 
 REDIS = 'ray-native-redis.service'
 PROXY = 'ray-native-proxy.service'
+GATE = 'ray-native-gate.service'
 LOCK = '/var/lib/raybench/ray-headloss-lock'
 
 
@@ -47,8 +48,9 @@ class NativePilot(HeadVMLoss):
             # Base prepare checks image identity and moves NFS off the head.
             # Its stable-only capability check is superseded by stop_command().
             super().prepare()
-            self.ssh(self.support, 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server socat', timeout=300)
-            for name in ('native_workload.py', 'native_probe.py', 'evidence.py'):
+            self.ssh(self.support, 'sudo DEBIAN_FRONTEND=noninteractive apt-get '
+                '-o DPkg::Lock::Timeout=120 install -y -qq redis-server socat', timeout=300)
+            for name in ('native_workload.py', 'native_probe.py', 'native_gate.py', 'evidence.py'):
                 for vm in self.names:
                     self.scp(self.bundle / name, vm+':/tmp/'+name)
                     self.ssh(vm, f'sudo mkdir -p {ROOT} && sudo install -m 644 /tmp/{name} {ROOT}/{name}')
@@ -56,6 +58,9 @@ class NativePilot(HeadVMLoss):
             write_json(self.local/'native-prepared.json', dict(
                 helpers={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                          for p in self.bundle.glob('native_*.py')}))
+        except BaseException:
+            self.ready = False
+            raise
         finally:
             self.deadline = None
 
@@ -68,6 +73,8 @@ class NativePilot(HeadVMLoss):
             '--setenv=PATH='+BIN+':/usr/bin:/bin', '--setenv=RAY_USAGE_STATS_ENABLED=0',
             '--setenv=OMP_NUM_THREADS=1', '--setenv=OPENBLAS_NUM_THREADS=1']
         args += ['--setenv='+e for e in env]
+        args += ['--setenv=RAY_'+key+'='+str(value)
+                 for key, value in getattr(self, 'detection_config', {}).items()]
         self.ssh(host, shlex.join(args+argv))
 
     def stop_service(self, host, unit):
@@ -117,8 +124,30 @@ class NativePilot(HeadVMLoss):
         elif obj['status'] != 'RUNNING':
             raise RuntimeError('Head is in transitional state '+obj['status'])
         parallel(self._stop_node, self.names)
-        for unit in (PROXY, REDIS):
+        for unit in (PROXY, REDIS, GATE):
             self.stop_service(self.support, unit)
+
+    def capture_diagnostics(self, folder, sample):
+        """Best effort, before reset/cleanup; missing diagnostics never imply success."""
+        diagnostics = sample.setdefault('diagnostics', {})
+        for host in self.names:
+            if host == self.head and sample.get('instance_after', {}).get('status') == 'TERMINATED':
+                diagnostics[host] = dict(unavailable='Head VM remains stopped')
+                continue
+            try:
+                destination = folder+'/diagnostics/'+host
+                result = self.ssh(host, 'timeout 12s sudo -u raybench '+PYTHON+' '+
+                    ROOT+'/native_probe.py logs '+shlex.quote(destination), timeout=18)
+                diagnostics[host] = json.loads(result.stdout)
+            except Exception as exc:
+                diagnostics[host] = dict(error=str(exc))
+        address = self.nodes[self.support if sample['infrastructure'] else self.head]['ip']+':6379'
+        try:
+            result = self.ssh(self.support, 'timeout 12s '+PYTHON+' '+ROOT+
+                '/native_probe.py identity '+shlex.quote(address), timeout=18)
+            sample['gcs_at_observation_end'] = json.loads(result.stdout)
+        except Exception as exc:
+            sample['gcs_at_observation_end'] = dict(error=str(exc))
 
     def counters(self, names):
         result = {}
@@ -143,6 +172,7 @@ class NativePilot(HeadVMLoss):
             gcs_rpc_server_reconnect_timeout_s=600, health_check_initial_delay_ms=1000,
             health_check_period_ms=1000, health_check_timeout_ms=3000,
             health_check_failure_threshold=3)
+        config.update(self.detection_config)
         if infrastructure:
             # Keep credentials outside the downloadable suite directory. Both
             # heads read the same owner-only file from surviving w4-backed NFS.
@@ -200,8 +230,23 @@ class NativePilot(HeadVMLoss):
             head_ip=self.nodes[self.head]['ip'], support_ip=self.nodes[self.support]['ip'],
             replacement_ip=self.nodes[self.replacement]['ip'],
             executor_ips=[self.nodes[n]['ip'] for n in self.trainers],
+            gate_url='http://'+self.nodes[self.support]['ip']+':8765',
+            detection_config=self.detection_config,
             **workload)
         self._upload_json(cfg, folder+'/native-config.json')
+        self.service(self.support, GATE, [PYTHON, ROOT+'/native_gate.py', folder+'/native-config.json'])
+        health = ('from native_gate import request; print(request('+repr(cfg['gate_url'])+", 'health'))")
+        end = time.monotonic()+30
+        while True:
+            response = self.ssh(self.support, 'cd '+ROOT+' && '+PYTHON+' -c '+shlex.quote(health),
+                                check=False, timeout=10)
+            if response.returncode == 0:
+                break
+            if time.monotonic() > end:
+                raise RuntimeError('HTTP task gate failed: '+response.stderr)
+            time.sleep(.5)
+        for host in self.trainers:
+            self.ssh(host, 'cd '+ROOT+' && '+PYTHON+' -c '+shlex.quote(health), timeout=15)
         sample.update(native_config=config, before=identity,
             counters_before=self.counters(self.names), workload=cfg)
         sample['workload_dispatch_monotonic'] = time.monotonic()
@@ -223,6 +268,7 @@ class NativePilot(HeadVMLoss):
                     self._stop_vm(sample, save)
                     self._head_off()
                     restored = self.head_start(self.replacement, config, infrastructure)
+                    sample['replacement_direct_snapshot'] = restored
                     if any(restored[k] != before[k] for k in ('cluster_id', 'session')):
                         raise RuntimeError('Replacement changed GCS identity; endpoint not switched')
                     self.proxy(self.replacement)
@@ -245,7 +291,9 @@ class NativePilot(HeadVMLoss):
             sample['original_head_remained_off'] = True
             if sample.get('result', {}).get('correct') and 'resumed_monotonic' not in sample:
                 sample['failure_to_resumption_upper_bound_s'] = time.monotonic()-sample['stop_requested_monotonic']
-            sample['failure_to_completion_upper_bound_s'] = time.monotonic()-sample['stop_requested_monotonic']
+            sample['failure_to_outcome_upper_bound_s'] = time.monotonic()-sample['stop_requested_monotonic']
+            if sample.get('result', {}).get('correct'):
+                sample['failure_to_completion_upper_bound_s'] = sample['failure_to_outcome_upper_bound_s']
         sample['counters_after'] = self.counters([n for n in self.names if not (fault and n == self.head)])
         sample['missing_head_final_counters'] = fault
         save()
@@ -275,7 +323,8 @@ class NativePilot(HeadVMLoss):
         raise TimeoutError('Head termination unconfirmed')
 
     def run_pilot(self, name, budget_s=1680, *, tasks=16,
-                  payload_bytes=1024*1024, timeout_s=300, observations=None):
+                  payload_bytes=1024*1024, timeout_s=300, observations=None,
+                  keepalive_interval_ms=10000, keepalive_timeout_ms=10000):
         self._check_name(name)
         if not self.ready or not 60 <= budget_s <= 1680:
             raise ValueError('Prepare first; budget must be 60..1680 seconds')
@@ -283,6 +332,11 @@ class NativePilot(HeadVMLoss):
                 type(payload_bytes) is not int or not 8 <= payload_bytes <= 4*1024*1024 or
                 type(timeout_s) is not int or not 60 <= timeout_s <= 300):
             raise ValueError('Use 2..32 tasks, 8 bytes..4 MiB payloads, and 60..300 seconds')
+        if any(type(v) is not int or not 1000 <= v <= 15000
+               for v in (keepalive_interval_ms, keepalive_timeout_ms)):
+            raise ValueError('Diagnostic keepalive settings must be 1000..15000 ms')
+        self.detection_config = dict(grpc_client_keepalive_time_ms=keepalive_interval_ms,
+                                     grpc_client_keepalive_timeout_ms=keepalive_timeout_ms)
         if observations is None:
             observations = [
                 ('plain-healthy', False, False, False),
@@ -300,7 +354,8 @@ class NativePilot(HeadVMLoss):
         if len({row[0] for row in observations}) != len(observations):
             raise ValueError('Observation labels must be unique')
         workload = dict(tasks=tasks, payload_bytes=payload_bytes, timeout_s=timeout_s)
-        settings = dict(workload=workload, observations=observations)
+        settings = dict(workload=workload, observations=observations,
+                        detection_config=self.detection_config, gate='off-head-http-v1')
         for vm in self.names:
             self.describe(vm)  # Recheck ownership and instance IDs on every resume.
         directory = self.local / name
@@ -311,7 +366,7 @@ class NativePilot(HeadVMLoss):
             samples=[], failure_model='head VM stopped, disk inaccessible and never reattached',
             recovery='same GCS session via off-head Redis and stable TCP proxy; no job restart',
             topology=dict(head=self.head, replacement=self.replacement, support=self.support, executors=self.trainers),
-            extra_resources='one reserved replacement VM; Redis/proxy/NFS/driver share support VM',
+            extra_resources='one reserved replacement VM; Redis/proxy/HTTP gates/NFS/driver share support VM',
             environment=json.loads((self.local/'environment.json').read_text()),
             interpretation='single diagnostic replicate; not steady-state throughput or production HA')
         if not fresh and report.get('settings') != settings:
@@ -366,13 +421,18 @@ class NativePilot(HeadVMLoss):
                     # Unknown cloud/start outcomes must be inspected, not automatically retried.
                     raise
                 finally:
+                    self.capture_diagnostics(f'{SHARED}/{self.run_id}/{name}/{label}', sample)
                     save()
                 for vm in self.names:
                     if fault and vm == self.head:
                         continue
-                    log = self.ssh(vm, f'sudo journalctl -u {NODE_UNIT} -u {DRIVER_UNIT} '
-                        f'-u {REDIS} -u {PROXY} --no-pager -n 400', timeout=15)
-                    (directory/(label+'-'+vm+'.log')).write_text(log.stdout)
+                    try:
+                        log = self.ssh(vm, f'sudo journalctl -u {NODE_UNIT} -u {DRIVER_UNIT} '
+                            f'-u {REDIS} -u {PROXY} -u {GATE} --no-pager -n 400', timeout=15)
+                        (directory/(label+'-'+vm+'.log')).write_text(log.stdout)
+                    except Exception as exc:
+                        sample.setdefault('journal_errors', {})[vm] = str(exc)
+                    save()
                 print(label+': '+sample['status'], flush=True)
             report['finished_matrix'] = len(report['samples']) == len(observations) and all(r['status'] != 'running' for r in report['samples'])
         finally:
@@ -386,16 +446,18 @@ class NativePilot(HeadVMLoss):
                         self._stop_node(node)
                 except Exception as exc:
                     errors.append(str(exc))
-            for unit in (PROXY, REDIS):
+            for unit in (PROXY, REDIS, GATE):
                 try:
                     self.stop_service(self.support, unit)
                 except Exception as exc:
                     errors.append(str(exc))
             report['cleanup_errors'] = errors
             save()
-            if not errors:
-                self.ssh(self.support, 'sudo -u raybench rmdir '+LOCK)
-            self.deadline = None
+            try:
+                if not errors:
+                    self.ssh(self.support, 'sudo -u raybench rmdir '+LOCK)
+            finally:
+                self.deadline = None
         return report
 
 
@@ -403,7 +465,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['inventory', 'prepare', 'run', 'download'])
     parser.add_argument('--state', required=True)
-    parser.add_argument('--suite', default='native-head-v1')
+    parser.add_argument('--suite', default='native-head-v4')
     args = parser.parse_args()
     pilot = NativePilot(args.state)
     if args.action == 'inventory':

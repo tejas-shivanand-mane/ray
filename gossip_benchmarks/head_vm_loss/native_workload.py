@@ -6,29 +6,27 @@ from pathlib import Path
 import sys
 import time
 import traceback
+import uuid
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from evidence import write_json
+from native_gate import request
 
 
 @ray.remote(max_retries=2)
-def produce(index, folder, size, gate_timeout):
-    root = Path(folder)
-    # Separate per-attempt files avoid concurrent append races across NFS clients.
-    old = list(root.glob(f"start-{index}-*.json"))
-    token = f"{os.getpid()}-{time.time_ns()}"
-    write_json(root / f"start-{index}-{token}.json", dict(
-        index=index, pid=os.getpid(), node=ray.get_runtime_context().get_node_id(),
-        replay=bool(old), unix_s=time.time()))
-    if not old:
+def produce(index, gate_url, size, gate_timeout):
+    token = uuid.uuid4().hex
+    entry = request(gate_url, 'start', index=index, token=token, pid=os.getpid(),
+                    node=ray.get_runtime_context().get_node_id())
+    if not entry['replay']:
         deadline = time.monotonic() + gate_timeout
-        while not (root / f"release-{index}").exists():
+        while not request(gate_url, 'released', index=index)['released']:
             if time.monotonic() >= deadline:
                 raise TimeoutError("Original task gate stayed closed")
-            time.sleep(.05)
+            time.sleep(.1)
     value = index.to_bytes(8, "little") + bytes([index % 251]) * (size - 8)
-    write_json(root / f"finish-{index}-{token}.json", dict(index=index, unix_s=time.time()))
+    request(gate_url, 'finish', index=index, token=token)
     return value
 
 
@@ -39,7 +37,7 @@ class Owner:
         global_worker.core_worker.reset_recovery_succession_profile()
         self.refs = [produce.options(num_cpus=.1, scheduling_strategy=
             NodeAffinitySchedulingStrategy(executor, soft=False)).remote(
-                i, cfg['folder'], cfg['payload_bytes'], cfg['timeout_s'] * 2)
+                i, cfg['gate_url'], cfg['payload_bytes'], cfg['timeout_s'] * 2)
             for i in range(cfg['tasks'])]
         held = ray.get([b.hold.remote(self.refs) for b in borrowers])
         return [r.hex() for r in self.refs], held
@@ -82,6 +80,9 @@ def main(cfg):
                  log_to_driver=False)
         native = ray._private.state.state.get_system_config()
         result['observed_native_config'] = native
+        for key, value in cfg['detection_config'].items():
+            if native.get(key) != value:
+                raise RuntimeError('Failure-detection configuration mismatch: '+key)
         if (native.get('enable_recovery_succession') != cfg['enabled'] or
                 native.get('enable_recovery_witness_holder_baseline') != cfg['enabled']):
             raise RuntimeError('Running native configuration differs from requested arm')
@@ -127,7 +128,7 @@ def main(cfg):
             result['reads'].append(dict(index=i, elapsed_s=time.monotonic()-start))
             write_json(root / 'progress.json', result)
 
-        (root / 'release-0').touch()
+        request(cfg['gate_url'], 'release', index=0)
         consume(0)
         write_json(root / 'ready.json', dict(before=before, owner_profile=profile,
             elapsed_s=time.monotonic()-start, object_ids=ids))
@@ -139,7 +140,7 @@ def main(cfg):
         result['supervisor_gate_wait_s'] = time.monotonic()-wait_start
         if not cfg['fault']:
             for i in range(1, cfg['tasks']):
-                (root / f'release-{i}').touch()
+                request(cfg['gate_url'], 'release', index=i)
         for i in range(1, cfg['tasks']):
             consume(i)
         after = snapshot()
@@ -154,6 +155,13 @@ def main(cfg):
         if cfg['fault'] and (nodes[cfg['head_ip']] in alive or
                 not any(n['alive'] and n['ip'] == cfg['replacement_ip'] for n in after['nodes'])):
             raise ValueError('Head replacement not reflected in GCS')
+        if cfg['fault']:
+            for i in range(1, cfg['tasks']):
+                finishes = [json.loads(p.read_text()) for p in root.glob(f'finish-{i}-*.json')]
+                if not any(row.get('replay') for row in finishes):
+                    raise ValueError('Post-loss output lacks a completed replay: '+str(i))
+                if (root / f'release-{i}.json').exists():
+                    raise ValueError('Original task gate was released during fault observation')
         result.update(status='completed', correct=True)
     except Exception as exc:
         result.update(status='failed', error=str(exc), traceback=traceback.format_exc())

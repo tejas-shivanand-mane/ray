@@ -217,7 +217,7 @@ class HeadVMLoss:
         self.ssh(
             self.support,
             "set -e\nsudo apt-get update -qq\n"
-            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nfs-kernel-server\n"
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq nfs-kernel-server\n"
             f"sudo install -d -o raybench -g raybench {SHARED}\n",
             timeout=600,
         )

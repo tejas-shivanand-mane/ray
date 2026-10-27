@@ -1,4 +1,4 @@
-"""Bounded by its caller's SSH timeout; read-only identity/counter probes."""
+"""Bounded probes and native log collection; never starts or resets Ray."""
 import json
 import sys
 import time
@@ -12,8 +12,34 @@ def identity(address):
     if not session:
         raise RuntimeError('No session name yet')
     return dict(cluster_id=client.cluster_id.hex(), session=session.decode(),
-        nodes=[dict(id=nid.hex(), ip=n.node_manager_address, alive=n.state == 0)
+        nodes=[dict(id=nid.hex(), ip=n.node_manager_address, alive=n.state == 0,
+                    head=n.is_head_node)
                for nid, n in client.get_all_node_info(timeout=5).items()])
+
+
+def logs(destination):
+    from pathlib import Path
+    from evidence import write_json
+    target = Path(destination)
+    target.mkdir(parents=True, exist_ok=True)
+    source = Path('/tmp/ray/session_latest/logs').resolve()
+    candidates = sorted(set(p for pattern in ('raylet*', 'gcs_server*', 'python-core-worker*',
+        'python-core-driver*', 'worker-*.err') for p in source.glob(pattern) if p.is_file()))
+    manifest = dict(source=str(source), source_exists=source.is_dir(),
+                    files=[], limit_bytes_per_file=65536)
+    for path in candidates[:128]:
+        try:
+            with path.open('rb') as stream:
+                stream.seek(0, 2)
+                size = stream.tell()
+                stream.seek(max(0, size-65536))
+                (target/path.name).write_bytes(stream.read())
+            manifest['files'].append(dict(name=path.name, total_bytes=size))
+        except OSError as exc:
+            manifest['files'].append(dict(name=path.name, error=str(exc)))
+    manifest['omitted_files'] = max(0, len(candidates)-128)
+    write_json(target/'manifest.json', manifest)
+    return manifest
 
 
 def counters():
@@ -29,4 +55,12 @@ def counters():
 
 
 if __name__ == '__main__':
-    print(json.dumps(identity(sys.argv[2]) if sys.argv[1] == 'identity' else counters()))
+    if sys.argv[1] == 'identity':
+        result = identity(sys.argv[2])
+    elif sys.argv[1] == 'logs':
+        result = logs(sys.argv[2])
+    elif sys.argv[1] == 'counters':
+        result = counters()
+    else:
+        raise ValueError('Unknown probe operation')
+    print(json.dumps(result))

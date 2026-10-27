@@ -7,7 +7,10 @@ for a settings-first workflow matching `Selective_Replication_GCP`: visible VM
 creation/setup cells, direct `cloud.prepare()` and `cloud.run_pilot(...)` calls,
 and standalone plotting. No subprocess wrapper runs the experiment.
 Set `EXISTING_STATE_FILE` to reuse a cluster, or leave it `None` to prepare fresh
-VMs on the default network. Edit `TASKS`, `PAYLOAD_BYTES`,
+VMs on the default network. For a fresh cluster, pull main, restart the kernel,
+leave `EXISTING_STATE_FILE = None`, and run sections 1–6 and 8–10 in order.
+Skip reconnect section 7. Never reuse a run ID after deleting its VMs.
+Edit `TASKS`, `PAYLOAD_BYTES`, `KEEPALIVE_INTERVAL_MS`, `KEEPALIVE_TIMEOUT_MS`,
 `OBSERVATION_TIMEOUT_S`, `MAX_EXPERIMENT_MINUTES`, and `OBSERVATIONS` in the first
 cell. The runner records these settings and refuses changed settings on resume.
 Use a new suite name after this helper update or when changing workload/matrix.
@@ -46,7 +49,8 @@ The original selective and training notebooks are unchanged.
 | Borrowers / executor | w1/w2; original tasks on w1, hard-pinned there |
 | Native manifests/holders/witnesses | surviving raylets, R=2 W=2; aggregate admission evidence saved |
 | Inputs | deterministic scalar arguments in task specs; no `ray.put` |
-| Gates, attempt markers, evidence | w4-backed `/srv/ray-headloss` NFS |
+| Gate decisions / attempt registration | in-memory HTTP service on w4:8765, identical in all arms |
+| Attempt markers, evidence | written locally on w4, exported as `/srv/ray-headloss` NFS |
 | Checkpoints | none |
 
 The stopped head's persistent disk still exists in GCP, but is not read, mounted
@@ -78,15 +82,17 @@ Five observations, one replicate each:
 All arms reserve the same five VMs and use the same placements, inputs, gates and
 payloads. w3 is reserved capacity even when idle; w4 also supplies NFS and driver
 in the plain baseline. Thus the fifth arm estimates Redis/proxy *runtime* cost,
-not the monetary cost of reserving support/replacement capacity. Native profiling
+not the monetary cost of reserving support/replacement capacity. HTTP gate traffic
+and evidence writes are also instrumentation present in every arm. Native profiling
 is enabled in both arms; overhead includes instrumentation. No streaming/Data or
 TorchFT options are enabled. No assumption is made that ON succeeds or is faster.
 
 By default the owner exports 16 static-return normal task ObjectRefs directly to two
-borrowers. Original executions wait on per-object NFS gates. One is consumed;
+borrowers. Original executions poll per-object HTTP gates on w4. One is consumed;
 15 remain unfinished when the owner/head is lost. OFF and ON receive the same
 replacement GCS operation. Original gates stay closed in fault observations;
-replay attempts bypass the gate based on attempt markers. This intentionally
+replay attempts bypass the gate based on serialized registration in that surviving
+service. The gate does not store task outputs or implement Ray recovery. This intentionally
 forces recovery, adapted from benchmark 04. It is a **diagnostic workload with
 instrumentation**, not a realistic document-processing throughput benchmark.
 It cannot establish practical workload speedup. The actor itself is not recovered.
@@ -95,6 +101,30 @@ Correctness checks both borrowers' original ObjectIDs and full SHA-256 payloads,
 plus session/job/node continuity. ON requires aggregate completed witness RPCs
 before injection. This is not a per-task audit of the exact holder/witness VM
 placement. Native recovery success remains an empirical question.
+
+### Changes after the first failed loss observations
+
+Both earlier fault rows timed out while reading an original ObjectRef; neither
+showed replay starts. Slow owner RPC failure detection is a hypothesis, not an
+established cause. This revision uses 10,000 ms client keepalive interval and
+10,000 ms keepalive timeout, in every arm and every launched Ray process. These
+are also passed in the GCS system configuration and checked by the driver. This
+is a matched tuned baseline, not an unmodified-default Ray comparison. The
+borrower read remains bounded at 45 seconds and the observation at 300 seconds;
+the two keepalive settings are not a guaranteed end-to-end recovery deadline.
+
+HTTP gates remove NFS metadata caching from task release and attempt registration.
+The driver and controller still exchange evidence files locally on w4. The
+successful fault check additionally requires completed replay evidence for every
+remaining output, with original gates never released. Healthy comparisons still
+include diagnostic and startup costs, and cannot establish application benefit.
+
+Before reset, the runner captures final GCS membership and bounded native log tails
+from accessible VMs (64 KiB per file, at most 128 files per VM). These include
+core-worker, raylet, GCS and worker stderr logs under each row's `diagnostics/`.
+Missing/truncated logs are recorded; the stopped original head is never restarted
+to obtain its logs. Download the evidence before deleting the support VM.
+The old suite must not be resumed with these changed helpers; use `native-head-v4`.
 
 ## Run from your existing checkout
 
@@ -113,7 +143,7 @@ conda activate ray-dev
 export STATE_FILE=/absolute/path/to/your/rayexp-...-state.json
 python gossip_benchmarks/head_vm_loss/native_pilot.py inventory --state "$STATE_FILE"
 python gossip_benchmarks/head_vm_loss/native_pilot.py prepare --state "$STATE_FILE"
-python gossip_benchmarks/head_vm_loss/native_pilot.py run --state "$STATE_FILE" --suite native-head-v1
+python gossip_benchmarks/head_vm_loss/native_pilot.py run --state "$STATE_FILE" --suite native-head-v4
 ```
 
 Preparation installs Redis/socat and sets up surviving NFS; budget <=28 minutes.
@@ -130,11 +160,11 @@ successful completion. Unknown cloud/start outcomes abort and require inspection
 After completion, or to collect partial evidence without rerunning:
 
 ```bash
-python gossip_benchmarks/head_vm_loss/native_pilot.py download --state "$STATE_FILE" --suite native-head-v1
+python gossip_benchmarks/head_vm_loss/native_pilot.py download --state "$STATE_FILE" --suite native-head-v4
 # Replace RUN_ID with the run_id inside your state JSON.
 python gossip_benchmarks/head_vm_loss/native_report.py \
-  ray_gcp_results/head-vm-loss/RUN_ID/native-head-v1/native-report.json \
-  --plot ray_gcp_results/head-vm-loss/RUN_ID/native-head-v1/completion.png
+  ray_gcp_results/head-vm-loss/RUN_ID/native-head-v4/native-report.json \
+  --plot ray_gcp_results/head-vm-loss/RUN_ID/native-head-v4/completion.png
 ```
 
 The report resides on your notebook host; detailed gates/results and Redis AOF
