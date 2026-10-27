@@ -229,7 +229,8 @@ class HeadVMLoss:
         exports = shlex.quote(SHARED + " " + clients + "\n")
         self.ssh(
             self.support,
-            f"set -e\nprintf %s {exports} | sudo tee /etc/exports.d/ray-headloss.exports >/dev/null\n"
+            "set -e\nsudo install -d -m 755 /etc/exports.d\n"
+            f"printf %s {exports} | sudo tee /etc/exports.d/ray-headloss.exports >/dev/null\n"
             "sudo exportfs -ra\nsudo systemctl start nfs-server",
         )
 
